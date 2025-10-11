@@ -1,0 +1,68 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+
+# PyTorch
+*.pt
+*.pth
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Output directories
+model_out/
+output/
+test_output/
+logs/
+
+# Large data files
+*.csv.gz
+*.h5
+*.hdf5
+
+# Toy data files (too large for GitHub)
+toydata/SJ_counts.csv
+toydata/SpliZ_counts.csv
+toydata/spliZVD_z0.csv
+toydata/spliZVD_z1.csv
+toydata/spliZVD_z2.csv
+
+# R
+.Rhistory
+.RData
+.Rproj.user
