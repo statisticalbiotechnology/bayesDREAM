@@ -598,11 +598,21 @@ def process_sj_counts(sj_counts: pd.DataFrame,
     sj_meta_filtered : pd.DataFrame
         Filtered SJ metadata
     """
-    # Validate gene_counts columns match sj_counts columns
-    if not all(col in gene_counts.columns for col in sj_counts.columns):
-        raise ValueError("gene_counts must have the same cells (columns) as sj_counts")
+    # Find overlapping cells between sj_counts and gene_counts
+    common_cells = [c for c in sj_counts.columns if c in gene_counts.columns]
 
-    idx = _build_sj_index(sj_counts, sj_meta)
+    if len(common_cells) == 0:
+        raise ValueError("No overlapping cells between sj_counts and gene_counts")
+
+    # Subset sj_counts to common cells
+    sj_counts_subset = sj_counts[common_cells].copy()
+
+    # Check for cells in sj_counts but not in gene_counts (informational)
+    extra_cells = set(sj_counts.columns) - set(gene_counts.columns)
+    if extra_cells:
+        print(f"[INFO] {len(extra_cells)} cell(s) in sj_counts are not in gene_counts and will be excluded")
+
+    idx = _build_sj_index(sj_counts_subset, sj_meta)
 
     # Assign each SJ to a gene identifier (name or ID)
     # Prefer gene_name_start, fall back to gene_name_end
@@ -624,7 +634,10 @@ def process_sj_counts(sj_counts: pd.DataFrame,
         raise ValueError("No splice junctions with gene annotations found")
 
     # Filter SJ counts to these junctions
-    sj_filtered = sj_counts.loc[idx['coord.intron']].copy()
+    sj_filtered = sj_counts_subset.loc[idx['coord.intron']].copy()
+
+    # Subset gene_counts to common cells
+    gene_counts_subset = gene_counts[common_cells].copy()
 
     # Build denominator: for each SJ, get the corresponding gene count
     gene_denom = pd.DataFrame(
@@ -636,8 +649,8 @@ def process_sj_counts(sj_counts: pd.DataFrame,
     for sj_id, row in idx.iterrows():
         gene = row['gene']
         # Try to find gene in gene_counts by name or ID
-        if gene in gene_counts.index:
-            gene_denom.loc[row['coord.intron']] = gene_counts.loc[gene].values
+        if gene in gene_counts_subset.index:
+            gene_denom.loc[row['coord.intron']] = gene_counts_subset.loc[gene].values
         else:
             # If not found, try alternate identifier
             # If we have a name, try finding by ID (and vice versa)
@@ -647,8 +660,8 @@ def process_sj_counts(sj_counts: pd.DataFrame,
                 for gene_col in ['gene_name_start', 'gene_name_end', 'gene_id_start', 'gene_id_end']:
                     if gene_col in row.index and pd.notna(row[gene_col]):
                         alt_gene = row[gene_col]
-                        if alt_gene in gene_counts.index:
-                            gene_denom.loc[row['coord.intron']] = gene_counts.loc[alt_gene].values
+                        if alt_gene in gene_counts_subset.index:
+                            gene_denom.loc[row['coord.intron']] = gene_counts_subset.loc[alt_gene].values
                             found = True
                             break
 

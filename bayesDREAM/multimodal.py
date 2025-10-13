@@ -336,9 +336,25 @@ class MultiModalBayesDREAM(bayesDREAM):
         else:
             gene_counts_to_use = gene_counts
 
+        # Subset sj_counts to valid cells (cells in model.meta)
+        # Allow sj_counts to have extra cells (will be discarded)
+        # Also allow sj_counts to be missing some cells (that's OK)
+        valid_cells = self.meta['cell'].tolist()
+        sj_cells = sj_counts.columns.tolist()
+        common_sj_cells = [c for c in sj_cells if c in valid_cells]
+
+        if len(common_sj_cells) == 0:
+            raise ValueError("No overlapping cells between sj_counts and model cells")
+
+        if len(common_sj_cells) < len(sj_cells):
+            print(f"[INFO] Subsetting sj_counts from {len(sj_cells)} to {len(common_sj_cells)} cells to match model")
+            sj_counts_subset = sj_counts[common_sj_cells].copy()
+        else:
+            sj_counts_subset = sj_counts
+
         for stype in splicing_types:
             modality = create_splicing_modality(
-                sj_counts=sj_counts,
+                sj_counts=sj_counts_subset,
                 sj_meta=sj_meta,
                 splicing_type=stype,
                 gene_counts=gene_counts_to_use,
