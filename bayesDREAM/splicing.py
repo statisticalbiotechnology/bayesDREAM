@@ -582,10 +582,94 @@ def process_exon_skipping(sj_counts: pd.DataFrame,
     return inclusion_counts, total_counts, trips, cell_names
 
 
+def process_sj_counts(sj_counts: pd.DataFrame,
+                      sj_meta: pd.DataFrame,
+                      gene_counts: Optional[pd.DataFrame] = None,
+                      gene_of_interest: Optional[str] = None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Process raw SJ counts for binomial modality.
+
+    Creates binomial modality where:
+    - Numerator: SJ counts
+    - Denominator: Gene-level counts (either SJ-specific or from primary gene counts)
+
+    Only includes SJs that map to genes.
+
+    Parameters
+    ----------
+    sj_counts : pd.DataFrame
+        Splice junction counts (junctions × cells)
+    sj_meta : pd.DataFrame
+        Junction metadata with: coord.intron, chrom, intron_start, intron_end, strand
+        Should also have gene columns (e.g., 'gene_short_name.start', 'gene_short_name.end')
+    gene_counts : pd.DataFrame, optional
+        Gene-level counts to use as denominator. If None, must be provided later.
+    gene_of_interest : str, optional
+        Filter to specific gene
+
+    Returns
+    -------
+    sj_counts_filtered : pd.DataFrame
+        Filtered SJ counts (junctions × cells)
+    gene_counts_denom : pd.DataFrame
+        Gene counts for denominator (junctions × cells), same shape as sj_counts_filtered
+    sj_meta_filtered : pd.DataFrame
+        Filtered SJ metadata
+    """
+    idx = _build_sj_index(sj_counts, sj_meta, gene_of_interest)
+
+    # Find gene columns in metadata
+    gene_cols = [c for c in idx.columns if 'gene' in c.lower() and 'short_name' in c.lower()]
+
+    if not gene_cols:
+        raise ValueError("sj_meta must have gene annotation columns (e.g., 'gene_short_name.start', 'gene_short_name.end')")
+
+    # Assign each SJ to a gene (prefer .start, fall back to .end)
+    if 'gene_short_name.start' in gene_cols:
+        idx['gene'] = idx['gene_short_name.start']
+    elif 'gene_short_name.end' in gene_cols:
+        idx['gene'] = idx['gene_short_name.end']
+    else:
+        idx['gene'] = idx[gene_cols[0]]
+
+    # Remove SJs without gene assignment
+    idx = idx[idx['gene'].notna()].copy()
+
+    if len(idx) == 0:
+        raise ValueError("No splice junctions with gene annotations found")
+
+    # Filter SJ counts to these junctions
+    sj_filtered = sj_counts.loc[idx['coord.intron']].copy()
+
+    # Build denominator
+    if gene_counts is not None:
+        # Use provided gene counts
+        # For each SJ, get the corresponding gene count
+        gene_denom = pd.DataFrame(
+            index=sj_filtered.index,
+            columns=sj_filtered.columns,
+            dtype=float
+        )
+
+        for sj_id, row in idx.iterrows():
+            gene = row['gene']
+            if gene in gene_counts.index:
+                gene_denom.loc[row['coord.intron']] = gene_counts.loc[gene].values
+            else:
+                # Gene not found, set to 0 (or could raise warning)
+                gene_denom.loc[row['coord.intron']] = 0
+    else:
+        # Denominator will be set later (return None for now)
+        gene_denom = None
+
+    return sj_filtered, gene_denom, idx
+
+
 def create_splicing_modality(sj_counts: pd.DataFrame,
                              sj_meta: pd.DataFrame,
                              splicing_type: str,
                              gene_of_interest: Optional[str] = None,
+                             gene_counts: Optional[pd.DataFrame] = None,
                              min_cell_total: int = 1,
                              min_total_exon: int = 2,
                              **kwargs) -> Modality:
@@ -599,9 +683,11 @@ def create_splicing_modality(sj_counts: pd.DataFrame,
     sj_meta : pd.DataFrame
         Junction metadata with: coord.intron, chrom, intron_start, intron_end, strand
     splicing_type : str
-        Type of splicing metric: 'donor', 'acceptor', or 'exon_skip'
+        Type of splicing metric: 'sj', 'donor', 'acceptor', or 'exon_skip'
     gene_of_interest : str, optional
         Filter to specific gene
+    gene_counts : pd.DataFrame, optional
+        Gene counts for 'sj' type denominator (genes × cells)
     min_cell_total : int
         Minimum reads for donor/acceptor usage
     min_total_exon : int
@@ -614,17 +700,36 @@ def create_splicing_modality(sj_counts: pd.DataFrame,
     Modality
         Modality object with appropriate distribution and metadata
     """
-    if splicing_type == 'donor':
+    if splicing_type == 'sj':
+        # Raw SJ counts as binomial with gene counts as denominator
+        sj_filtered, gene_denom, sj_meta_filtered = process_sj_counts(
+            sj_counts, sj_meta, gene_counts, gene_of_interest
+        )
+
+        if gene_denom is None:
+            raise ValueError("gene_counts must be provided for splicing_type='sj'")
+
+        return Modality(
+            name='splicing_sj',
+            counts=sj_filtered,
+            feature_meta=sj_meta_filtered,
+            distribution='binomial',
+            denominator=gene_denom.values,
+            cells_axis=1
+        )
+
+    elif splicing_type == 'donor':
         counts_3d, feature_meta, cell_names = process_donor_usage(
             sj_counts, sj_meta, gene_of_interest, min_cell_total
         )
+        # Convert to DataFrame to preserve cell names
+        # For multinomial, we can't use DataFrame directly, so we'll store metadata separately
         return Modality(
             name='splicing_donor',
             counts=counts_3d,
             feature_meta=feature_meta,
             distribution='multinomial',
-            cells_axis=1,
-            cell_names=cell_names
+            cells_axis=1
         )
 
     elif splicing_type == 'acceptor':
@@ -636,8 +741,7 @@ def create_splicing_modality(sj_counts: pd.DataFrame,
             counts=counts_3d,
             feature_meta=feature_meta,
             distribution='multinomial',
-            cells_axis=1,
-            cell_names=cell_names
+            cells_axis=1
         )
 
     elif splicing_type == 'exon_skip':
@@ -653,9 +757,8 @@ def create_splicing_modality(sj_counts: pd.DataFrame,
             feature_meta=feature_meta,
             distribution='binomial',
             denominator=tot_counts,
-            cells_axis=1,
-            cell_names=cell_names
+            cells_axis=1
         )
 
     else:
-        raise ValueError(f"splicing_type must be 'donor', 'acceptor', or 'exon_skip', got: {splicing_type}")
+        raise ValueError(f"splicing_type must be 'sj', 'donor', 'acceptor', or 'exon_skip', got: {splicing_type}")
