@@ -39,8 +39,7 @@ def _normalize_strand(strand_values):
 
 
 def _build_sj_index(sj_counts: pd.DataFrame,
-                    sj_meta: pd.DataFrame,
-                    gene_of_interest: str) -> pd.DataFrame:
+                    sj_meta: pd.DataFrame) -> pd.DataFrame:
     """
     Build splice junction index with donor/acceptor annotations.
 
@@ -49,10 +48,9 @@ def _build_sj_index(sj_counts: pd.DataFrame,
     sj_counts : pd.DataFrame
         Splice junction counts (junctions × cells)
     sj_meta : pd.DataFrame
-        Junction metadata with: coord.intron, chrom, intron_start, intron_end, strand,
-        gene_name_start, gene_name_end
-    gene_of_interest : str
-        Filter to specific gene (required)
+        Junction metadata with required columns: coord.intron, chrom, intron_start,
+        intron_end, strand, gene_name_start, gene_name_end
+        Optional columns: gene_id_start, gene_id_end (for Ensembl ID support)
 
     Returns
     -------
@@ -65,6 +63,12 @@ def _build_sj_index(sj_counts: pd.DataFrame,
     missing = [c for c in required if c not in sj_meta.columns]
     if missing:
         raise ValueError(f"sj_meta missing required columns: {missing}")
+
+    # Optional columns for Ensembl ID support
+    optional = ['gene_id_start', 'gene_id_end']
+    has_optional = all(c in sj_meta.columns for c in optional)
+    if has_optional:
+        print(f"[INFO] Found gene_id columns - will support both gene names and Ensembl IDs")
 
     # Copy and prepare
     idx = sj_meta.copy()
@@ -80,13 +84,6 @@ def _build_sj_index(sj_counts: pd.DataFrame,
     idx['left'] = np.minimum(idx['start'], idx['end'])
     idx['right'] = np.maximum(idx['start'], idx['end'])
 
-    # Filter to gene of interest (required)
-    mask = (idx['gene_name_start'] == gene_of_interest) | (idx['gene_name_end'] == gene_of_interest)
-    idx = idx[mask].copy()
-
-    if len(idx) == 0:
-        raise ValueError(f"No splice junctions found for gene: {gene_of_interest}")
-
     # Keep only junctions present in counts matrix
     present = sj_counts.index.tolist()
     idx = idx[idx['coord.intron'].isin(present)].copy()
@@ -99,7 +96,6 @@ def _build_sj_index(sj_counts: pd.DataFrame,
 
 def process_donor_usage(sj_counts: pd.DataFrame,
                        sj_meta: pd.DataFrame,
-                       gene_of_interest: str,
                        min_cell_total: int = 1) -> Tuple[np.ndarray, pd.DataFrame, List[str]]:
     """
     Compute donor usage (which acceptor is used for each donor site).
@@ -114,8 +110,6 @@ def process_donor_usage(sj_counts: pd.DataFrame,
     sj_meta : pd.DataFrame
         Junction metadata with required columns: coord.intron, chrom, intron_start,
         intron_end, strand, gene_name_start, gene_name_end
-    gene_of_interest : str
-        Filter to specific gene (required)
     min_cell_total : int
         Minimum total reads per donor per cell to include
 
@@ -128,7 +122,7 @@ def process_donor_usage(sj_counts: pd.DataFrame,
     cell_names : list
         Cell identifiers
     """
-    idx = _build_sj_index(sj_counts, sj_meta, gene_of_interest)
+    idx = _build_sj_index(sj_counts, sj_meta)
 
     # Group by (chrom, strand, donor)
     donor_groups = idx.groupby(['chrom', 'strand', 'donor'], sort=True)
@@ -194,7 +188,6 @@ def process_donor_usage(sj_counts: pd.DataFrame,
 
 def process_acceptor_usage(sj_counts: pd.DataFrame,
                            sj_meta: pd.DataFrame,
-                           gene_of_interest: str,
                            min_cell_total: int = 1) -> Tuple[np.ndarray, pd.DataFrame, List[str]]:
     """
     Compute acceptor usage (which donor is used for each acceptor site).
@@ -209,8 +202,6 @@ def process_acceptor_usage(sj_counts: pd.DataFrame,
     sj_meta : pd.DataFrame
         Junction metadata with required columns: coord.intron, chrom, intron_start,
         intron_end, strand, gene_name_start, gene_name_end
-    gene_of_interest : str
-        Filter to specific gene (required)
     min_cell_total : int
         Minimum total reads per acceptor per cell to include
 
@@ -223,7 +214,7 @@ def process_acceptor_usage(sj_counts: pd.DataFrame,
     cell_names : list
         Cell identifiers
     """
-    idx = _build_sj_index(sj_counts, sj_meta, gene_of_interest)
+    idx = _build_sj_index(sj_counts, sj_meta)
 
     # Group by (chrom, strand, acceptor)
     acceptor_groups = idx.groupby(['chrom', 'strand', 'acceptor'], sort=True)
@@ -288,8 +279,7 @@ def process_acceptor_usage(sj_counts: pd.DataFrame,
 
 
 def _find_cassette_triplets_strand(sj_counts: pd.DataFrame,
-                                   sj_meta: pd.DataFrame,
-                                   gene_of_interest: str) -> pd.DataFrame:
+                                   sj_meta: pd.DataFrame) -> pd.DataFrame:
     """
     Find cassette exon triplets using strand-aware coordinates.
 
@@ -307,7 +297,7 @@ def _find_cassette_triplets_strand(sj_counts: pd.DataFrame,
     pd.DataFrame
         Columns: trip_id, chrom, strand, d1, a2, d2, a3, sj_inc1, sj_inc2, sj_skip
     """
-    idx = _build_sj_index(sj_counts, sj_meta, gene_of_interest)
+    idx = _build_sj_index(sj_counts, sj_meta)
 
     # Keep only clean junctions
     idx = idx[idx['strand'].notna() & idx['donor'].notna() & idx['acceptor'].notna()].copy()
@@ -393,8 +383,7 @@ def _find_cassette_triplets_strand(sj_counts: pd.DataFrame,
 
 
 def _find_cassette_triplets_genomic(sj_counts: pd.DataFrame,
-                                    sj_meta: pd.DataFrame,
-                                    gene_of_interest: str) -> pd.DataFrame:
+                                    sj_meta: pd.DataFrame) -> pd.DataFrame:
     """
     Find cassette exon triplets using genomic coordinates (fallback when strand info is poor).
 
@@ -406,7 +395,7 @@ def _find_cassette_triplets_genomic(sj_counts: pd.DataFrame,
     pd.DataFrame
         Columns: trip_id, chrom, strand, d1, a2, d2, a3, sj_inc1, sj_inc2, sj_skip
     """
-    idx = _build_sj_index(sj_counts, sj_meta, gene_of_interest)
+    idx = _build_sj_index(sj_counts, sj_meta)
 
     # Keep only clean junctions
     idx = idx[idx['left'].notna() & idx['right'].notna()].copy()
@@ -478,7 +467,6 @@ def _find_cassette_triplets_genomic(sj_counts: pd.DataFrame,
 
 def process_exon_skipping(sj_counts: pd.DataFrame,
                          sj_meta: pd.DataFrame,
-                         gene_of_interest: str,
                          min_total_exon: int = 2,
                          method: str = 'min',
                          fallback_genomic: bool = True) -> Tuple[np.ndarray, np.ndarray, pd.DataFrame, List[str]]:
@@ -498,8 +486,6 @@ def process_exon_skipping(sj_counts: pd.DataFrame,
     sj_meta : pd.DataFrame
         Junction metadata with required columns: coord.intron, chrom, intron_start,
         intron_end, strand, gene_name_start, gene_name_end
-    gene_of_interest : str
-        Filter to specific gene (required)
     min_total_exon : int
         Minimum total reads per event per cell
     method : str
@@ -519,11 +505,11 @@ def process_exon_skipping(sj_counts: pd.DataFrame,
         Cell identifiers
     """
     # Find cassette triplets
-    trips = _find_cassette_triplets_strand(sj_counts, sj_meta, gene_of_interest)
+    trips = _find_cassette_triplets_strand(sj_counts, sj_meta)
 
     if len(trips) == 0 and fallback_genomic:
         print("[INFO] No strand-aware cassette exons found, trying genomic coordinates...")
-        trips = _find_cassette_triplets_genomic(sj_counts, sj_meta, gene_of_interest)
+        trips = _find_cassette_triplets_genomic(sj_counts, sj_meta)
 
     if len(trips) == 0:
         # Return empty arrays
@@ -582,8 +568,7 @@ def process_exon_skipping(sj_counts: pd.DataFrame,
 
 def process_sj_counts(sj_counts: pd.DataFrame,
                       sj_meta: pd.DataFrame,
-                      gene_counts: pd.DataFrame,
-                      gene_of_interest: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+                      gene_counts: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Process raw SJ counts for binomial modality.
 
@@ -600,10 +585,9 @@ def process_sj_counts(sj_counts: pd.DataFrame,
     sj_meta : pd.DataFrame
         Junction metadata with required columns: coord.intron, chrom, intron_start,
         intron_end, strand, gene_name_start, gene_name_end
+        Optional columns: gene_id_start, gene_id_end (for Ensembl ID support)
     gene_counts : pd.DataFrame
         Gene-level counts to use as denominator (genes × cells)
-    gene_of_interest : str
-        Filter to specific gene (required)
 
     Returns
     -------
@@ -618,16 +602,26 @@ def process_sj_counts(sj_counts: pd.DataFrame,
     if not all(col in gene_counts.columns for col in sj_counts.columns):
         raise ValueError("gene_counts must have the same cells (columns) as sj_counts")
 
-    idx = _build_sj_index(sj_counts, sj_meta, gene_of_interest)
+    idx = _build_sj_index(sj_counts, sj_meta)
 
-    # Assign each SJ to a gene (prefer gene_name_start, fall back to gene_name_end)
-    idx['gene'] = idx['gene_name_start'].fillna(idx['gene_name_end'])
+    # Assign each SJ to a gene identifier (name or ID)
+    # Prefer gene_name_start, fall back to gene_name_end
+    # But if gene_id columns exist and names are missing, use IDs
+    has_gene_id = 'gene_id_start' in idx.columns and 'gene_id_end' in idx.columns
+
+    if has_gene_id:
+        # Try gene names first, fall back to IDs
+        idx['gene'] = idx['gene_name_start'].fillna(idx['gene_name_end']).fillna(
+            idx['gene_id_start']).fillna(idx['gene_id_end'])
+    else:
+        # Only gene names available
+        idx['gene'] = idx['gene_name_start'].fillna(idx['gene_name_end'])
 
     # Remove SJs without gene assignment
     idx = idx[idx['gene'].notna()].copy()
 
     if len(idx) == 0:
-        raise ValueError(f"No splice junctions with gene annotations found for gene: {gene_of_interest}")
+        raise ValueError("No splice junctions with gene annotations found")
 
     # Filter SJ counts to these junctions
     sj_filtered = sj_counts.loc[idx['coord.intron']].copy()
@@ -641,12 +635,27 @@ def process_sj_counts(sj_counts: pd.DataFrame,
 
     for sj_id, row in idx.iterrows():
         gene = row['gene']
+        # Try to find gene in gene_counts by name or ID
         if gene in gene_counts.index:
             gene_denom.loc[row['coord.intron']] = gene_counts.loc[gene].values
         else:
-            # Gene not found in gene_counts
-            warnings.warn(f"Gene '{gene}' for SJ '{row['coord.intron']}' not found in gene_counts. Setting denominator to 0.")
-            gene_denom.loc[row['coord.intron']] = 0
+            # If not found, try alternate identifier
+            # If we have a name, try finding by ID (and vice versa)
+            found = False
+            if has_gene_id:
+                # Try all possible gene identifiers for this SJ
+                for gene_col in ['gene_name_start', 'gene_name_end', 'gene_id_start', 'gene_id_end']:
+                    if gene_col in row.index and pd.notna(row[gene_col]):
+                        alt_gene = row[gene_col]
+                        if alt_gene in gene_counts.index:
+                            gene_denom.loc[row['coord.intron']] = gene_counts.loc[alt_gene].values
+                            found = True
+                            break
+
+            if not found:
+                # Gene not found in gene_counts
+                warnings.warn(f"Gene '{gene}' for SJ '{row['coord.intron']}' not found in gene_counts. Setting denominator to 0.")
+                gene_denom.loc[row['coord.intron']] = 0
 
     return sj_filtered, gene_denom, idx
 
@@ -654,7 +663,6 @@ def process_sj_counts(sj_counts: pd.DataFrame,
 def create_splicing_modality(sj_counts: pd.DataFrame,
                              sj_meta: pd.DataFrame,
                              splicing_type: str,
-                             gene_of_interest: str,
                              gene_counts: pd.DataFrame,
                              min_cell_total: int = 1,
                              min_total_exon: int = 2,
@@ -671,8 +679,6 @@ def create_splicing_modality(sj_counts: pd.DataFrame,
         intron_end, strand, gene_name_start, gene_name_end
     splicing_type : str
         Type of splicing metric: 'sj', 'donor', 'acceptor', or 'exon_skip'
-    gene_of_interest : str
-        Filter to specific gene (required)
     gene_counts : pd.DataFrame
         Gene counts for 'sj' type denominator (genes × cells). Required for all types.
     min_cell_total : int
@@ -690,7 +696,7 @@ def create_splicing_modality(sj_counts: pd.DataFrame,
     if splicing_type == 'sj':
         # Raw SJ counts as binomial with gene counts as denominator
         sj_filtered, gene_denom, sj_meta_filtered = process_sj_counts(
-            sj_counts, sj_meta, gene_counts, gene_of_interest
+            sj_counts, sj_meta, gene_counts
         )
 
         return Modality(
@@ -704,7 +710,7 @@ def create_splicing_modality(sj_counts: pd.DataFrame,
 
     elif splicing_type == 'donor':
         counts_3d, feature_meta, cell_names = process_donor_usage(
-            sj_counts, sj_meta, gene_of_interest, min_cell_total
+            sj_counts, sj_meta, min_cell_total
         )
         # Convert to DataFrame to preserve cell names
         # For multinomial, we can't use DataFrame directly, so we'll store metadata separately
@@ -718,7 +724,7 @@ def create_splicing_modality(sj_counts: pd.DataFrame,
 
     elif splicing_type == 'acceptor':
         counts_3d, feature_meta, cell_names = process_acceptor_usage(
-            sj_counts, sj_meta, gene_of_interest, min_cell_total
+            sj_counts, sj_meta, min_cell_total
         )
         return Modality(
             name='splicing_acceptor',
@@ -733,7 +739,7 @@ def create_splicing_modality(sj_counts: pd.DataFrame,
         fallback_genomic = kwargs.get('fallback_genomic', True)
 
         inc_counts, tot_counts, feature_meta, cell_names = process_exon_skipping(
-            sj_counts, sj_meta, gene_of_interest, min_total_exon, method, fallback_genomic
+            sj_counts, sj_meta, min_total_exon, method, fallback_genomic
         )
         return Modality(
             name='splicing_exon_skip',

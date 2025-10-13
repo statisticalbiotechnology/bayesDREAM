@@ -298,7 +298,6 @@ class MultiModalBayesDREAM(bayesDREAM):
         self,
         sj_counts: pd.DataFrame,
         sj_meta: pd.DataFrame,
-        gene_of_interest: str,
         splicing_types: Union[str, List[str]] = ['donor', 'acceptor', 'exon_skip'],
         gene_counts: Optional[pd.DataFrame] = None,
         min_cell_total: int = 1,
@@ -314,8 +313,7 @@ class MultiModalBayesDREAM(bayesDREAM):
         sj_meta : pd.DataFrame
             Junction metadata with required columns: coord.intron, chrom, intron_start,
             intron_end, strand, gene_name_start, gene_name_end
-        gene_of_interest : str
-            Filter to specific gene (required)
+            Optional columns: gene_id_start, gene_id_end (for Ensembl ID support)
         splicing_types : str or list
             Which splicing metrics to compute: 'sj', 'donor', 'acceptor', 'exon_skip', or list
         gene_counts : pd.DataFrame, optional
@@ -343,7 +341,6 @@ class MultiModalBayesDREAM(bayesDREAM):
                 sj_counts=sj_counts,
                 sj_meta=sj_meta,
                 splicing_type=stype,
-                gene_of_interest=gene_of_interest,
                 gene_counts=gene_counts_to_use,
                 min_cell_total=min_cell_total,
                 min_total_exon=min_total_exon

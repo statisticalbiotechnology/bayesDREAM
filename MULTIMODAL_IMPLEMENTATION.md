@@ -20,22 +20,23 @@ I've successfully extended bayesDREAM to support multiple molecular modalities w
 - Methods for subsetting by features or cells
 - Validation of data shapes and distribution requirements
 
-### 2. `bayesDREAM/splicing.py` (407 lines)
-**Purpose**: Process splice junction data using R functions from CodeDump.R
+### 2. `bayesDREAM/splicing.py` (~750 lines)
+**Purpose**: Process splice junction data with pure Python implementations
 
 **Key Functions**:
-- `run_r_splicing_function()`: Wrapper to call R functions with temporary file exchange
+- `process_sj_counts()`: Raw SJ counts with gene expression denominator → binomial modality
 - `process_donor_usage()`: Compute donor site usage → 3D multinomial array
 - `process_acceptor_usage()`: Compute acceptor site usage → 3D multinomial array
 - `process_exon_skipping()`: Detect cassette exons → 2D binomial (inclusion/total)
 - `create_splicing_modality()`: High-level function returning ready-to-use Modality objects
+- `_build_sj_index()`: Builds junction index with donor/acceptor annotations
+- `_find_cassette_triplets_strand()`: Finds cassette exons using strand-aware coordinates
+- `_find_cassette_triplets_genomic()`: Finds cassette exons using genomic coordinates (fallback)
 
-**R Integration**:
-- Calls functions from `splicing code/CodeDump.R`:
-  - `psi_donor_usage_strand()`
-  - `psi_acceptor_usage_strand()`
-  - `psi_exon_skipping_strand()`
-- Handles data conversion between Python/R via CSV files in temporary directory
+**No R Dependencies**:
+- Pure Python/NumPy/pandas implementation
+- No subprocess calls or R integration required
+- Fully self-contained splicing analysis
 
 ### 3. `bayesDREAM/multimodal.py` (371 lines)
 **Purpose**: Multi-modal wrapper extending the base bayesDREAM class
@@ -125,11 +126,24 @@ Input Data
 |--------------|-----------|------------------|-------------|
 | `negbinom` | 2D: (features, cells) | Gene counts, transcript counts | No |
 | `multinomial` | 3D: (features, cells, categories) | Isoform usage, donor usage | No |
-| `binomial` | 2D: (features, cells) | Exon skipping PSI | Yes (2D) |
+| `binomial` | 2D: (features, cells) | Raw SJ counts, Exon skipping PSI | Yes (2D) |
 | `normal` | 2D: (features, cells) | SpliZ scores | No |
 | `mvnormal` | 3D: (features, cells, dims) | SpliZVD (z0, z1, z2) | No |
 
 ### Splicing Data Structures
+
+**Raw SJ Counts** (binomial):
+```python
+# Shape: (n_junctions, n_cells)
+# Numerator: SJ read counts
+# Denominator: Gene expression (matched by gene annotation)
+# Example: sj_counts[10, 5] = junction 10 reads in cell 5
+#          gene_denom[10, 5] = gene expression for junction 10's gene in cell 5
+
+feature_meta:
+  - All SJ metadata columns (coord.intron, chrom, strand, positions, etc.)
+  - gene: Assigned gene identifier (from gene_name_start/end or gene_id_start/end)
+```
 
 **Donor Usage** (multinomial):
 ```python
@@ -185,14 +199,15 @@ feature_meta:
 - Clear API for subsetting and manipulation
 - Extensible for future features (e.g., modality-specific transformations)
 
-### 3. R Integration via Subprocess
-**Decision**: Call R functions via subprocess with temporary file exchange
+### 3. Pure Python Splicing Implementation
+**Decision**: Implement splicing analysis entirely in Python (NumPy/pandas)
 
 **Rationale**:
-- Leverages existing, tested R code from CodeDump.R
-- No need to reimplement complex splicing logic in Python
-- Clean separation of concerns
-- Future: could optimize with rpy2 if performance critical
+- No R dependency simplifies installation and deployment
+- Better performance (no subprocess overhead)
+- Easier to debug and maintain
+- Full control over data flow and validation
+- Can leverage Python's rich data science ecosystem
 
 ### 4. Distribution-Aware Storage
 **Decision**: Store distribution type and validate data shapes
@@ -222,8 +237,6 @@ feature_meta:
 
 3. **Sum factor normalization**: Only calculated for gene counts. Other modalities may need different normalization strategies.
 
-4. **R dependency**: Splicing functions require R and data.table package.
-
 ### Future Enhancements
 
 1. **Modality-specific models**:
@@ -242,9 +255,9 @@ feature_meta:
    - VST or arcsinh transforms for continuous data
 
 4. **Performance**:
-   - Replace subprocess R calls with rpy2 for efficiency
    - Option to cache splicing metrics
    - Parallel processing of multiple modalities
+   - Optimize cassette exon detection for large datasets
 
 ## Usage Examples
 
@@ -282,12 +295,11 @@ model.add_transcript_modality(
     use_isoform_usage=True
 )
 
-# Add all splicing modalities
+# Add all splicing modalities (including raw SJ counts)
 model.add_splicing_modality(
     sj_counts=sj_counts,
     sj_meta=sj_meta,
-    splicing_types=['donor', 'acceptor', 'exon_skip'],
-    gene_of_interest='GFI1B'
+    splicing_types=['sj', 'donor', 'acceptor', 'exon_skip']
 )
 
 # Add SpliZ and SpliZVD
@@ -346,7 +358,11 @@ model = MultiModalBayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B')
 ```python
 from bayesDREAM import MultiModalBayesDREAM
 model = MultiModalBayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B')
-model.add_splicing_modality(sj_counts, sj_meta, ['donor', 'acceptor'])
+model.add_splicing_modality(
+    sj_counts=sj_counts,
+    sj_meta=sj_meta,
+    splicing_types=['sj', 'donor', 'acceptor']
+)
 ```
 
 All existing pipeline scripts (run_technical.py, run_cis.py, run_trans.py) continue to work unchanged with the base `bayesDREAM` class. New scripts can optionally use `MultiModalBayesDREAM` for multi-modal data storage and future multi-modal modeling.

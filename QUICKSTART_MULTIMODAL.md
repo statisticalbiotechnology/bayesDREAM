@@ -65,8 +65,7 @@ model = MultiModalBayesDREAM(
 model.add_splicing_modality(
     sj_counts=sj_counts,
     sj_meta=sj_meta,
-    splicing_types=['donor', 'acceptor', 'exon_skip'],
-    gene_of_interest='GFI1B',
+    splicing_types=['sj', 'donor', 'acceptor', 'exon_skip'],
     min_cell_total=1,
     min_total_exon=2
 )
@@ -76,9 +75,10 @@ print(model.list_modalities())
 # Output:
 #   modality           distribution  n_features  n_cells  n_categories  is_primary
 # 0 gene               negbinom      1000        500      NaN           True
-# 1 splicing_donor     multinomial   50          500      8.0           False
-# 2 splicing_acceptor  multinomial   45          500      6.0           False
-# 3 splicing_exon_skip binomial      20          500      NaN           False
+# 1 splicing_sj        binomial      200         500      NaN           False
+# 2 splicing_donor     multinomial   50          500      8.0           False
+# 3 splicing_acceptor  multinomial   45          500      6.0           False
+# 4 splicing_exon_skip binomial      20          500      NaN           False
 
 # Run pipeline (operates on gene modality)
 model.fit_technical(covariates=['cell_line'])
@@ -170,10 +170,12 @@ Required columns:
 - `intron_start`: Junction start coordinate
 - `intron_end`: Junction end coordinate
 - `strand`: Strand ('+', '-', 1, or 2)
+- `gene_name_start`: Gene name at start of junction
+- `gene_name_end`: Gene name at end of junction
 
-Optional columns (for gene filtering):
-- `gene_short_name.start`: Gene at start of junction
-- `gene_short_name.end`: Gene at end of junction
+Optional columns (for Ensembl ID support):
+- `gene_id_start`: Ensembl gene ID at start of junction
+- `gene_id_end`: Ensembl gene ID at end of junction
 
 ### Splice Junction Counts (`SJ_counts.csv`)
 - Rows: Junction IDs (matching `SJ_meta.coord.intron`)
@@ -224,9 +226,18 @@ subset = mod.get_cell_subset(['cell1', 'cell2', 'cell3'])
 |--------------|----------|-----------|---------|
 | `negbinom` | Count data | 2D: (features, cells) | Gene counts, transcript counts |
 | `multinomial` | Proportional usage | 3D: (features, cells, categories) | Donor usage, isoform usage |
-| `binomial` | Binary outcomes | 2D: (features, cells) + denominator | Exon skipping PSI |
+| `binomial` | Binary outcomes | 2D: (features, cells) + denominator | SJ counts (with gene denominator), Exon skipping PSI |
 | `normal` | Continuous scores | 2D: (features, cells) | SpliZ scores |
 | `mvnormal` | Multivariate continuous | 3D: (features, cells, dims) | SpliZVD (z0, z1, z2) |
+
+### Splicing Modality Types
+
+| Type | Description | Distribution | Output |
+|------|-------------|--------------|--------|
+| `sj` | Raw splice junction counts | binomial | SJ reads / gene expression (per-junction) |
+| `donor` | Donor usage | multinomial | Which acceptor for each donor (5'SS) |
+| `acceptor` | Acceptor usage | multinomial | Which donor for each acceptor (3'SS) |
+| `exon_skip` | Exon skipping | binomial | Inclusion reads / total reads (cassette exons) |
 
 ## Common Workflows
 
@@ -235,8 +246,12 @@ subset = mod.get_cell_subset(['cell1', 'cell2', 'cell3'])
 # 1. Create model with genes
 model = MultiModalBayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B')
 
-# 2. Add splicing
-model.add_splicing_modality(sj_counts, sj_meta, ['donor', 'acceptor'])
+# 2. Add splicing (all types including raw SJ counts)
+model.add_splicing_modality(
+    sj_counts=sj_counts,
+    sj_meta=sj_meta,
+    splicing_types=['sj', 'donor', 'acceptor', 'exon_skip']
+)
 
 # 3. Run pipeline
 model.fit_technical(covariates=['cell_line'])
@@ -244,7 +259,8 @@ model.fit_cis()
 model.fit_trans(function_type='additive_hill')
 
 # 4. Analyze splicing
-donor_mod = model.get_modality('splicing_donor')
+sj_mod = model.get_modality('splicing_sj')  # Raw SJ counts
+donor_mod = model.get_modality('splicing_donor')  # Donor usage
 # ... downstream analysis ...
 ```
 

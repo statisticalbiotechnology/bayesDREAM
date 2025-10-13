@@ -309,13 +309,13 @@ model = MultiModalBayesDREAM(
    )
    ```
 
-2. **Splicing data** (donor/acceptor/exon skipping):
+2. **Splicing data** (raw SJ counts, donor/acceptor usage, exon skipping):
    ```python
    model.add_splicing_modality(
        sj_counts=sj_counts,
-       sj_meta=sj_meta,              # Must have: coord.intron, chrom, intron_start, intron_end, strand
-       splicing_types=['donor', 'acceptor', 'exon_skip'],
-       gene_of_interest='GFI1B',
+       sj_meta=sj_meta,              # Must have: coord.intron, chrom, intron_start, intron_end, strand, gene_name_start, gene_name_end
+       splicing_types=['sj', 'donor', 'acceptor', 'exon_skip'],
+       gene_counts=None,             # Optional: defaults to self.counts
        min_cell_total=1,             # Min reads for donor/acceptor
        min_total_exon=2              # Min reads for exon skipping
    )
@@ -356,34 +356,49 @@ subset = donor_mod.get_feature_subset(['feature1', 'feature2'])
 
 ### Splicing Processing
 
-The `splicing.py` module wraps R functions from `CodeDump.R` to compute splicing metrics:
+The `splicing.py` module provides pure Python implementations for splicing analysis (no R dependencies):
 
-**Donor Usage**: Groups splice junctions by donor site (5' splice site). Returns multinomial counts showing which acceptor is used for each donor.
+**Raw SJ Counts** (`splicing_type='sj'`): Raw splice junction counts with gene expression as denominator.
+- Distribution: `binomial`
+- Numerator: SJ read counts (per-junction)
+- Denominator: Gene-level expression (matched to each junction's gene)
+- Dimensions: `(n_junctions, n_cells)`
+- Metadata: All fields from SJ metadata, plus assigned `gene` identifier
+- Note: Automatically filters to SJs with valid gene annotations
+
+**Donor Usage** (`splicing_type='donor'`): Groups splice junctions by donor site (5' splice site). Returns multinomial counts showing which acceptor is used for each donor.
 - Distribution: `multinomial`
 - Dimensions: `(n_donors, n_cells, max_acceptors_per_donor)`
 - Metadata: `chrom`, `strand`, `donor`, `acceptors` (list), `n_acceptors`
 
-**Acceptor Usage**: Groups junctions by acceptor site (3' splice site). Returns multinomial counts showing which donor is used for each acceptor.
+**Acceptor Usage** (`splicing_type='acceptor'`): Groups junctions by acceptor site (3' splice site). Returns multinomial counts showing which donor is used for each acceptor.
 - Distribution: `multinomial`
 - Dimensions: `(n_acceptors, n_cells, max_donors_per_acceptor)`
 - Metadata: `chrom`, `strand`, `acceptor`, `donors` (list), `n_donors`
 
-**Exon Skipping**: Detects cassette exon triplets (inc1, inc2, skip) and computes inclusion/total counts.
+**Exon Skipping** (`splicing_type='exon_skip'`): Detects cassette exon triplets (inc1, inc2, skip) and computes inclusion/total counts.
 - Distribution: `binomial`
 - Dimensions: `(n_events, n_cells)` for both inclusion and total
 - Metadata: `trip_id`, `chrom`, `strand`, `d1`, `a2`, `d2`, `a3`, `sj_inc1`, `sj_inc2`, `sj_skip`
-
-**R Function Requirements:**
-- `psi_donor_usage_strand()`: Computes donor PSI
-- `psi_acceptor_usage_strand()`: Computes acceptor PSI
-- `psi_exon_skipping_strand()`: Finds cassette exons and computes PSI
+- Methods: Strand-aware (default) or genomic coordinate fallback
+- Aggregation: `min` (default) or `mean` for computing inclusion from inc1 and inc2
 
 **SJ Metadata Requirements:**
-- `coord.intron`: Junction ID (e.g., "chr1:12345:67890:+")
-- `chrom`: Chromosome
-- `intron_start`, `intron_end`: Junction coordinates
-- `strand`: Strand ('+', '-', 1, or 2)
-- Optional: `gene_short_name.start`, `gene_short_name.end` for gene filtering
+- **Required columns:**
+  - `coord.intron`: Junction ID (e.g., "chr1:12345:67890:+")
+  - `chrom`: Chromosome
+  - `intron_start`, `intron_end`: Junction coordinates
+  - `strand`: Strand ('+', '-', 1, or 2)
+  - `gene_name_start`: Gene name at junction start
+  - `gene_name_end`: Gene name at junction end
+- **Optional columns (for Ensembl ID support):**
+  - `gene_id_start`: Ensembl gene ID at junction start
+  - `gene_id_end`: Ensembl gene ID at junction end
+
+**Gene Identifier Flexibility:**
+- Works with gene names, Ensembl IDs, or both
+- Priority for SJ-gene matching: `gene_name_start` → `gene_name_end` → `gene_id_start` → `gene_id_end`
+- Tries all available identifiers when matching SJs to gene counts
 
 ### Current Limitations
 
@@ -420,8 +435,7 @@ model = MultiModalBayesDREAM(
 model.add_splicing_modality(
     sj_counts=sj_counts,
     sj_meta=sj_meta,
-    splicing_types=['donor', 'acceptor', 'exon_skip'],
-    gene_of_interest='GFI1B'
+    splicing_types=['sj', 'donor', 'acceptor', 'exon_skip']
 )
 
 # Inspect modalities
