@@ -14,6 +14,7 @@ import torch
 from .model import bayesDREAM
 from .modality import Modality
 from .splicing import create_splicing_modality
+from .distributions import get_observation_sampler, requires_denominator, is_3d_distribution
 
 
 class MultiModalBayesDREAM(bayesDREAM):
@@ -532,8 +533,14 @@ class MultiModalBayesDREAM(bayesDREAM):
         """
         Fit technical model for a specific modality.
 
-        This is a placeholder for future implementation of modality-specific
-        technical fits. Currently only supports the primary gene modality.
+        Currently, this delegates to the base class fit_technical() for negbinom
+        distributions and raises NotImplementedError for other distributions.
+
+        Future implementations will support:
+        - multinomial: Technical variation in categorical proportions
+        - binomial: Technical variation in success probabilities
+        - normal: Technical variation in continuous measurements
+        - mvnormal: Technical variation in multivariate measurements
 
         Parameters
         ----------
@@ -544,15 +551,92 @@ class MultiModalBayesDREAM(bayesDREAM):
         sum_factor_col : str
             Sum factor column
         **kwargs
-            Additional arguments passed to fit_technical
+            Additional arguments passed to distribution-specific fit
+
+        Raises
+        ------
+        NotImplementedError
+            If modality distribution is not yet supported
         """
-        if modality_name != self.primary_modality:
-            raise NotImplementedError(
-                f"Technical fitting for non-primary modalities not yet implemented. "
-                f"Primary modality is '{self.primary_modality}'"
+        # Get modality
+        if modality_name not in self.modalities:
+            raise KeyError(f"Modality '{modality_name}' not found. Available: {list(self.modalities.keys())}")
+
+        modality = self.modalities[modality_name]
+
+        # For primary modality with negbinom, use existing implementation
+        if modality_name == self.primary_modality and modality.distribution == 'negbinom':
+            return self.fit_technical(covariates=covariates, sum_factor_col=sum_factor_col, **kwargs)
+
+        # For other distributions, raise NotImplementedError with helpful message
+        raise NotImplementedError(
+            f"Technical fitting for '{modality.distribution}' distribution not yet implemented.\n"
+            f"Currently only 'negbinom' distribution for primary modality is supported.\n"
+            f"To fit the primary modality, use model.fit_technical() directly."
+        )
+
+    def fit_modality_trans(
+        self,
+        modality_name: str,
+        sum_factor_col: str = 'sum_factor',
+        function_type: str = 'additive_hill',
+        **kwargs
+    ):
+        """
+        Fit trans model for a specific modality.
+
+        This method fits trans effects (how downstream features respond to cis perturbation)
+        for any modality. The function type (how f(x) is parameterized) is shared across
+        modalities, but the observation model (how f(x) feeds into the likelihood) is
+        distribution-specific.
+
+        Currently, this delegates to the base class fit_trans() for negbinom distributions
+        and raises NotImplementedError for other distributions.
+
+        Future implementations will support:
+        - multinomial: Trans effects on categorical proportions (e.g., isoform usage)
+        - binomial: Trans effects on binary outcomes (e.g., exon skipping)
+        - normal: Trans effects on continuous measurements (e.g., SpliZ scores)
+        - mvnormal: Trans effects on multivariate measurements (e.g., SpliZVD)
+
+        Parameters
+        ----------
+        modality_name : str
+            Which modality to fit
+        sum_factor_col : str
+            Sum factor column (for count-based models)
+        function_type : str
+            Function type: 'additive_hill', 'single_hill', 'polynomial', etc.
+        **kwargs
+            Additional arguments passed to distribution-specific fit
+
+        Raises
+        ------
+        NotImplementedError
+            If modality distribution is not yet supported
+        """
+        # Get modality
+        if modality_name not in self.modalities:
+            raise KeyError(f"Modality '{modality_name}' not found. Available: {list(self.modalities.keys())}")
+
+        modality = self.modalities[modality_name]
+
+        # For primary modality with negbinom, use existing implementation
+        if modality_name == self.primary_modality and modality.distribution == 'negbinom':
+            return self.fit_trans(
+                sum_factor_col=sum_factor_col,
+                function_type=function_type,
+                **kwargs
             )
 
-        return self.fit_technical(covariates=covariates, sum_factor_col=sum_factor_col, **kwargs)
+        # For other distributions, raise NotImplementedError with helpful message
+        raise NotImplementedError(
+            f"Trans fitting for '{modality.distribution}' distribution not yet implemented.\n"
+            f"Currently only 'negbinom' distribution for primary modality is supported.\n"
+            f"To fit the primary modality, use model.fit_trans() directly.\n\n"
+            f"Distribution-specific observation models are implemented in bayesDREAM/distributions.py.\n"
+            f"The missing piece is integrating these into the _model_y Pyro model."
+        )
 
     def __repr__(self) -> str:
         mod_list = ', '.join(self.modalities.keys())

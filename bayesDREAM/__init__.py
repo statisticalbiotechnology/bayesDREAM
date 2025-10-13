@@ -13,6 +13,12 @@ from .splicing import (
     process_acceptor_usage,
     process_exon_skipping
 )
+from .distributions import (
+    get_observation_sampler,
+    requires_denominator,
+    is_3d_distribution,
+    DISTRIBUTION_REGISTRY
+)
 
 __version__ = "0.2.0"
 
@@ -24,4 +30,8 @@ __all__ = [
     'process_donor_usage',
     'process_acceptor_usage',
     'process_exon_skipping',
+    'get_observation_sampler',
+    'requires_denominator',
+    'is_3d_distribution',
+    'DISTRIBUTION_REGISTRY',
 ]

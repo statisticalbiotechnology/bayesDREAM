@@ -38,7 +38,7 @@ I've successfully extended bayesDREAM to support multiple molecular modalities w
 - No subprocess calls or R integration required
 - Fully self-contained splicing analysis
 
-### 3. `bayesDREAM/multimodal.py` (371 lines)
+### 3. `bayesDREAM/multimodal.py` (~640 lines)
 **Purpose**: Multi-modal wrapper extending the base bayesDREAM class
 
 **Key Class**: `MultiModalBayesDREAM` (extends `bayesDREAM`)
@@ -54,8 +54,24 @@ I've successfully extended bayesDREAM to support multiple molecular modalities w
 - `add_custom_modality()`: Add user-defined modalities (SpliZ, SpliZVD, etc.)
 - `get_modality()`: Retrieve a specific modality
 - `list_modalities()`: Summary table of all modalities
+- `fit_modality_technical()`: Fit technical model for specific modality (infrastructure ready, currently delegates to base class for negbinom)
+- `fit_modality_trans()`: Fit trans model for specific modality (infrastructure ready, currently delegates to base class for negbinom)
 
-### 4. `bayesDREAM/__init__.py` (updated)
+### 4. `bayesDREAM/distributions.py` (~700 lines) **NEW**
+**Purpose**: Distribution-specific observation models for multi-modal fitting
+
+**Key Components**:
+- Observation samplers for 5 distributions: `negbinom`, `multinomial`, `binomial`, `normal`, `mvnormal`
+- Separate implementations for `technical` and `trans` models
+- `DISTRIBUTION_REGISTRY`: Maps distribution names to sampler functions
+- Helper functions: `get_observation_sampler()`, `requires_denominator()`, `is_3d_distribution()`
+
+**Design Philosophy**:
+- Function types (Hill, polynomial) are **shared** across modalities
+- Observation likelihoods are **distribution-specific**
+- Ready for integration into `_model_technical` and `_model_y` Pyro models
+
+### 5. `bayesDREAM/__init__.py` (updated)
 **Purpose**: Package exports for easy importing
 
 Exports:
@@ -63,8 +79,9 @@ Exports:
 - `MultiModalBayesDREAM` (new multi-modal wrapper)
 - `Modality` (data structure)
 - Splicing functions
+- Distribution registry and helpers
 
-### 5. `examples/multimodal_example.py` (398 lines)
+### 6. `examples/multimodal_example.py` (398 lines)
 **Purpose**: Comprehensive usage examples
 
 Includes 6 complete examples:
@@ -75,7 +92,7 @@ Includes 6 complete examples:
 5. Pre-constructed modalities
 6. Subsetting and filtering
 
-### 6. `CLAUDE.md` (updated)
+### 7. `CLAUDE.md` (updated)
 **Purpose**: Documentation for future Claude Code instances
 
 Added comprehensive "Multi-Modal Architecture" section covering:
@@ -227,34 +244,44 @@ feature_meta:
 - Clear which modality drives perturbation effects
 - Future: can extend to multi-modal joint models
 
-## Current Limitations & Future Directions
+## Current Status & Implementation Roadmap
 
-### Limitations
+### ✅ Completed (Infrastructure Ready)
 
-1. **Single-modality modeling**: Only the primary modality (typically genes) is used in fit_technical, fit_cis, fit_trans. Other modalities are stored but not modeled.
+1. **Multi-modal data storage**: All modalities can be added and stored in a unified framework
+2. **Distribution-specific observation models**: Implemented in `distributions.py` for all 5 distribution types
+3. **Backward compatibility**: `MultiModalBayesDREAM` works exactly like `bayesDREAM` for gene expression
+4. **Modality methods**: `fit_modality_technical()` and `fit_modality_trans()` provide API for future implementations
+5. **Cell alignment**: Automatic subsetting ensures all modalities have consistent cell sets
+6. **Flexible gene identifiers**: Support for gene names, gene_name, and gene_id (Ensembl IDs)
 
-2. **No cross-modality effects**: Cannot yet model how cis effects on genes propagate to splicing, transcripts, etc.
+### 🚧 In Progress (Next Steps)
 
-3. **Sum factor normalization**: Only calculated for gene counts. Other modalities may need different normalization strategies.
+1. **Integrate observation samplers into Pyro models**:
+   - Modify `_model_technical` to accept distribution parameter and use appropriate sampler from `distributions.py`
+   - Modify `_model_y` to accept distribution parameter and use appropriate sampler
+   - This is the key missing piece to enable full multi-modal fitting
 
-### Future Enhancements
+2. **Parameter handling for different distributions**:
+   - Negative binomial: overdispersion (`phi_y`)
+   - Multinomial: no overdispersion (probabilities sum to 1)
+   - Binomial: requires denominator array
+   - Normal: requires variance parameter (`sigma_y`)
+   - Multivariate normal: requires covariance matrix
 
-1. **Modality-specific models**:
-   - Extend `_model_y` to handle multinomial likelihoods (splicing)
-   - Add multivariate normal models for SpliZVD
-   - Separate overdispersion parameters per modality
+### 🔮 Future Enhancements
 
-2. **Cross-modality modeling**:
+1. **Cross-modality modeling**:
    - Model transcript usage as function of gene expression
    - Model splicing changes as function of cis perturbation
    - Joint models across modalities
 
-3. **Normalization**:
-   - Implement modality-specific normalization
+2. **Normalization**:
+   - Implement modality-specific normalization (currently only gene counts use sum factors)
    - Support for total-count normalization (multinomial)
    - VST or arcsinh transforms for continuous data
 
-4. **Performance**:
+3. **Performance**:
    - Option to cache splicing metrics
    - Parallel processing of multiple modalities
    - Optimize cassette exon detection for large datasets
