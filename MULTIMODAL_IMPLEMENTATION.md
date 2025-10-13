@@ -49,8 +49,8 @@ I've successfully extended bayesDREAM to support multiple molecular modalities w
 
 **Key Methods**:
 - `add_modality()`: Add any pre-constructed Modality
-- `add_transcript_modality()`: Add transcripts as negbinom OR multinomial (isoform usage)
-- `add_splicing_modality()`: Add donor/acceptor/exon skipping data
+- `add_transcript_modality()`: Add transcripts as counts and/or usage (both negbinom AND multinomial in one call)
+- `add_splicing_modality()`: Add multiple splicing types (sj/donor/acceptor/exon_skip) in one call
 - `add_custom_modality()`: Add user-defined modalities (SpliZ, SpliZVD, etc.)
 - `get_modality()`: Retrieve a specific modality
 - `list_modalities()`: Summary table of all modalities
@@ -288,11 +288,11 @@ model = MultiModalBayesDREAM(
     primary_modality='gene'
 )
 
-# Add transcripts as isoform usage
+# Add transcripts as both counts and usage
 model.add_transcript_modality(
     transcript_counts=tx_counts,
     transcript_meta=tx_meta,
-    use_isoform_usage=True
+    modality_types=['counts', 'usage']
 )
 
 # Add all splicing modalities (including raw SJ counts)

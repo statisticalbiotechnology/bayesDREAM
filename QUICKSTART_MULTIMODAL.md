@@ -95,20 +95,27 @@ print(donor_mod.feature_meta.head())
 ### 3. Adding Transcript Data
 
 ```python
-# Add transcript counts as independent features (negative binomial)
+# Add transcript counts only (negative binomial)
 model.add_transcript_modality(
-    transcript_counts=tx_counts,  # transcripts × cells
-    transcript_meta=tx_meta,      # must have: transcript_id, gene
-    use_isoform_usage=False,
-    name='transcript_counts'
+    transcript_counts=tx_counts,     # transcripts × cells
+    transcript_meta=tx_meta,         # must have: transcript_id + (gene/gene_name/gene_id)
+    modality_types='counts'
 )
 
-# OR: Add as isoform usage (multinomial - proportions within gene)
+# Add isoform usage only (multinomial - proportions within gene)
 model.add_transcript_modality(
     transcript_counts=tx_counts,
     transcript_meta=tx_meta,
-    use_isoform_usage=True,
-    name='isoform_usage'
+    modality_types='usage'
+)
+
+# Add BOTH in one call
+model.add_transcript_modality(
+    transcript_counts=tx_counts,
+    transcript_meta=tx_meta,
+    modality_types=['counts', 'usage'],
+    counts_name='transcript_counts',   # optional custom name
+    usage_name='transcript_usage'      # optional custom name
 )
 ```
 
@@ -185,7 +192,10 @@ Optional columns (for Ensembl ID support):
 ### Transcript Metadata (`tx_meta.csv`)
 Required columns:
 - `transcript_id`: Transcript ID (matching row names in transcript counts)
-- `gene`: Parent gene name
+- Gene identifier (one of):
+  - `gene`: Gene name or ID
+  - `gene_name`: Gene symbol
+  - `gene_id`: Ensembl gene ID
 
 ## Working with Modalities
 
@@ -269,11 +279,15 @@ donor_mod = model.get_modality('splicing_donor')  # Donor usage
 # 1. Create model
 model = MultiModalBayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B')
 
-# 2. Add transcripts
-model.add_transcript_modality(tx_counts, tx_meta, use_isoform_usage=True)
+# 2. Add transcripts (both counts and usage)
+model.add_transcript_modality(
+    transcript_counts=tx_counts,
+    transcript_meta=tx_meta,
+    modality_types=['counts', 'usage']
+)
 
 # 3. Add splicing
-model.add_splicing_modality(sj_counts, sj_meta, ['exon_skip'])
+model.add_splicing_modality(sj_counts, sj_meta, ['sj', 'exon_skip'])
 
 # 4. Run pipeline
 model.fit_technical(covariates=['cell_line'])
@@ -283,7 +297,8 @@ model.fit_trans(function_type='polynomial')
 # 5. Compare modalities
 print(model.list_modalities())
 gene_mod = model.get_modality('gene')
-tx_mod = model.get_modality('isoform_usage')
+tx_counts_mod = model.get_modality('transcript_counts')
+tx_usage_mod = model.get_modality('transcript_usage')
 exon_mod = model.get_modality('splicing_exon_skip')
 ```
 

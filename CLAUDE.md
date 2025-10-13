@@ -300,12 +300,20 @@ model = MultiModalBayesDREAM(
 
 **Adding Modalities:**
 
-1. **Transcript counts** (as isoform usage or independent counts):
+1. **Transcript counts** (as counts and/or isoform usage):
    ```python
+   # Add both counts and usage in one call
    model.add_transcript_modality(
        transcript_counts=tx_counts,
-       transcript_meta=tx_meta,      # Must have: transcript_id, gene
-       use_isoform_usage=True        # True: multinomial, False: negbinom
+       transcript_meta=tx_meta,      # Must have: transcript_id + (gene/gene_name/gene_id)
+       modality_types=['counts', 'usage']  # 'counts', 'usage', or both
+   )
+
+   # Or add just one type
+   model.add_transcript_modality(
+       transcript_counts=tx_counts,
+       transcript_meta=tx_meta,
+       modality_types='counts'       # Just negbinom counts
    )
    ```
 
