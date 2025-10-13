@@ -614,24 +614,43 @@ def process_sj_counts(sj_counts: pd.DataFrame,
 
     idx = _build_sj_index(sj_counts_subset, sj_meta)
 
-    # Assign each SJ to a gene identifier (name or ID)
-    # Prefer gene_name_start, fall back to gene_name_end
-    # But if gene_id columns exist and names are missing, use IDs
+    # Track reasons for dropping SJs
+    n_total = len(idx)
+    n_dropped_no_gene = 0
+    n_dropped_diff_gene = 0
+    n_dropped_gene_not_in_counts = 0
+
+    # Assign gene identifiers for start and end
     has_gene_id = 'gene_id_start' in idx.columns and 'gene_id_end' in idx.columns
 
     if has_gene_id:
-        # Try gene names first, fall back to IDs
-        idx['gene'] = idx['gene_name_start'].fillna(idx['gene_name_end']).fillna(
-            idx['gene_id_start']).fillna(idx['gene_id_end'])
+        # Try gene names first, fall back to IDs for start
+        idx['gene_start'] = idx['gene_name_start'].fillna(idx['gene_id_start'])
+        # Try gene names first, fall back to IDs for end
+        idx['gene_end'] = idx['gene_name_end'].fillna(idx['gene_id_end'])
     else:
         # Only gene names available
-        idx['gene'] = idx['gene_name_start'].fillna(idx['gene_name_end'])
+        idx['gene_start'] = idx['gene_name_start']
+        idx['gene_end'] = idx['gene_name_end']
 
-    # Remove SJs without gene assignment
-    idx = idx[idx['gene'].notna()].copy()
+    # Remove SJs without gene assignment for both start and end
+    no_gene_mask = idx['gene_start'].isna() | idx['gene_end'].isna()
+    n_dropped_no_gene = no_gene_mask.sum()
+    idx = idx[~no_gene_mask].copy()
 
     if len(idx) == 0:
         raise ValueError("No splice junctions with gene annotations found")
+
+    # Keep only SJs where start and end are in the same gene
+    same_gene_mask = idx['gene_start'] == idx['gene_end']
+    n_dropped_diff_gene = (~same_gene_mask).sum()
+    idx = idx[same_gene_mask].copy()
+
+    if len(idx) == 0:
+        raise ValueError("No splice junctions with matching start/end genes found")
+
+    # Assign the gene (since start == end)
+    idx['gene'] = idx['gene_start']
 
     # Filter SJ counts to these junctions
     sj_filtered = sj_counts_subset.loc[idx['coord.intron']].copy()
@@ -640,35 +659,67 @@ def process_sj_counts(sj_counts: pd.DataFrame,
     gene_counts_subset = gene_counts[common_cells].copy()
 
     # Build denominator: for each SJ, get the corresponding gene count
-    gene_denom = pd.DataFrame(
-        index=sj_filtered.index,
-        columns=sj_filtered.columns,
-        dtype=float
-    )
+    # Track which SJs to keep (only those where gene is found in gene_counts)
+    valid_sjs = []
+    gene_denom_data = []
 
     for sj_id, row in idx.iterrows():
         gene = row['gene']
+        coord = row['coord.intron']
+
         # Try to find gene in gene_counts by name or ID
+        found = False
+        gene_expr = None
+
         if gene in gene_counts_subset.index:
-            gene_denom.loc[row['coord.intron']] = gene_counts_subset.loc[gene].values
+            gene_expr = gene_counts_subset.loc[gene].values
+            found = True
         else:
             # If not found, try alternate identifier
             # If we have a name, try finding by ID (and vice versa)
-            found = False
             if has_gene_id:
                 # Try all possible gene identifiers for this SJ
                 for gene_col in ['gene_name_start', 'gene_name_end', 'gene_id_start', 'gene_id_end']:
                     if gene_col in row.index and pd.notna(row[gene_col]):
                         alt_gene = row[gene_col]
                         if alt_gene in gene_counts_subset.index:
-                            gene_denom.loc[row['coord.intron']] = gene_counts_subset.loc[alt_gene].values
+                            gene_expr = gene_counts_subset.loc[alt_gene].values
                             found = True
                             break
 
-            if not found:
-                # Gene not found in gene_counts
-                warnings.warn(f"Gene '{gene}' for SJ '{row['coord.intron']}' not found in gene_counts. Setting denominator to 0.")
-                gene_denom.loc[row['coord.intron']] = 0
+        if found:
+            valid_sjs.append(coord)
+            gene_denom_data.append(gene_expr)
+        else:
+            n_dropped_gene_not_in_counts += 1
+
+    # Filter to valid SJs only
+    if len(valid_sjs) == 0:
+        raise ValueError("No splice junctions with genes found in gene_counts")
+
+    sj_filtered = sj_filtered.loc[valid_sjs].copy()
+    idx = idx[idx['coord.intron'].isin(valid_sjs)].copy()
+
+    # Build denominator DataFrame
+    gene_denom = pd.DataFrame(
+        data=np.array(gene_denom_data),
+        index=valid_sjs,
+        columns=sj_filtered.columns
+    )
+
+    # Print summary of dropped SJs
+    n_kept = len(valid_sjs)
+    n_total_dropped = n_total - n_kept
+    if n_total_dropped > 0:
+        reasons = []
+        if n_dropped_no_gene > 0:
+            reasons.append(f"{n_dropped_no_gene} missing gene annotation")
+        if n_dropped_diff_gene > 0:
+            reasons.append(f"{n_dropped_diff_gene} spanning different genes")
+        if n_dropped_gene_not_in_counts > 0:
+            reasons.append(f"{n_dropped_gene_not_in_counts} gene not in gene_counts")
+
+        print(f"[INFO] Kept {n_kept}/{n_total} splice junctions. Dropped {n_total_dropped} SJs: {', '.join(reasons)}")
 
     return sj_filtered, gene_denom, idx
 
