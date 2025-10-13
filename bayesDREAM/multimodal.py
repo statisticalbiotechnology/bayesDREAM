@@ -298,8 +298,8 @@ class MultiModalBayesDREAM(bayesDREAM):
         self,
         sj_counts: pd.DataFrame,
         sj_meta: pd.DataFrame,
+        gene_of_interest: str,
         splicing_types: Union[str, List[str]] = ['donor', 'acceptor', 'exon_skip'],
-        gene_of_interest: Optional[str] = None,
         gene_counts: Optional[pd.DataFrame] = None,
         min_cell_total: int = 1,
         min_total_exon: int = 2
@@ -312,16 +312,15 @@ class MultiModalBayesDREAM(bayesDREAM):
         sj_counts : pd.DataFrame
             Splice junction counts (junctions × cells)
         sj_meta : pd.DataFrame
-            Junction metadata with: coord.intron, chrom, intron_start, intron_end, strand
-            Must have gene annotation columns (e.g., 'gene_short_name.start')
+            Junction metadata with required columns: coord.intron, chrom, intron_start,
+            intron_end, strand, gene_name_start, gene_name_end
+        gene_of_interest : str
+            Filter to specific gene (required)
         splicing_types : str or list
             Which splicing metrics to compute: 'sj', 'donor', 'acceptor', 'exon_skip', or list
-        gene_of_interest : str, optional
-            Filter to specific gene
         gene_counts : pd.DataFrame, optional
             Gene-level counts for SJ denominator (genes × cells).
-            Required if 'sj' is in splicing_types.
-            If not provided for 'sj', will use primary gene counts from model.
+            If not provided, will use primary gene counts from model (self.counts).
         min_cell_total : int
             Minimum reads for donor/acceptor
         min_total_exon : int
@@ -330,27 +329,22 @@ class MultiModalBayesDREAM(bayesDREAM):
         if isinstance(splicing_types, str):
             splicing_types = [splicing_types]
 
-        for stype in splicing_types:
-            # Get gene_counts for 'sj' type
-            if stype == 'sj':
-                if gene_counts is None:
-                    # Use primary gene counts from model (includes cis gene)
-                    if hasattr(self, 'counts') and self.counts is not None:
-                        gene_counts_for_sj = self.counts
-                    else:
-                        raise ValueError("gene_counts must be provided for splicing_type='sj' "
-                                       "or model must have been initialized with counts")
-                else:
-                    gene_counts_for_sj = gene_counts
+        # Get gene_counts (use model's counts if not provided)
+        if gene_counts is None:
+            if hasattr(self, 'counts') and self.counts is not None:
+                gene_counts_to_use = self.counts
             else:
-                gene_counts_for_sj = None
+                raise ValueError("gene_counts must be provided or model must have been initialized with counts")
+        else:
+            gene_counts_to_use = gene_counts
 
+        for stype in splicing_types:
             modality = create_splicing_modality(
                 sj_counts=sj_counts,
                 sj_meta=sj_meta,
                 splicing_type=stype,
                 gene_of_interest=gene_of_interest,
-                gene_counts=gene_counts_for_sj,
+                gene_counts=gene_counts_to_use,
                 min_cell_total=min_cell_total,
                 min_total_exon=min_total_exon
             )
