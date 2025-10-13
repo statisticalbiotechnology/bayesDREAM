@@ -8,10 +8,9 @@ cd bayesDREAM_forClaude
 
 # Install in development mode
 pip install -e .
-
-# Ensure R dependencies are installed
-R -e "install.packages('data.table')"
 ```
+
+**Note**: Splicing analysis is now implemented in pure Python - no R dependencies required!
 
 ## Basic Usage
 
@@ -333,12 +332,6 @@ model = MultiModalBayesDREAM(
 ```
 
 ## Troubleshooting
-
-### Issue: "R script failed"
-**Solution**: Ensure R and data.table are installed:
-```bash
-R -e "install.packages('data.table')"
-```
 
 ### Issue: "Cannot subset by name: feature_names not available"
 **Solution**: Provide a DataFrame instead of numpy array, or create Modality with explicit feature names

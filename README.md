@@ -33,9 +33,6 @@ cd bayesDREAM
 # Install dependencies
 pip install torch pyro-ppl pandas numpy scipy scikit-learn matplotlib
 
-# For splicing analysis, also install R and data.table
-R -e "install.packages('data.table')"
-
 # Install in development mode
 pip install -e .
 ```
@@ -100,8 +97,10 @@ donor_mod = model.get_modality('splicing_donor')
 ## Documentation
 
 - **[QUICKSTART_MULTIMODAL.md](QUICKSTART_MULTIMODAL.md)** - Quick reference guide
-- **[CLAUDE.md](../CLAUDE.md)** - Complete architecture documentation
+- **[CLAUDE.md](CLAUDE.md)** - Complete architecture documentation
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - Visual architecture diagrams
+- **[MULTIMODAL_IMPLEMENTATION.md](MULTIMODAL_IMPLEMENTATION.md)** - Implementation details
+- **[MULTIMODAL_FITTING_INFRASTRUCTURE.md](MULTIMODAL_FITTING_INFRASTRUCTURE.md)** - Distribution-specific fitting
 - **[examples/multimodal_example.py](examples/multimodal_example.py)** - Complete examples
 
 ## Data Requirements
@@ -117,23 +116,17 @@ donor_mod = model.get_modality('splicing_donor')
 
 See [QUICKSTART_MULTIMODAL.md](QUICKSTART_MULTIMODAL.md) for detailed format specifications.
 
-## Pipeline Scripts
+## Multi-Modal Fitting (Future)
 
-For large-scale analysis on HPC clusters:
+Infrastructure for distribution-specific fitting is in place:
 
-```bash
-# Prepare inputs
-python run_pipeline/prepare_inputs.py <label> <outdir>
-
-# Submit SLURM jobs
-bash run_pipeline/submit_jobs_new.sh \
-  --tech --cis --trans --full --full-none \
-  --function-types additive_hill,polynomial \
-  --label my_run --outdir ./output \
-  --cis-genes GFI1B,TET2,MYB,NFE2
+```python
+# Once implemented, fit different modalities
+model.fit_modality_trans('splicing_donor', function_type='additive_hill')
+model.fit_modality_trans('spliz', function_type='polynomial')
 ```
 
-See pipeline scripts in `run_pipeline/` directory.
+See **[MULTIMODAL_FITTING_INFRASTRUCTURE.md](MULTIMODAL_FITTING_INFRASTRUCTURE.md)** for implementation details.
 
 ## Supported Distributions
 
@@ -158,7 +151,8 @@ If you use bayesDREAM in your research, please cite:
 ### Running Tests
 
 ```bash
-python test_multimodal.py
+# Infrastructure test (requires pyroenv conda environment)
+/opt/anaconda3/envs/pyroenv/bin/python test_multimodal_fitting.py
 ```
 
 ### Project Structure
@@ -169,9 +163,8 @@ bayesDREAM_forClaude/
 │   ├── model.py          # Base bayesDREAM class
 │   ├── multimodal.py     # Multi-modal wrapper
 │   ├── modality.py       # Modality data structure
-│   └── splicing.py       # Splicing processing
-├── run_pipeline/         # HPC pipeline scripts
-├── splicing code/        # R functions for splicing
+│   ├── distributions.py  # Distribution-specific samplers
+│   └── splicing.py       # Splicing processing (pure Python)
 ├── examples/             # Usage examples
 └── toydata/              # Test datasets
 ```
@@ -193,4 +186,3 @@ Contributions are welcome! Please feel free to submit issues or pull requests.
 This work uses:
 - [PyTorch](https://pytorch.org/) for tensor computations
 - [Pyro](https://pyro.ai/) for probabilistic programming
-- [scran](https://bioconductor.org/packages/scran/) for normalization (via R)

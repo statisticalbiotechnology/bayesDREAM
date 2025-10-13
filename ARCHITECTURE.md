@@ -113,6 +113,8 @@ mvnormal                  3D: (F, C, D)          SpliZVD
 
 ## Splicing Data Processing Pipeline
 
+**Note**: Pure Python implementation (no R dependencies as of 2025-10-13)
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                    Input: Splice Junction Data                   │
@@ -128,53 +130,38 @@ mvnormal                  3D: (F, C, D)          SpliZVD
                        │
                        ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│                  splicing.py (Python wrapper)                    │
+│              splicing.py (Pure Python Implementation)            │
 │                                                                  │
-│  run_r_splicing_function():                                     │
-│    1. Save counts & metadata to temp CSV files                  │
-│    2. Generate R script calling CodeDump.R functions            │
-│    3. Execute: Rscript temp_script.R                            │
-│    4. Read results from temp CSV                                │
-└──────────────────────┬──────────────────────────────────────────┘
-                       │
-                       ↓
-┌─────────────────────────────────────────────────────────────────┐
-│                   CodeDump.R (R functions)                       │
-│                                                                  │
-│  psi_donor_usage_strand()                                       │
-│    → Groups junctions by donor site                             │
-│    → Returns: (coord.intron, cell.id, PSI, donor, acceptor)    │
-│                                                                  │
-│  psi_acceptor_usage_strand()                                    │
-│    → Groups junctions by acceptor site                          │
-│    → Returns: (coord.intron, cell.id, PSI, donor, acceptor)    │
-│                                                                  │
-│  psi_exon_skipping_strand()                                     │
-│    → Finds cassette exon triplets (inc1, inc2, skip)           │
-│    → Returns: (trip_id, cell.id, inc, skip, tot, ...)          │
-└──────────────────────┬──────────────────────────────────────────┘
-                       │
-                       ↓
-┌─────────────────────────────────────────────────────────────────┐
-│              splicing.py (Reshape to Modality)                   │
+│  process_sj_counts():                                           │
+│    → Raw SJ counts with gene expression denominator            │
+│    → Only keeps SJs where start and end are in same gene       │
+│    → Returns: 2D binomial modality                             │
 │                                                                  │
 │  process_donor_usage():                                         │
-│    → 3D array (donors, cells, acceptors)                        │
-│    → metadata: donor coords, list of acceptors                  │
+│    → Groups junctions by donor site (5' splice site)           │
+│    → 3D array (donors, cells, acceptors)                       │
+│    → metadata: donor coords, list of acceptors                 │
 │                                                                  │
 │  process_acceptor_usage():                                      │
-│    → 3D array (acceptors, cells, donors)                        │
-│    → metadata: acceptor coords, list of donors                  │
+│    → Groups junctions by acceptor site (3' splice site)        │
+│    → 3D array (acceptors, cells, donors)                       │
+│    → metadata: acceptor coords, list of donors                 │
 │                                                                  │
 │  process_exon_skipping():                                       │
-│    → 2D inclusion + 2D total arrays                             │
-│    → metadata: triplet coordinates                              │
+│    → Finds cassette exon triplets (inc1, inc2, skip)          │
+│    → 2D inclusion + 2D total arrays                            │
+│    → metadata: triplet coordinates                             │
+│                                                                  │
+│  create_splicing_modality():                                    │
+│    → High-level function for all splicing types                │
+│    → Returns ready-to-use Modality objects                     │
 └──────────────────────┬──────────────────────────────────────────┘
                        │
                        ↓
 ┌─────────────────────────────────────────────────────────────────┐
 │                  Output: Modality Objects                        │
 │                                                                  │
+│  Modality(name='splicing_sj', distribution='binomial')          │
 │  Modality(name='splicing_donor', distribution='multinomial')    │
 │  Modality(name='splicing_acceptor', distribution='multinomial') │
 │  Modality(name='splicing_exon_skip', distribution='binomial')   │
@@ -294,12 +281,13 @@ mvnormal                  3D: (F, C, D)          SpliZVD
 │                                                                  │
 │  Additional Methods:                                             │
 │    - add_modality(name, modality, overwrite)                    │
-│    - add_transcript_modality(counts, meta, use_isoform_usage)   │
+│    - add_transcript_modality(counts, meta, modality_types)      │
 │    - add_splicing_modality(sj_counts, sj_meta, types, ...)     │
 │    - add_custom_modality(name, counts, feature_meta, dist)      │
 │    - get_modality(name) → Modality                              │
 │    - list_modalities() → pd.DataFrame                           │
-│    - fit_modality_technical(modality_name, ...) [placeholder]   │
+│    - fit_modality_technical(modality_name, ...)                 │
+│    - fit_modality_trans(modality_name, ...)                     │
 │                                                                  │
 │  Inherited Methods (work on primary modality):                  │
 │    - fit_technical(), fit_cis(), fit_trans() [from bayesDREAM] │
@@ -336,25 +324,30 @@ model.py (original)
   ├── torch, pyro
   └── scipy, sklearn
 
-modality.py (new)
+modality.py
   ├── pandas, numpy
   └── torch
 
-splicing.py (new)
+distributions.py
+  ├── torch
+  └── pyro
+
+splicing.py (Pure Python - no R dependencies)
   ├── pandas, numpy
-  ├── subprocess (for R)
   └── modality.py
 
-multimodal.py (new)
+multimodal.py
   ├── pandas, numpy
   ├── torch
   ├── model.py
   ├── modality.py
-  └── splicing.py
+  ├── splicing.py
+  └── distributions.py
 
-__init__.py (updated)
+__init__.py
   ├── model.py
   ├── modality.py
   ├── multimodal.py
-  └── splicing.py
+  ├── splicing.py
+  └── distributions.py
 ```

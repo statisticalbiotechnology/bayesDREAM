@@ -21,19 +21,12 @@ bayesDREAM_forClaude/
 │   ├── model.py             # Core bayesDREAM class (~2250 lines)
 │   ├── modality.py          # Modality class for multi-modal data
 │   ├── multimodal.py        # MultiModalBayesDREAM wrapper class
-│   └── splicing.py          # Splicing data processing (donor/acceptor/exon skip)
-├── run_pipeline/
-│   ├── prepare_inputs.py    # Data preparation and sum factor calculation
-│   ├── run_technical.py     # Step 1: Technical fitting
-│   ├── run_cis.py           # Step 2: Cis effect fitting
-│   ├── run_trans.py         # Step 3: Trans effect fitting
-│   ├── submit_jobs.sh       # Legacy job submission script
-│   └── submit_jobs_new.sh   # Current SLURM job submission script
-├── splicing code/
-│   └── CodeDump.R           # R functions for splicing analysis
+│   ├── distributions.py     # Distribution-specific observation samplers
+│   └── splicing.py          # Splicing data processing (pure Python)
 ├── examples/
 │   └── multimodal_example.py # Multi-modal usage examples
-└── toydata/                 # Test datasets (genes, splicing, metadata)
+├── toydata/                 # Test datasets (genes, splicing, metadata)
+└── test_multimodal_fitting.py # Infrastructure tests
 ```
 
 ## Core Architecture
@@ -86,144 +79,14 @@ Three Pyro models implement the statistical framework:
    - Includes sparsity priors (gamma distribution on effect sizes)
    - Models gene-specific dose-response curves
 
-### Pipeline Scripts
-
-**`prepare_inputs.py`**: Data preprocessing
-- Takes metadata and count matrices
-- Calls R script to calculate sum factors using `scran::calculateSumFactors`
-- Splits data into technical (NTC only) and cis-specific subsets
-- Usage: `python prepare_inputs.py <label> <outdir>`
-
-**`run_technical.py`**: Technical fitting
-- Loads NTC-only data
-- Fits `bayesDREAM.fit_technical()` with cell_line covariates
-- Saves `alpha_y_prefit.pt` for use in subsequent steps
-- Usage: `python run_technical.py --inlabel <label> --label <label_i> --outdir <outdir> --cores <cores>`
-
-**`run_cis.py`**: Cis effect fitting
-- Loads gene-specific data (NTC + one cis gene)
-- Sets alpha parameters from technical fit
-- Adjusts NTC sum factors for covariates
-- Fits cis model and saves posterior samples and `x_true`
-- Supports subsetting by CRISPRa/CRISPRi or NTC-only
-- Usage: `python run_cis.py --inlabel <label> --label <label_i> --outdir <outdir> --cis_gene <gene> --cores <cores> [--subset <NTC|CRISPRa|CRISPRi>]`
-
-**`run_trans.py`**: Trans effect fitting
-- Loads cis gene posteriors and sets `x_true`
-- Optionally permutes guide-gene associations for null distribution
-- Refits sum factors based on posterior cis expression (when not subsetting)
-- Fits trans model with specified function type
-- Usage: `python run_trans.py --inlabel <label> --label <label_i> --outdir <outdir> --cis_gene <gene> --permtype <none|All|gene_name> --function_type <additive_hill|polynomial> --cores <cores> [--subset <NTC|CRISPRa|CRISPRi>]`
-
-### Job Submission
-
-`submit_jobs_new.sh` provides a flexible SLURM workflow:
-
-**Flags:**
-- `--prepare`: Run data preparation
-- `--tech`: Run technical fitting
-- `--cis`: Run cis fitting for each gene
-- `--trans`: Enable trans fitting
-- `--full`: Run trans on full dataset (combine with `--full-none` and/or `--full-all`)
-- `--full-none`: Run trans with no permutation (real data)
-- `--full-all`: Run trans with all genes permuted (global null)
-- `--each-permutation`: Run array job permuting each trans gene individually
-- `--subsets`: Run separate analyses for CRISPRa and CRISPRi cell lines
-- `--function-types <type1,type2>`: Specify function types (default: additive_hill,polynomial)
-- `--array-max <N>`: Maximum concurrent array tasks (default: 50)
-- `--start-reps <N>`, `--end-reps <N>`: Run multiple replicates with different random seeds
-- `--label <name>`: Base output label
-- `--outdir <path>`: Output directory
-- `--cis-genes <gene1,gene2>`: Comma-separated list of cis genes
-- `--cores <N>`: Number of CPU cores per job
-
-**Typical Workflow:**
-
-1. Prepare inputs (once per dataset):
-   ```bash
-   bash submit_jobs_new.sh --prepare --label run_20250613 --outdir /path/to/output
-   ```
-
-2. Run full pipeline with multiple replicates:
-   ```bash
-   bash submit_jobs_new.sh --tech --cis --trans --full --full-none --full-all \
-     --function-types additive_hill,polynomial \
-     --start-reps 1 --end-reps 10 \
-     --label run_20250613 --outdir /path/to/output \
-     --cis-genes GFI1B,TET2,MYB,NFE2
-   ```
-
-3. Run permutation testing (one job per trans gene):
-   ```bash
-   bash submit_jobs_new.sh --trans --full --each-permutation \
-     --function-types additive_hill \
-     --label run_20250613 --outdir /path/to/output
-   ```
-
-### Threading and Performance
-
-All pipeline scripts use `set_max_threads(cores)` to control CPU usage:
-- Sets environment variables for OpenBLAS, MKL, NumExpr
-- Calls `torch.set_num_threads(cores)`
-- Each SLURM job should specify `--cpus-per-task` matching the `--cores` argument
-
-### Random Seeds
-
-Each script derives a deterministic random seed from input parameters (label, gene, permutation type) using hashing:
-```python
-seed = abs(hash(args.label + args.cis_gene)) % (2**32)
-pyro.set_rng_seed(seed)
-torch.manual_seed(seed)
-np.random.seed(seed)
-```
-
-This ensures reproducibility while allowing multiple replicates with `--start-reps`/`--end-reps`.
-
-### Output Structure
-
-```
-outdir/
-├── <label>/
-│   ├── meta_technical.csv
-│   ├── counts_technical.csv
-│   ├── meta_cis_<gene>.csv
-│   ├── counts_cis_<gene>.csv
-│   └── logs/
-└── <label>_<rep>/
-    ├── alpha_y_prefit.pt
-    ├── posterior_samples_technical.pt
-    ├── <gene>_run/
-    │   ├── x_true.pt
-    │   ├── alpha_x_prefit.pt
-    │   ├── alpha_y_prefit.pt
-    │   ├── posterior_samples_cis.pt
-    │   └── posterior_samples_trans_<function_type>_<permtype>.pt
-    └── logs/
-```
-
 ## Common Development Tasks
 
-### Running the Pipeline Locally
+### Testing
 
-For testing with toy data:
+Run infrastructure tests (requires pyroenv conda environment):
 
 ```bash
-# Prepare inputs
-python bayesDREAM_forClaude/run_pipeline/prepare_inputs.py test_run ./output
-
-# Run technical fit
-python bayesDREAM_forClaude/run_pipeline/run_technical.py \
-  --inlabel test_run --label test_run_1 --outdir ./output --cores 4
-
-# Run cis fit
-python bayesDREAM_forClaude/run_pipeline/run_cis.py \
-  --inlabel test_run --label test_run_1 --outdir ./output \
-  --cis_gene GFI1B --cores 4
-
-# Run trans fit
-python bayesDREAM_forClaude/run_pipeline/run_trans.py \
-  --inlabel test_run --label test_run_1 --outdir ./output \
-  --cis_gene GFI1B --permtype none --function_type additive_hill --cores 4
+/opt/anaconda3/envs/pyroenv/bin/python test_multimodal_fitting.py
 ```
 
 ### Modifying the Model
@@ -243,7 +106,6 @@ To add a new dose-response function:
 1. Define the function in the helper section (e.g., `def my_function(x, params)`)
 2. Add a conditional branch in `_model_y` to handle the new function type
 3. Update `fit_trans` to set appropriate priors and optimization settings
-4. Add the new type to `FUNCTION_TYPES` in `submit_jobs_new.sh`
 
 ### Testing Changes
 
