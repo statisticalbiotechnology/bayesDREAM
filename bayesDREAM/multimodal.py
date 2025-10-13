@@ -84,18 +84,29 @@ class MultiModalBayesDREAM(bayesDREAM):
         # Initialize modalities dict
         self.modalities = modalities if modalities is not None else {}
 
+        # Store original counts for base class initialization
+        counts_for_base = counts
+
         # Handle gene counts
         if counts is not None:
             if 'gene' in self.modalities:
                 warnings.warn("Both counts and modalities['gene'] provided. Using counts.")
 
-            # Create gene modality
+            # Exclude cis gene from gene count modality features
+            # (The base class still gets the full counts with cis gene for cis modeling)
+            if cis_gene is not None and cis_gene in counts.index:
+                print(f"[INFO] Excluding cis gene '{cis_gene}' from gene count modality features")
+                counts_trans = counts.drop(index=cis_gene)
+            else:
+                counts_trans = counts
+
+            # Create gene modality (trans genes only, without cis gene)
             gene_feature_meta = pd.DataFrame({
-                'gene': counts.index.tolist()
+                'gene': counts_trans.index.tolist()
             })
             self.modalities['gene'] = Modality(
                 name='gene',
-                counts=counts,
+                counts=counts_trans,
                 feature_meta=gene_feature_meta,
                 distribution='negbinom',
                 cells_axis=1
@@ -108,25 +119,30 @@ class MultiModalBayesDREAM(bayesDREAM):
 
         self.primary_modality = primary_modality
 
-        # Get counts from primary modality for base class
-        primary_counts = self.modalities[primary_modality].count_df
-        if primary_counts is None:
-            # Convert array to DataFrame
-            mod = self.modalities[primary_modality]
-            if mod.cells_axis == 1:
-                primary_counts = pd.DataFrame(
-                    mod.counts,
-                    index=mod.feature_meta.index,
-                    columns=mod.cell_names if mod.cell_names else range(mod.dims['n_cells'])
-                )
-            else:
-                primary_counts = pd.DataFrame(
-                    mod.counts.T,
-                    index=mod.feature_meta.index,
-                    columns=mod.cell_names if mod.cell_names else range(mod.dims['n_cells'])
-                )
+        # Get counts for base class initialization
+        # Use original counts (with cis gene) if provided, otherwise get from primary modality
+        if counts_for_base is None:
+            primary_counts = self.modalities[primary_modality].count_df
+            if primary_counts is None:
+                # Convert array to DataFrame
+                mod = self.modalities[primary_modality]
+                if mod.cells_axis == 1:
+                    primary_counts = pd.DataFrame(
+                        mod.counts,
+                        index=mod.feature_meta.index,
+                        columns=mod.cell_names if mod.cell_names else range(mod.dims['n_cells'])
+                    )
+                else:
+                    primary_counts = pd.DataFrame(
+                        mod.counts.T,
+                        index=mod.feature_meta.index,
+                        columns=mod.cell_names if mod.cell_names else range(mod.dims['n_cells'])
+                    )
+        else:
+            # Use original counts (includes cis gene for cis modeling)
+            primary_counts = counts_for_base
 
-        # Initialize base bayesDREAM with primary modality
+        # Initialize base bayesDREAM with original counts (including cis gene)
         super().__init__(
             meta=meta,
             counts=primary_counts,
@@ -174,12 +190,36 @@ class MultiModalBayesDREAM(bayesDREAM):
         if name in self.modalities and not overwrite:
             raise ValueError(f"Modality '{name}' already exists. Set overwrite=True to replace.")
 
-        # Validate cell alignment
+        # Validate cell alignment with primary modality
+        valid_meta_cells = set(self.meta['cell'].tolist())
+
         if modality.cell_names is not None:
-            if not set(modality.cell_names).issubset(set(self.meta['cell'].tolist())):
-                warnings.warn("Some cells in new modality are not in meta. Subsetting to common cells.")
-                valid_cells = [c for c in modality.cell_names if c in self.meta['cell'].tolist()]
-                modality = modality.get_cell_subset(valid_cells)
+            modality_cells = set(modality.cell_names)
+
+            # Check for cells in modality but not in meta (will be discarded)
+            extra_cells = modality_cells - valid_meta_cells
+            if extra_cells:
+                n_extra = len(extra_cells)
+                warnings.warn(
+                    f"[{name}] {n_extra} cell(s) in modality are not in the primary gene counts and will be discarded. "
+                    f"Cells without cis gene expression cannot be used in modeling.",
+                    UserWarning
+                )
+
+            # Check for cells in meta but not in modality (informational)
+            missing_cells = valid_meta_cells - modality_cells
+            if missing_cells:
+                n_missing = len(missing_cells)
+                print(f"[INFO] [{name}] {n_missing} cell(s) from primary modality are not in this modality (this is OK).")
+
+            # Subset to common cells
+            common_cells = [c for c in modality.cell_names if c in valid_meta_cells]
+            if len(common_cells) == 0:
+                raise ValueError(f"No overlapping cells between modality '{name}' and primary modality!")
+
+            if len(common_cells) < len(modality.cell_names):
+                modality = modality.get_cell_subset(common_cells)
+                print(f"[INFO] [{name}] Subsetted to {len(common_cells)} common cells.")
 
         self.modalities[name] = modality
         print(f"[INFO] Added modality: {modality}")
@@ -261,8 +301,7 @@ class MultiModalBayesDREAM(bayesDREAM):
         splicing_types: Union[str, List[str]] = ['donor', 'acceptor', 'exon_skip'],
         gene_of_interest: Optional[str] = None,
         min_cell_total: int = 1,
-        min_total_exon: int = 2,
-        r_code_path: Optional[str] = None
+        min_total_exon: int = 2
     ):
         """
         Add splicing modalities (donor usage, acceptor usage, exon skipping).
@@ -281,8 +320,6 @@ class MultiModalBayesDREAM(bayesDREAM):
             Minimum reads for donor/acceptor
         min_total_exon : int
             Minimum reads for exon skipping
-        r_code_path : str, optional
-            Path to CodeDump.R
         """
         if isinstance(splicing_types, str):
             splicing_types = [splicing_types]
@@ -294,8 +331,7 @@ class MultiModalBayesDREAM(bayesDREAM):
                 splicing_type=stype,
                 gene_of_interest=gene_of_interest,
                 min_cell_total=min_cell_total,
-                min_total_exon=min_total_exon,
-                r_code_path=r_code_path
+                min_total_exon=min_total_exon
             )
             self.add_modality(f'splicing_{stype}', modality)
 

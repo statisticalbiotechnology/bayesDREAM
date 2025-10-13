@@ -1,131 +1,116 @@
 """
 Splicing data processing for bayesDREAM.
 
-This module provides functions to compute donor usage, acceptor usage,
-and exon skipping metrics from splice junction counts, wrapping R functions
-from CodeDump.R.
+Pure Python implementation of donor/acceptor usage and exon skipping metrics.
+Previously relied on R functions from CodeDump.R, now fully in Python.
 """
 
-import os
-import subprocess
-import tempfile
+import warnings
+from typing import Optional, List, Tuple, Dict
 import numpy as np
 import pandas as pd
-from typing import Optional, Literal, Tuple
+
 from .modality import Modality
 
 
-def run_r_splicing_function(
-    r_function_name: str,
-    sj_counts: pd.DataFrame,
-    sj_meta: pd.DataFrame,
-    gene_of_interest: Optional[str] = None,
-    r_code_path: Optional[str] = None,
-    **kwargs
-) -> pd.DataFrame:
+def _normalize_strand(strand_values):
     """
-    Run an R splicing function from CodeDump.R.
+    Normalize strand notation to '+'/'-'.
+
+    Accepts: 1/2 (integers), '+'/'-', 'plus'/'minus'
+    Returns: '+' or '-' or None for invalid
+    """
+    def norm_single(x):
+        if pd.isna(x):
+            return None
+        if isinstance(x, (int, np.integer)):
+            return '+' if x == 1 else ('-' if x == 2 else None)
+        s = str(x).lower()
+        if s in ['+', '1', 'plus']:
+            return '+'
+        if s in ['-', '2', 'minus']:
+            return '-'
+        return None
+
+    if isinstance(strand_values, (list, pd.Series, np.ndarray)):
+        return [norm_single(x) for x in strand_values]
+    else:
+        return norm_single(strand_values)
+
+
+def _build_sj_index(sj_counts: pd.DataFrame,
+                    sj_meta: pd.DataFrame,
+                    gene_of_interest: Optional[str] = None) -> pd.DataFrame:
+    """
+    Build splice junction index with donor/acceptor annotations.
 
     Parameters
     ----------
-    r_function_name : str
-        Name of R function ('psi_donor_usage_strand', 'psi_acceptor_usage_strand', 'psi_exon_skipping_strand')
     sj_counts : pd.DataFrame
         Splice junction counts (junctions × cells)
     sj_meta : pd.DataFrame
-        Junction metadata with columns: coord.intron, chrom, intron_start, intron_end, strand
+        Junction metadata with: coord.intron, chrom, intron_start, intron_end, strand
     gene_of_interest : str, optional
         Filter to specific gene
-    r_code_path : str, optional
-        Path to CodeDump.R. If None, searches in splicing code/
-    **kwargs
-        Additional arguments passed to R function (min_cell_total, etc.)
 
     Returns
     -------
     pd.DataFrame
-        Long-format results with columns depending on function
+        Indexed SJ metadata with donor/acceptor positions
     """
-    # Find CodeDump.R
-    if r_code_path is None:
-        # Try to find it relative to this file
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        r_code_path = os.path.join(os.path.dirname(current_dir), 'splicing code', 'CodeDump.R')
+    # Validate required columns
+    required = ['coord.intron', 'chrom', 'intron_start', 'intron_end', 'strand']
+    missing = [c for c in required if c not in sj_meta.columns]
+    if missing:
+        raise ValueError(f"sj_meta missing required columns: {missing}")
 
-    if not os.path.exists(r_code_path):
-        raise FileNotFoundError(f"R code not found at {r_code_path}")
+    # Copy and prepare
+    idx = sj_meta.copy()
+    idx['strand'] = _normalize_strand(idx['strand'].values)
+    idx['start'] = idx['intron_start'].astype(int)
+    idx['end'] = idx['intron_end'].astype(int)
 
-    # Create temp directory for data exchange
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # Save inputs
-        counts_file = os.path.join(tmpdir, 'sj_counts.csv')
-        meta_file = os.path.join(tmpdir, 'sj_meta.csv')
-        output_file = os.path.join(tmpdir, 'output.csv')
+    # Define donor (5'SS) and acceptor (3'SS) based on strand
+    idx['donor'] = np.where(idx['strand'] == '+', idx['start'], idx['end'])
+    idx['acceptor'] = np.where(idx['strand'] == '+', idx['end'], idx['start'])
 
-        sj_counts.to_csv(counts_file)
-        sj_meta.to_csv(meta_file, index=False)
+    # Genomic coordinates (for exon skipping)
+    idx['left'] = np.minimum(idx['start'], idx['end'])
+    idx['right'] = np.maximum(idx['start'], idx['end'])
 
-        # Build R script
-        r_script = f"""
-library(data.table)
-source("{r_code_path}")
+    # Filter to gene of interest if specified
+    if gene_of_interest is not None:
+        gene_cols = [c for c in idx.columns if 'gene' in c.lower()]
+        if gene_cols:
+            # Check if any gene column contains the target gene
+            mask = pd.Series([False] * len(idx))
+            for col in gene_cols:
+                mask |= (idx[col] == gene_of_interest)
+            idx = idx[mask].copy()
+            if len(idx) == 0:
+                raise ValueError(f"No splice junctions found for gene: {gene_of_interest}")
+        else:
+            warnings.warn(f"gene_of_interest='{gene_of_interest}' specified but no gene columns in sj_meta")
 
-# Load data
-sj_counts <- read.csv("{counts_file}", row.names=1, check.names=FALSE)
-sj_meta <- read.csv("{meta_file}")
+    # Keep only junctions present in counts matrix
+    present = sj_counts.index.tolist()
+    idx = idx[idx['coord.intron'].isin(present)].copy()
 
-# Create MarvelObject-like structure
-MarvelObject <- list(
-    sj.count.matrix = as.matrix(sj_counts),
-    sj.metadata = sj_meta
-)
+    if len(idx) == 0:
+        raise ValueError("No splice junctions overlap between sj_counts and sj_meta")
 
-# Run function
-gene_of_interest <- {f'"{gene_of_interest}"' if gene_of_interest else 'NULL'}
-min_cell_total <- {kwargs.get('min_cell_total', 0)}
-min_total <- {kwargs.get('min_total_exon', 0)}
-
-result <- {r_function_name}(
-    MarvelObject = MarvelObject,
-    feature_dt = sj_meta,
-    gene_of_interest = gene_of_interest,
-    min_cell_total = min_cell_total
-)
-
-# Save result
-write.csv(result, "{output_file}", row.names=FALSE)
-"""
-
-        # Handle exon skipping parameters
-        if r_function_name == 'psi_exon_skipping_strand':
-            method = kwargs.get('method', 'min')
-            r_script = r_script.replace('min_cell_total = min_cell_total',
-                                       f'min_total = min_total, method = "{method}"')
-
-        # Write and run R script
-        script_file = os.path.join(tmpdir, 'run_splicing.R')
-        with open(script_file, 'w') as f:
-            f.write(r_script)
-
-        result = subprocess.run(['Rscript', script_file], capture_output=True, text=True)
-
-        if result.returncode != 0:
-            raise RuntimeError(f"R script failed:\n{result.stderr}")
-
-        # Read results
-        output_df = pd.read_csv(output_file)
-        return output_df
+    return idx
 
 
-def process_donor_usage(
-    sj_counts: pd.DataFrame,
-    sj_meta: pd.DataFrame,
-    gene_of_interest: Optional[str] = None,
-    min_cell_total: int = 1,
-    r_code_path: Optional[str] = None
-) -> Tuple[np.ndarray, pd.DataFrame, pd.DataFrame]:
+def process_donor_usage(sj_counts: pd.DataFrame,
+                       sj_meta: pd.DataFrame,
+                       gene_of_interest: Optional[str] = None,
+                       min_cell_total: int = 1) -> Tuple[np.ndarray, pd.DataFrame, List[str]]:
     """
-    Compute donor usage PSI values and return in modality-ready format.
+    Compute donor usage (which acceptor is used for each donor site).
+
+    For each donor site (5' splice site), count how many reads go to each
+    possible acceptor (3' splice site). Returns multinomial counts.
 
     Parameters
     ----------
@@ -136,161 +121,90 @@ def process_donor_usage(
     gene_of_interest : str, optional
         Filter to specific gene
     min_cell_total : int
-        Minimum total reads at donor site per cell
-    r_code_path : str, optional
-        Path to CodeDump.R
+        Minimum total reads per donor per cell to include
 
     Returns
     -------
-    counts_array : np.ndarray
-        3D array (donors, cells, acceptors) of junction counts
-    donor_meta : pd.DataFrame
-        Donor site metadata (chrom, strand, donor position, list of acceptors)
-    cell_order : pd.DataFrame
-        Cell ordering with cell names
+    counts_3d : np.ndarray
+        Shape: (n_donors, n_cells, max_acceptors_per_donor)
+    feature_meta : pd.DataFrame
+        Donor site metadata with columns: chrom, strand, donor, acceptors (list), n_acceptors
+    cell_names : list
+        Cell identifiers
     """
-    # Run R function
-    psi_long = run_r_splicing_function(
-        'psi_donor_usage_strand',
-        sj_counts=sj_counts,
-        sj_meta=sj_meta,
-        gene_of_interest=gene_of_interest,
-        min_cell_total=min_cell_total,
-        r_code_path=r_code_path
-    )
+    idx = _build_sj_index(sj_counts, sj_meta, gene_of_interest)
 
-    # Convert to wide format grouped by donor
-    # Group by (chrom, strand, donor) to get donor-level features
-    donors = psi_long[['chrom', 'strand', 'donor']].drop_duplicates()
-    donors['donor_id'] = range(len(donors))
+    # Group by (chrom, strand, donor)
+    donor_groups = idx.groupby(['chrom', 'strand', 'donor'], sort=True)
 
-    # For each donor, get all acceptors
-    donor_to_acceptors = psi_long.groupby(['chrom', 'strand', 'donor'])['acceptor'].apply(
-        lambda x: sorted(x.unique())
-    ).to_dict()
+    # Get cell names
+    cell_names = sj_counts.columns.tolist()
+    n_cells = len(cell_names)
 
-    # Create 3D array: (donors, cells, acceptors)
-    cells = sorted(psi_long['cell.id'].unique())
-    max_acceptors = max(len(acc) for acc in donor_to_acceptors.values())
+    # Build feature metadata and 3D array
+    feature_rows = []
+    all_counts = []
 
-    counts_array = np.zeros((len(donors), len(cells), max_acceptors))
+    for (chrom, strand, donor), group in donor_groups:
+        # Get all acceptors for this donor
+        acceptors = sorted(group['acceptor'].unique())
+        n_acceptors = len(acceptors)
 
-    for _, donor_row in donors.iterrows():
-        donor_idx = donor_row['donor_id']
-        donor_key = (donor_row['chrom'], donor_row['strand'], donor_row['donor'])
-        acceptors_list = donor_to_acceptors[donor_key]
+        # Build mapping from acceptor to index
+        acceptor_to_idx = {acc: i for i, acc in enumerate(acceptors)}
 
-        for acc_idx, acceptor in enumerate(acceptors_list):
-            # Get counts for this donor-acceptor pair
-            subset = psi_long[
-                (psi_long['chrom'] == donor_row['chrom']) &
-                (psi_long['strand'] == donor_row['strand']) &
-                (psi_long['donor'] == donor_row['donor']) &
-                (psi_long['acceptor'] == acceptor)
-            ]
+        # Initialize counts for this donor: (n_cells, n_acceptors)
+        donor_counts = np.zeros((n_cells, n_acceptors), dtype=float)
 
-            for _, row in subset.iterrows():
-                cell_idx = cells.index(row['cell.id'])
-                counts_array[donor_idx, cell_idx, acc_idx] = row['sj.count']
+        # Fill in counts for each junction
+        for _, row in group.iterrows():
+            coord = row['coord.intron']
+            if coord not in sj_counts.index:
+                continue
+            acceptor = row['acceptor']
+            acc_idx = acceptor_to_idx[acceptor]
 
-    # Create donor metadata
-    donors['acceptors'] = donors.apply(
-        lambda row: donor_to_acceptors[(row['chrom'], row['strand'], row['donor'])],
-        axis=1
-    )
-    donors['n_acceptors'] = donors['acceptors'].apply(len)
+            # Add counts for all cells
+            donor_counts[:, acc_idx] += sj_counts.loc[coord].values
 
-    cell_df = pd.DataFrame({'cell': cells})
+        # Apply min_cell_total filter
+        if min_cell_total > 0:
+            cell_totals = donor_counts.sum(axis=1)
+            donor_counts[cell_totals < min_cell_total, :] = 0
 
-    return counts_array, donors, cell_df
+        all_counts.append(donor_counts)
+
+        feature_rows.append({
+            'chrom': chrom,
+            'strand': strand,
+            'donor': donor,
+            'acceptors': acceptors,
+            'n_acceptors': n_acceptors
+        })
+
+    # Stack into 3D array: (n_donors, n_cells, max_acceptors)
+    max_acceptors = max(row['n_acceptors'] for row in feature_rows)
+    n_donors = len(feature_rows)
+
+    counts_3d = np.zeros((n_donors, n_cells, max_acceptors), dtype=float)
+    for i, donor_counts in enumerate(all_counts):
+        n_acc = donor_counts.shape[1]
+        counts_3d[i, :, :n_acc] = donor_counts
+
+    feature_meta = pd.DataFrame(feature_rows)
+
+    return counts_3d, feature_meta, cell_names
 
 
-def process_acceptor_usage(
-    sj_counts: pd.DataFrame,
-    sj_meta: pd.DataFrame,
-    gene_of_interest: Optional[str] = None,
-    min_cell_total: int = 1,
-    r_code_path: Optional[str] = None
-) -> Tuple[np.ndarray, pd.DataFrame, pd.DataFrame]:
+def process_acceptor_usage(sj_counts: pd.DataFrame,
+                           sj_meta: pd.DataFrame,
+                           gene_of_interest: Optional[str] = None,
+                           min_cell_total: int = 1) -> Tuple[np.ndarray, pd.DataFrame, List[str]]:
     """
-    Compute acceptor usage PSI values and return in modality-ready format.
+    Compute acceptor usage (which donor is used for each acceptor site).
 
-    Similar to process_donor_usage but groups by acceptor site.
-
-    Returns
-    -------
-    counts_array : np.ndarray
-        3D array (acceptors, cells, donors) of junction counts
-    acceptor_meta : pd.DataFrame
-        Acceptor site metadata
-    cell_order : pd.DataFrame
-        Cell ordering
-    """
-    # Run R function
-    psi_long = run_r_splicing_function(
-        'psi_acceptor_usage_strand',
-        sj_counts=sj_counts,
-        sj_meta=sj_meta,
-        gene_of_interest=gene_of_interest,
-        min_cell_total=min_cell_total,
-        r_code_path=r_code_path
-    )
-
-    # Group by acceptor
-    acceptors = psi_long[['chrom', 'strand', 'acceptor']].drop_duplicates()
-    acceptors['acceptor_id'] = range(len(acceptors))
-
-    # For each acceptor, get all donors
-    acceptor_to_donors = psi_long.groupby(['chrom', 'strand', 'acceptor'])['donor'].apply(
-        lambda x: sorted(x.unique())
-    ).to_dict()
-
-    # Create 3D array: (acceptors, cells, donors)
-    cells = sorted(psi_long['cell.id'].unique())
-    max_donors = max(len(don) for don in acceptor_to_donors.values())
-
-    counts_array = np.zeros((len(acceptors), len(cells), max_donors))
-
-    for _, acc_row in acceptors.iterrows():
-        acc_idx = acc_row['acceptor_id']
-        acc_key = (acc_row['chrom'], acc_row['strand'], acc_row['acceptor'])
-        donors_list = acceptor_to_donors[acc_key]
-
-        for don_idx, donor in enumerate(donors_list):
-            # Get counts for this acceptor-donor pair
-            subset = psi_long[
-                (psi_long['chrom'] == acc_row['chrom']) &
-                (psi_long['strand'] == acc_row['strand']) &
-                (psi_long['acceptor'] == acc_row['acceptor']) &
-                (psi_long['donor'] == donor)
-            ]
-
-            for _, row in subset.iterrows():
-                cell_idx = cells.index(row['cell.id'])
-                counts_array[acc_idx, cell_idx, don_idx] = row['sj.count']
-
-    # Create acceptor metadata
-    acceptors['donors'] = acceptors.apply(
-        lambda row: acceptor_to_donors[(row['chrom'], row['strand'], row['acceptor'])],
-        axis=1
-    )
-    acceptors['n_donors'] = acceptors['donors'].apply(len)
-
-    cell_df = pd.DataFrame({'cell': cells})
-
-    return counts_array, acceptors, cell_df
-
-
-def process_exon_skipping(
-    sj_counts: pd.DataFrame,
-    sj_meta: pd.DataFrame,
-    gene_of_interest: Optional[str] = None,
-    min_total: int = 2,
-    method: Literal['min', 'mean'] = 'min',
-    r_code_path: Optional[str] = None
-) -> Tuple[np.ndarray, np.ndarray, pd.DataFrame, pd.DataFrame]:
-    """
-    Compute exon skipping events and return in binomial-ready format.
+    For each acceptor site (3' splice site), count how many reads come from each
+    possible donor (5' splice site). Returns multinomial counts.
 
     Parameters
     ----------
@@ -300,67 +214,381 @@ def process_exon_skipping(
         Junction metadata
     gene_of_interest : str, optional
         Filter to specific gene
-    min_total : int
-        Minimum total reads (inclusion + skipping) per cell
+    min_cell_total : int
+        Minimum total reads per acceptor per cell to include
+
+    Returns
+    -------
+    counts_3d : np.ndarray
+        Shape: (n_acceptors, n_cells, max_donors_per_acceptor)
+    feature_meta : pd.DataFrame
+        Acceptor site metadata with columns: chrom, strand, acceptor, donors (list), n_donors
+    cell_names : list
+        Cell identifiers
+    """
+    idx = _build_sj_index(sj_counts, sj_meta, gene_of_interest)
+
+    # Group by (chrom, strand, acceptor)
+    acceptor_groups = idx.groupby(['chrom', 'strand', 'acceptor'], sort=True)
+
+    # Get cell names
+    cell_names = sj_counts.columns.tolist()
+    n_cells = len(cell_names)
+
+    # Build feature metadata and 3D array
+    feature_rows = []
+    all_counts = []
+
+    for (chrom, strand, acceptor), group in acceptor_groups:
+        # Get all donors for this acceptor
+        donors = sorted(group['donor'].unique())
+        n_donors = len(donors)
+
+        # Build mapping from donor to index
+        donor_to_idx = {don: i for i, don in enumerate(donors)}
+
+        # Initialize counts for this acceptor: (n_cells, n_donors)
+        acceptor_counts = np.zeros((n_cells, n_donors), dtype=float)
+
+        # Fill in counts for each junction
+        for _, row in group.iterrows():
+            coord = row['coord.intron']
+            if coord not in sj_counts.index:
+                continue
+            donor = row['donor']
+            don_idx = donor_to_idx[donor]
+
+            # Add counts for all cells
+            acceptor_counts[:, don_idx] += sj_counts.loc[coord].values
+
+        # Apply min_cell_total filter
+        if min_cell_total > 0:
+            cell_totals = acceptor_counts.sum(axis=1)
+            acceptor_counts[cell_totals < min_cell_total, :] = 0
+
+        all_counts.append(acceptor_counts)
+
+        feature_rows.append({
+            'chrom': chrom,
+            'strand': strand,
+            'acceptor': acceptor,
+            'donors': donors,
+            'n_donors': n_donors
+        })
+
+    # Stack into 3D array: (n_acceptors, n_cells, max_donors)
+    max_donors = max(row['n_donors'] for row in feature_rows)
+    n_acceptors = len(feature_rows)
+
+    counts_3d = np.zeros((n_acceptors, n_cells, max_donors), dtype=float)
+    for i, acceptor_counts in enumerate(all_counts):
+        n_don = acceptor_counts.shape[1]
+        counts_3d[i, :, :n_don] = acceptor_counts
+
+    feature_meta = pd.DataFrame(feature_rows)
+
+    return counts_3d, feature_meta, cell_names
+
+
+def _find_cassette_triplets_strand(sj_counts: pd.DataFrame,
+                                   sj_meta: pd.DataFrame,
+                                   gene_of_interest: Optional[str] = None) -> pd.DataFrame:
+    """
+    Find cassette exon triplets using strand-aware coordinates.
+
+    A cassette exon event consists of:
+    - sj_skip: Junction that skips the exon (donor d1 -> acceptor a3)
+    - sj_inc1: Junction including the exon's 5' end (donor d1 -> acceptor a2)
+    - sj_inc2: Junction including the exon's 3' end (donor d2 -> acceptor a3)
+
+    Strand-specific ordering:
+    - Plus strand: d1 < a2 < d2 < a3
+    - Minus strand: d1 > a2 > d2 > a3
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: trip_id, chrom, strand, d1, a2, d2, a3, sj_inc1, sj_inc2, sj_skip
+    """
+    idx = _build_sj_index(sj_counts, sj_meta, gene_of_interest)
+
+    # Keep only clean junctions
+    idx = idx[idx['strand'].notna() & idx['donor'].notna() & idx['acceptor'].notna()].copy()
+    idx = idx.drop_duplicates(subset=['chrom', 'strand', 'donor', 'acceptor', 'coord.intron'])
+
+    if len(idx) == 0:
+        return pd.DataFrame(columns=['trip_id', 'chrom', 'strand', 'd1', 'a2', 'd2', 'a3',
+                                    'sj_inc1', 'sj_inc2', 'sj_skip'])
+
+    # Build efficient lookup structures
+    idx_by_donor = idx.groupby(['chrom', 'strand', 'donor'])
+    idx_by_acceptor = idx.groupby(['chrom', 'strand', 'acceptor'])
+    idx_by_pair = idx.set_index(['chrom', 'strand', 'donor', 'acceptor'])['coord.intron'].to_dict()
+
+    triplets = []
+
+    # For each potential skip junction
+    for _, row in idx.iterrows():
+        chrom = row['chrom']
+        strand = row['strand']
+        d1 = row['donor']
+        a3 = row['acceptor']
+        sj_skip = row['coord.intron']
+
+        # Find all acceptors from d1
+        try:
+            group_d1 = idx_by_donor.get_group((chrom, strand, d1))
+            a2_candidates = group_d1['acceptor'].unique()
+        except KeyError:
+            continue
+
+        # Find all donors to a3
+        try:
+            group_a3 = idx_by_acceptor.get_group((chrom, strand, a3))
+            d2_candidates = group_a3['donor'].unique()
+        except KeyError:
+            continue
+
+        # Check all combinations
+        for a2 in a2_candidates:
+            if pd.isna(a2):
+                continue
+            for d2 in d2_candidates:
+                if pd.isna(d2):
+                    continue
+
+                # Verify strand-specific ordering
+                if strand == '+':
+                    if not (d1 < a2 < d2 < a3):
+                        continue
+                else:  # strand == '-'
+                    if not (d1 > a2 > d2 > a3):
+                        continue
+
+                # Check if inclusion junctions exist
+                sj_inc1 = idx_by_pair.get((chrom, strand, d1, a2))
+                sj_inc2 = idx_by_pair.get((chrom, strand, d2, a3))
+
+                if sj_inc1 is None or sj_inc2 is None:
+                    continue
+
+                triplets.append({
+                    'chrom': chrom,
+                    'strand': strand,
+                    'd1': d1,
+                    'a2': a2,
+                    'd2': d2,
+                    'a3': a3,
+                    'sj_inc1': sj_inc1,
+                    'sj_inc2': sj_inc2,
+                    'sj_skip': sj_skip
+                })
+
+    if not triplets:
+        return pd.DataFrame(columns=['trip_id', 'chrom', 'strand', 'd1', 'a2', 'd2', 'a3',
+                                    'sj_inc1', 'sj_inc2', 'sj_skip'])
+
+    trips_df = pd.DataFrame(triplets)
+    trips_df = trips_df.drop_duplicates()
+    trips_df['trip_id'] = range(len(trips_df))
+
+    return trips_df
+
+
+def _find_cassette_triplets_genomic(sj_counts: pd.DataFrame,
+                                    sj_meta: pd.DataFrame,
+                                    gene_of_interest: Optional[str] = None) -> pd.DataFrame:
+    """
+    Find cassette exon triplets using genomic coordinates (fallback when strand info is poor).
+
+    Uses left/right genomic positions instead of strand-aware donor/acceptor.
+    Pattern: L1 < R2 < L2 < R3
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: trip_id, chrom, strand, d1, a2, d2, a3, sj_inc1, sj_inc2, sj_skip
+    """
+    idx = _build_sj_index(sj_counts, sj_meta, gene_of_interest)
+
+    # Keep only clean junctions
+    idx = idx[idx['left'].notna() & idx['right'].notna()].copy()
+
+    if len(idx) == 0:
+        return pd.DataFrame(columns=['trip_id', 'chrom', 'strand', 'd1', 'a2', 'd2', 'a3',
+                                    'sj_inc1', 'sj_inc2', 'sj_skip'])
+
+    # Build lookup structures
+    idx_by_left = idx.groupby(['chrom', 'left'])
+    idx_by_right = idx.groupby(['chrom', 'right'])
+    idx_by_coords = idx.set_index(['chrom', 'left', 'right'])['coord.intron'].to_dict()
+
+    triplets = []
+
+    for _, row in idx.iterrows():
+        chrom = row['chrom']
+        L1 = row['left']
+        R3 = row['right']
+        sj_skip = row['coord.intron']
+        strand = row.get('strand', None)
+
+        # Find junctions with left=L1 and right between L1 and R3
+        try:
+            group_L1 = idx_by_left.get_group((chrom, L1))
+            R2_candidates = group_L1[(group_L1['right'] > L1) & (group_L1['right'] < R3)]['right'].unique()
+        except KeyError:
+            continue
+
+        # Find junctions with right=R3 and left between L1 and R3
+        try:
+            group_R3 = idx_by_right.get_group((chrom, R3))
+            L2_candidates = group_R3[(group_R3['left'] > L1) & (group_R3['left'] < R3)]['left'].unique()
+        except KeyError:
+            continue
+
+        for R2 in R2_candidates:
+            sj_inc1 = idx_by_coords.get((chrom, L1, R2))
+            if sj_inc1 is None:
+                continue
+
+            for L2 in L2_candidates:
+                sj_inc2 = idx_by_coords.get((chrom, L2, R3))
+                if sj_inc2 is None:
+                    continue
+
+                triplets.append({
+                    'chrom': chrom,
+                    'strand': strand if pd.notna(strand) else None,
+                    'd1': L1,
+                    'a2': R2,
+                    'd2': L2,
+                    'a3': R3,
+                    'sj_inc1': sj_inc1,
+                    'sj_inc2': sj_inc2,
+                    'sj_skip': sj_skip
+                })
+
+    if not triplets:
+        return pd.DataFrame(columns=['trip_id', 'chrom', 'strand', 'd1', 'a2', 'd2', 'a3',
+                                    'sj_inc1', 'sj_inc2', 'sj_skip'])
+
+    trips_df = pd.DataFrame(triplets)
+    trips_df = trips_df.drop_duplicates()
+    trips_df['trip_id'] = range(len(trips_df))
+
+    return trips_df
+
+
+def process_exon_skipping(sj_counts: pd.DataFrame,
+                         sj_meta: pd.DataFrame,
+                         gene_of_interest: Optional[str] = None,
+                         min_total_exon: int = 2,
+                         method: str = 'min',
+                         fallback_genomic: bool = True) -> Tuple[np.ndarray, np.ndarray, pd.DataFrame, List[str]]:
+    """
+    Compute exon skipping (cassette exon) inclusion counts.
+
+    For each cassette exon event, compute:
+    - inc: Inclusion reads (min or mean of inc1 and inc2)
+    - tot: Total reads (inc + skip)
+
+    Returns binomial data (inclusion count, total count).
+
+    Parameters
+    ----------
+    sj_counts : pd.DataFrame
+        Splice junction counts (junctions × cells)
+    sj_meta : pd.DataFrame
+        Junction metadata
+    gene_of_interest : str, optional
+        Filter to specific gene
+    min_total_exon : int
+        Minimum total reads per event per cell
     method : str
-        How to combine inc1 and inc2 counts ('min' or 'mean')
-    r_code_path : str, optional
-        Path to CodeDump.R
+        'min' (default) or 'mean' for computing inclusion from inc1 and inc2
+    fallback_genomic : bool
+        If True, use genomic coordinates when strand-aware search finds no events
 
     Returns
     -------
     inclusion_counts : np.ndarray
-        2D array (events, cells) of inclusion counts
+        Shape: (n_events, n_cells)
     total_counts : np.ndarray
-        2D array (events, cells) of total counts (inclusion + skipping)
-    event_meta : pd.DataFrame
-        Exon skipping event metadata
-    cell_order : pd.DataFrame
-        Cell ordering
+        Shape: (n_events, n_cells)
+    feature_meta : pd.DataFrame
+        Event metadata with columns: trip_id, chrom, strand, d1, a2, d2, a3, sj_inc1, sj_inc2, sj_skip
+    cell_names : list
+        Cell identifiers
     """
-    # Run R function
-    result = run_r_splicing_function(
-        'psi_exon_skipping_strand',
-        sj_counts=sj_counts,
-        sj_meta=sj_meta,
-        gene_of_interest=gene_of_interest,
-        min_total_exon=min_total,
-        method=method,
-        r_code_path=r_code_path
-    )
+    # Find cassette triplets
+    trips = _find_cassette_triplets_strand(sj_counts, sj_meta, gene_of_interest)
 
-    # Get unique events and cells
-    events = result[['trip_id', 'chrom', 'strand', 'd1', 'a2', 'd2', 'a3',
-                    'sj_inc1', 'sj_inc2', 'sj_skip']].drop_duplicates()
-    events = events.sort_values('trip_id').reset_index(drop=True)
+    if len(trips) == 0 and fallback_genomic:
+        print("[INFO] No strand-aware cassette exons found, trying genomic coordinates...")
+        trips = _find_cassette_triplets_genomic(sj_counts, sj_meta, gene_of_interest)
 
-    cells = sorted(result['cell.id'].unique())
+    if len(trips) == 0:
+        # Return empty arrays
+        cell_names = sj_counts.columns.tolist()
+        return (np.zeros((0, len(cell_names))),
+                np.zeros((0, len(cell_names))),
+                pd.DataFrame(columns=['trip_id', 'chrom', 'strand', 'd1', 'a2', 'd2', 'a3',
+                                     'sj_inc1', 'sj_inc2', 'sj_skip']),
+                cell_names)
 
-    # Create 2D arrays
-    inclusion_counts = np.zeros((len(events), len(cells)))
-    total_counts = np.zeros((len(events), len(cells)))
+    cell_names = sj_counts.columns.tolist()
+    n_cells = len(cell_names)
+    n_events = len(trips)
 
-    for _, row in result.iterrows():
-        event_idx = events[events['trip_id'] == row['trip_id']].index[0]
-        cell_idx = cells.index(row['cell.id'])
+    # Initialize arrays
+    inclusion_counts = np.zeros((n_events, n_cells), dtype=float)
+    total_counts = np.zeros((n_events, n_cells), dtype=float)
 
-        inclusion_counts[event_idx, cell_idx] = row['inc'] if not pd.isna(row['inc']) else 0
-        total_counts[event_idx, cell_idx] = row['tot'] if not pd.isna(row['tot']) else 0
+    # Get counts for all needed junctions
+    needed_sjs = pd.concat([trips['sj_inc1'], trips['sj_inc2'], trips['sj_skip']]).unique()
+    needed_sjs = [sj for sj in needed_sjs if sj in sj_counts.index]
+    sj_data = sj_counts.loc[needed_sjs]
 
-    cell_df = pd.DataFrame({'cell': cells})
+    for i, row in trips.iterrows():
+        sj_inc1 = row['sj_inc1']
+        sj_inc2 = row['sj_inc2']
+        sj_skip = row['sj_skip']
 
-    return inclusion_counts, total_counts, events, cell_df
+        # Get counts
+        inc1 = sj_data.loc[sj_inc1].values if sj_inc1 in sj_data.index else np.zeros(n_cells)
+        inc2 = sj_data.loc[sj_inc2].values if sj_inc2 in sj_data.index else np.zeros(n_cells)
+        skip = sj_data.loc[sj_skip].values if sj_skip in sj_data.index else np.zeros(n_cells)
+
+        # Compute inclusion
+        if method == 'min':
+            inc = np.minimum(inc1, inc2)
+        elif method == 'mean':
+            inc = (inc1 + inc2) / 2.0
+        else:
+            raise ValueError(f"method must be 'min' or 'mean', got: {method}")
+
+        # Total = inclusion + skipping
+        tot = inc + skip
+
+        # Apply minimum total filter
+        if min_total_exon > 0:
+            mask = tot < min_total_exon
+            inc[mask] = 0
+            tot[mask] = 0
+
+        inclusion_counts[i, :] = inc
+        total_counts[i, :] = tot
+
+    return inclusion_counts, total_counts, trips, cell_names
 
 
-def create_splicing_modality(
-    sj_counts: pd.DataFrame,
-    sj_meta: pd.DataFrame,
-    splicing_type: Literal['donor', 'acceptor', 'exon_skip'],
-    gene_of_interest: Optional[str] = None,
-    min_cell_total: int = 1,
-    min_total_exon: int = 2,
-    r_code_path: Optional[str] = None
-) -> Modality:
+def create_splicing_modality(sj_counts: pd.DataFrame,
+                             sj_meta: pd.DataFrame,
+                             splicing_type: str,
+                             gene_of_interest: Optional[str] = None,
+                             min_cell_total: int = 1,
+                             min_total_exon: int = 2,
+                             **kwargs) -> Modality:
     """
     Create a Modality object for splicing data.
 
@@ -369,7 +597,7 @@ def create_splicing_modality(
     sj_counts : pd.DataFrame
         Splice junction counts (junctions × cells)
     sj_meta : pd.DataFrame
-        Junction metadata with columns: coord.intron, chrom, intron_start, intron_end, strand
+        Junction metadata with: coord.intron, chrom, intron_start, intron_end, strand
     splicing_type : str
         Type of splicing metric: 'donor', 'acceptor', or 'exon_skip'
     gene_of_interest : str, optional
@@ -378,50 +606,56 @@ def create_splicing_modality(
         Minimum reads for donor/acceptor usage
     min_total_exon : int
         Minimum reads for exon skipping
-    r_code_path : str, optional
-        Path to CodeDump.R
+    **kwargs
+        Additional arguments (e.g., method, fallback_genomic for exon_skip)
 
     Returns
     -------
     Modality
-        Splicing modality with appropriate distribution
+        Modality object with appropriate distribution and metadata
     """
     if splicing_type == 'donor':
-        counts_array, feature_meta, _ = process_donor_usage(
-            sj_counts, sj_meta, gene_of_interest, min_cell_total, r_code_path
+        counts_3d, feature_meta, cell_names = process_donor_usage(
+            sj_counts, sj_meta, gene_of_interest, min_cell_total
         )
         return Modality(
             name='splicing_donor',
-            counts=counts_array,
+            counts=counts_3d,
             feature_meta=feature_meta,
             distribution='multinomial',
-            cells_axis=1
+            cells_axis=1,
+            cell_names=cell_names
         )
 
     elif splicing_type == 'acceptor':
-        counts_array, feature_meta, _ = process_acceptor_usage(
-            sj_counts, sj_meta, gene_of_interest, min_cell_total, r_code_path
+        counts_3d, feature_meta, cell_names = process_acceptor_usage(
+            sj_counts, sj_meta, gene_of_interest, min_cell_total
         )
         return Modality(
             name='splicing_acceptor',
-            counts=counts_array,
+            counts=counts_3d,
             feature_meta=feature_meta,
             distribution='multinomial',
-            cells_axis=1
+            cells_axis=1,
+            cell_names=cell_names
         )
 
     elif splicing_type == 'exon_skip':
-        inc_counts, total_counts, feature_meta, _ = process_exon_skipping(
-            sj_counts, sj_meta, gene_of_interest, min_total_exon, 'min', r_code_path
+        method = kwargs.get('method', 'min')
+        fallback_genomic = kwargs.get('fallback_genomic', True)
+
+        inc_counts, tot_counts, feature_meta, cell_names = process_exon_skipping(
+            sj_counts, sj_meta, gene_of_interest, min_total_exon, method, fallback_genomic
         )
         return Modality(
             name='splicing_exon_skip',
             counts=inc_counts,
             feature_meta=feature_meta,
             distribution='binomial',
-            denominator=total_counts,
-            cells_axis=1
+            denominator=tot_counts,
+            cells_axis=1,
+            cell_names=cell_names
         )
 
     else:
-        raise ValueError(f"Unknown splicing_type: {splicing_type}")
+        raise ValueError(f"splicing_type must be 'donor', 'acceptor', or 'exon_skip', got: {splicing_type}")
