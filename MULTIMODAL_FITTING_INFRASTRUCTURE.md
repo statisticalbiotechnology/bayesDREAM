@@ -248,7 +248,7 @@ model.fit_trans(distribution='multinomial', function_type='additive_hill')
 **Rationale**:
 - Users can continue using `bayesDREAM` or `MultiModalBayesDREAM` with gene expression
 - Pipeline scripts (`run_technical.py`, `run_cis.py`, `run_trans.py`) work unchanged
-- New functionality is opt-in (use `fit_modality_technical()` / `fit_modality_trans()`)
+- New functionality is opt-in via the `distribution` parameter
 
 ### 4. Infrastructure Before Implementation
 
@@ -268,7 +268,7 @@ model.fit_trans(distribution='multinomial', function_type='additive_hill')
 
 ### Modified Files
 - `bayesDREAM/model.py`: ✅ Refactored `_model_technical` and `_model_y` for distribution flexibility (~2500 lines total)
-- `bayesDREAM/multimodal.py`: Added `fit_modality_technical()` and `fit_modality_trans()` (~640 lines total)
+- `bayesDREAM/multimodal.py`: ✅ Multi-modal wrapper class (~530 lines total)
 - `bayesDREAM/__init__.py`: Added distribution and utility exports
 - `MULTIMODAL_IMPLEMENTATION.md`: Updated with complete implementation status
 - `README.md`: Updated with distribution-flexible examples
@@ -318,6 +318,5 @@ cd "/Users/lrosen/Library/Mobile Documents/com~apple~CloudDocs/Documents/Postdoc
 
 ## Next Steps (Future Enhancements)
 
-1. **Modality-specific wrapper methods**: Enhance `fit_modality_technical()` and `fit_modality_trans()` to handle modality-specific preprocessing
-2. **Cross-modality modeling**: Joint models across multiple modalities
-3. **Additional distributions**: Extend registry with more specialized distributions as needed
+1. **Cross-modality modeling**: Joint models across multiple modalities
+2. **Additional distributions**: Extend registry with more specialized distributions as needed

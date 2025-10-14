@@ -287,11 +287,10 @@ mvnormal                  3D: (F, C, D)          SpliZVD
 │    - add_custom_modality(name, counts, feature_meta, dist)      │
 │    - get_modality(name) → Modality                              │
 │    - list_modalities() → pd.DataFrame                           │
-│    - fit_modality_technical(modality_name, ...)                 │
-│    - fit_modality_trans(modality_name, ...)                     │
 │                                                                  │
 │  Inherited Methods (work on primary modality):                  │
 │    - fit_technical(), fit_cis(), fit_trans() [from bayesDREAM] │
+│    - All methods accept distribution parameter for flexibility  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -327,8 +326,8 @@ Current (v0.2.0+):
 └─────────────────────────────────────────────────────────────────┘
 
 Future:
-  - Modality-specific fitting via fit_modality_trans()
   - Cross-modality joint models
+  - Modality-specific preprocessing and transformations
 ```
 
 ## Module Dependencies

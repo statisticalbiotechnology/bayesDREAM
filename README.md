@@ -96,12 +96,17 @@ donor_mod = model.get_modality('splicing_donor')
 
 ## Documentation
 
+### User Guides
 - **[QUICKSTART_MULTIMODAL.md](QUICKSTART_MULTIMODAL.md)** - Quick reference guide
+- **[API_REFERENCE.md](API_REFERENCE.md)** - Complete API reference with all functions
+- **[DATA_ACCESS.md](DATA_ACCESS.md)** - Guide to accessing and working with data
+- **[examples/multimodal_example.py](examples/multimodal_example.py)** - Complete examples
+
+### Technical Documentation
 - **[CLAUDE.md](CLAUDE.md)** - Complete architecture documentation
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - Visual architecture diagrams
 - **[MULTIMODAL_IMPLEMENTATION.md](MULTIMODAL_IMPLEMENTATION.md)** - Implementation details
 - **[MULTIMODAL_FITTING_INFRASTRUCTURE.md](MULTIMODAL_FITTING_INFRASTRUCTURE.md)** - Distribution-specific fitting
-- **[examples/multimodal_example.py](examples/multimodal_example.py)** - Complete examples
 
 ## Data Requirements
 
