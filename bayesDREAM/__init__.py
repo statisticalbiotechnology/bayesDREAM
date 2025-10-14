@@ -16,7 +16,10 @@ from .splicing import (
 from .distributions import (
     get_observation_sampler,
     requires_denominator,
+    requires_sum_factor,
     is_3d_distribution,
+    supports_cell_line_effects,
+    get_cell_line_effect_type,
     DISTRIBUTION_REGISTRY
 )
 from .utils import (
@@ -39,7 +42,10 @@ __all__ = [
     'process_exon_skipping',
     'get_observation_sampler',
     'requires_denominator',
+    'requires_sum_factor',
     'is_3d_distribution',
+    'supports_cell_line_effects',
+    'get_cell_line_effect_type',
     'DISTRIBUTION_REGISTRY',
     'set_max_threads',
     'Hill_based_positive',

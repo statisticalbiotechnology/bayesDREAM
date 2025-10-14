@@ -1596,8 +1596,8 @@ class bayesDREAM:
         threshold,
         slope,
         epsilon_tensor,
-        x_true_sample,  
-        log2_x_true_sample,  
+        x_true_sample,
+        log2_x_true_sample,
         alpha_y_sample=None,
         C=None,
         groups_tensor=None,
@@ -1607,6 +1607,10 @@ class bayesDREAM:
         function_type='single_hill',
         polynomial_degree=6,
         use_alpha=True,
+        distribution='negbinom',
+        denominator_tensor=None,
+        K=None,
+        D=None,
     ):
 
         if use_alpha:
@@ -1762,42 +1766,111 @@ class bayesDREAM:
             else:
                 log_y_true = log_y_true_mu #+ 1e-10
     
-            # Now we sample y_obs which is NxT
+            # Now we sample y_obs which is NxT (or NxTxK for multinomial, NxTxD for mvnormal)
             # Use data_plate for N dimension
-            with pyro.plate("data_plate", N, dim=-2):
-                logits = (log_y_true + torch.log(sum_factor_tensor.unsqueeze(-1))) - torch.log(phi_y_used)
-                if torch.isnan(logits).any() or torch.isinf(logits).any():
-                    check_tensor("logits", logits)
-                    check_tensor("poly_val", poly_val)
-                    check_tensor("log2_y_true", log2_y_true)
-                    check_tensor("y_true_mu", y_true_mu)
-                    check_tensor("log_y_true", log_y_true)
-                    check_tensor("sum_factor_tensor", sum_factor_tensor)
-                    check_tensor("phi_y_used", phi_y_used)
-                    check_tensor("A", A)
-                    #check_tensor("alpha", alpha)
-                    if function_type in ['single_hill', 'additive_hill', 'nested_hill']:
-                        check_tensor("n_a_raw", n_a_raw)
-                        check_tensor("n_a", n_a)
-                        check_tensor("Vmax_a", Vmax_a)
-                        check_tensor("K_a", K_a)
-                    if function_type in ['additive_hill', 'nested_hill']:
-                        check_tensor("beta", beta)
-                        check_tensor("n_b_raw", n_b_raw)
-                        check_tensor("n_b", n_b)
-                        check_tensor("Vmax_b", Vmax_b)
-                        check_tensor("K_b", K_b)
-                    if function_type == 'polynomial':
-                        check_tensor("sigma_coeff", sigma_coeff)
-                        check_tensor("coeffs", coeffs)
-                pyro.sample(
-                    "y_obs",
-                    dist.NegativeBinomial(
-                        total_count=phi_y_used,
-                        logits=(log_y_true + torch.log(sum_factor_tensor.unsqueeze(-1))) - torch.log(phi_y_used)
-                    ),
-                    obs=y_obs_tensor
+
+            # Compute mu_y from log_y_true (this is the dose-response function output)
+            mu_y = torch.exp(log_y_true)  # [N, T]
+
+            # Debug checks (keep for troubleshooting)
+            if torch.isnan(log_y_true).any() or torch.isinf(log_y_true).any():
+                check_tensor("log_y_true", log_y_true)
+                check_tensor("y_true_mu", y_true_mu)
+                check_tensor("sum_factor_tensor", sum_factor_tensor)
+                check_tensor("phi_y_used", phi_y_used)
+                check_tensor("A", A)
+                if function_type in ['single_hill', 'additive_hill', 'nested_hill']:
+                    check_tensor("n_a", n_a)
+                    check_tensor("Vmax_a", Vmax_a)
+                    check_tensor("K_a", K_a)
+                if function_type in ['additive_hill', 'nested_hill']:
+                    check_tensor("n_b", n_b)
+                    check_tensor("Vmax_b", Vmax_b)
+                    check_tensor("K_b", K_b)
+                if function_type == 'polynomial':
+                    check_tensor("coeffs", coeffs)
+
+            # Call distribution-specific observation sampler
+            from .distributions import get_observation_sampler
+            observation_sampler = get_observation_sampler(distribution, 'trans')
+
+            # Prepare alpha_y_full (full C cell lines, including reference)
+            if alpha_y is not None and groups_tensor is not None:
+                if alpha_y.dim() == 3:  # Predictive: (S, C-1, T)
+                    ones_shape = (alpha_y.shape[0], 1, T)
+                    alpha_y_full = torch.cat([torch.ones(ones_shape, device=self.device), alpha_y], dim=1)
+                elif alpha_y.dim() == 2:  # Training: (C-1, T)
+                    ones_shape = (1, T)
+                    alpha_y_full = torch.cat([torch.ones(ones_shape, device=self.device), alpha_y], dim=0)
+                else:
+                    raise ValueError(f"Unexpected alpha_y shape: {alpha_y.shape}")
+            else:
+                alpha_y_full = None
+
+            # Call the appropriate sampler based on distribution
+            if distribution == 'negbinom':
+                observation_sampler(
+                    y_obs_tensor=y_obs_tensor,
+                    mu_y=mu_y,
+                    phi_y_used=phi_y_used,
+                    alpha_y_full=alpha_y_full,
+                    groups_tensor=groups_tensor,
+                    sum_factor_tensor=sum_factor_tensor,
+                    N=N,
+                    T=T,
+                    C=C
                 )
+            elif distribution == 'multinomial':
+                # For multinomial, mu_y should be probabilities [N, T, K]
+                observation_sampler(
+                    y_obs_tensor=y_obs_tensor,
+                    mu_y=mu_y,  # Should be [N, T, K] probabilities
+                    N=N,
+                    T=T,
+                    K=K
+                )
+            elif distribution == 'binomial':
+                observation_sampler(
+                    y_obs_tensor=y_obs_tensor,
+                    denominator_tensor=denominator_tensor,
+                    mu_y=mu_y,  # Should be probabilities [N, T]
+                    alpha_y_full=alpha_y_full,
+                    groups_tensor=groups_tensor,
+                    N=N,
+                    T=T,
+                    C=C
+                )
+            elif distribution == 'normal':
+                # For normal, we need sigma_y (standard deviation)
+                sigma_y = 1.0 / torch.sqrt(phi_y)  # Convert from precision to std dev
+                observation_sampler(
+                    y_obs_tensor=y_obs_tensor,
+                    mu_y=mu_y,
+                    sigma_y=sigma_y,
+                    alpha_y_full=alpha_y_full,
+                    groups_tensor=groups_tensor,
+                    N=N,
+                    T=T,
+                    C=C
+                )
+            elif distribution == 'mvnormal':
+                # For mvnormal, mu_y should be [N, T, D] and we need covariance
+                # Use phi_y to construct covariance (for now, diagonal)
+                sigma_y = 1.0 / torch.sqrt(phi_y)  # [T]
+                cov_y = torch.diag_embed(sigma_y.unsqueeze(-1).expand(T, D))  # [T, D, D]
+                observation_sampler(
+                    y_obs_tensor=y_obs_tensor,
+                    mu_y=mu_y,  # Should be [N, T, D]
+                    cov_y=cov_y,
+                    alpha_y_full=alpha_y_full,
+                    groups_tensor=groups_tensor,
+                    N=N,
+                    T=T,
+                    D=D,
+                    C=C
+                )
+            else:
+                raise ValueError(f"Unknown distribution: {distribution}")
 
     ########################################################
     # Step 3: Fit trans effects (model_y)
@@ -1805,7 +1878,7 @@ class bayesDREAM:
     def fit_trans(
         self,
         technical_covariates: list[str] = None,
-        sum_factor_col: str = 'sum_factor',
+        sum_factor_col: str = None,
         function_type: str = 'single_hill',  # or 'additive', 'nested'
         polynomial_degree: int = 6,
         lr: float = 1e-3,
@@ -1832,9 +1905,38 @@ class bayesDREAM:
         #final_temp: float = 1e-8,
         final_temp: float = 0.1,
         minibatch_size: int = None,
+        distribution: str = 'negbinom',
+        denominator: np.ndarray = None,
         **kwargs
     ):
-        print("Running fit_trans...")
+        """
+        Fit trans effects using distribution-specific likelihood.
+
+        Parameters
+        ----------
+        distribution : str
+            Distribution type: 'negbinom', 'multinomial', 'binomial', 'normal', 'mvnormal'
+        sum_factor_col : str, optional
+            Sum factor column name. Required for negbinom, ignored for others.
+        denominator : np.ndarray, optional
+            Denominator array for binomial distribution (e.g., total counts for PSI)
+        technical_covariates : list of str, optional
+            Covariates for cell-line effects
+        function_type : str
+            Dose-response function: 'single_hill', 'additive_hill', 'polynomial'
+        **kwargs
+            Additional parameters for specific distributions
+        """
+        print(f"Running fit_trans with distribution={distribution}...")
+
+        # Validate distribution-specific requirements
+        from .distributions import requires_sum_factor, requires_denominator
+
+        if requires_sum_factor(distribution) and sum_factor_col is None:
+            raise ValueError(f"Distribution '{distribution}' requires sum_factor_col parameter")
+
+        if requires_denominator(distribution) and denominator is None:
+            raise ValueError(f"Distribution '{distribution}' requires denominator parameter")
 
         # convert to gpu for fitting if applicable
         if self.x_true is not None and self.x_true.device != self.device:
@@ -1873,7 +1975,30 @@ class bayesDREAM:
             y_obs = self.counts.values.T
         T = y_obs.shape[1]
 
-        sum_factor_tensor = torch.tensor(self.meta[sum_factor_col].values, dtype=torch.float32, device=self.device)
+        # Handle sum factors (only for distributions that need them)
+        if sum_factor_col is not None:
+            sum_factor_tensor = torch.tensor(self.meta[sum_factor_col].values, dtype=torch.float32, device=self.device)
+        else:
+            # Create dummy sum factors for distributions that don't need them
+            sum_factor_tensor = torch.ones(N, dtype=torch.float32, device=self.device)
+
+        # Handle denominator (for binomial)
+        denominator_tensor = None
+        if denominator is not None:
+            denominator_tensor = torch.tensor(denominator, dtype=torch.float32, device=self.device)
+
+        # Detect data dimensions (for multinomial and mvnormal)
+        from .distributions import is_3d_distribution
+        K = None
+        D = None
+        if is_3d_distribution(distribution):
+            if y_obs.ndim == 3:
+                if distribution == 'multinomial':
+                    K = y_obs.shape[2]  # Number of categories
+                elif distribution == 'mvnormal':
+                    D = y_obs.shape[2]  # Dimensionality
+            else:
+                raise ValueError(f"Distribution '{distribution}' requires 3D data but got shape {y_obs.shape}")
         if self.x_true_type == 'point':
             x_true_mean = self.x_true
         elif self.x_true_type == 'posterior':
@@ -1900,7 +2025,13 @@ class bayesDREAM:
 
         guides_tensor = torch.tensor(self.meta['guide_code'].values, dtype=torch.long, device=self.device)
         K_max_tensor = torch.max(torch.stack([torch.mean(x_true_mean[guides_tensor == g]) for g in torch.unique(guides_tensor)]))
-        y_obs_factored = y_obs_tensor / sum_factor_tensor.view(-1, 1)
+
+        # For negbinom, normalize by sum factors; for other distributions, use raw values
+        if sum_factor_col is not None:
+            y_obs_factored = y_obs_tensor / sum_factor_tensor.view(-1, 1)
+        else:
+            y_obs_factored = y_obs_tensor
+
         Vmax_mean_tensor = torch.max(torch.stack([torch.mean(y_obs_factored[guides_tensor == g, :], dim=0) for g in torch.unique(guides_tensor)]), dim=0)[0]
         Amean_tensor = torch.min(torch.stack([torch.mean(y_obs_factored[guides_tensor == g, :], dim=0) for g in torch.unique(guides_tensor)]), dim=0)[0]
         
@@ -1940,8 +2071,8 @@ class bayesDREAM:
                 threshold,
                 slope,
                 epsilon_tensor,
-                x_true_sample = self.x_true.mean(dim=0) if self.x_true_type == "posterior" else self.x_true,  
-                log2_x_true_sample = self.log2_x_true.mean(dim=0) if self.log2_x_true_type == "posterior" else self.log2_x_true,  
+                x_true_sample = self.x_true.mean(dim=0) if self.x_true_type == "posterior" else self.x_true,
+                log2_x_true_sample = self.log2_x_true.mean(dim=0) if self.log2_x_true_type == "posterior" else self.log2_x_true,
                 alpha_y_sample = self.alpha_y_prefit.mean(dim=0) if self.alpha_y_type == "posterior" else self.alpha_y_prefit,
                 C = C,
                 groups_tensor=groups_tensor,
@@ -1951,6 +2082,10 @@ class bayesDREAM:
                 function_type=function_type,
                 polynomial_degree=polynomial_degree,
                 use_alpha=True,
+                distribution=distribution,
+                denominator_tensor=denominator_tensor,
+                K=K,
+                D=D,
             )
 
             # 1) Create the base torch optimizer (with gradient clipping built in)
@@ -2058,8 +2193,8 @@ class bayesDREAM:
                 threshold,
                 slope,
                 epsilon_tensor,
-                x_true_sample = x_true_sample,  
-                log2_x_true_sample = log2_x_true_sample,  
+                x_true_sample = x_true_sample,
+                log2_x_true_sample = log2_x_true_sample,
                 alpha_y_sample = alpha_y_sample,
                 C = C,
                 groups_tensor=groups_tensor,
@@ -2069,7 +2204,10 @@ class bayesDREAM:
                 function_type=function_type,
                 polynomial_degree=polynomial_degree,
                 use_alpha=True if function_type != 'polynomial' else True if fraction_done>=0.5 else False,
-                #use_alpha=True,
+                distribution=distribution,
+                denominator_tensor=denominator_tensor,
+                K=K,
+                D=D,
             )
             
             self.losses_trans.append(loss)
@@ -2124,6 +2262,10 @@ class bayesDREAM:
                 "function_type": function_type,
                 "polynomial_degree": polynomial_degree,
                 "use_alpha": True,
+                "distribution": distribution,
+                "denominator_tensor": denominator_tensor.cpu() if denominator_tensor is not None else None,
+                "K": K,
+                "D": D,
             }
 
         else:
@@ -2159,6 +2301,10 @@ class bayesDREAM:
                 "function_type": function_type,
                 "polynomial_degree": polynomial_degree,
                 "use_alpha": True,
+                "distribution": distribution,
+                "denominator_tensor": denominator_tensor,
+                "K": K,
+                "D": D,
             }
 
         if self.device.type == "cuda":

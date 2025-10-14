@@ -1,71 +1,32 @@
 """
-Distribution-specific model implementations for multi-modal bayesDREAM.
+Distribution-specific observation samplers for multi-modal bayesDREAM.
 
-This module provides observation likelihoods for different distributions:
+This module provides observation likelihoods for different distributions.
+These are called by the main Pyro models (_model_y, _model_technical) after
+computing the dose-response function parameters.
+
+Supported distributions:
 - negbinom: Negative binomial (gene counts, transcript counts)
 - multinomial: Categorical/proportional data (isoform usage, donor/acceptor usage)
-- binomial: Binary outcomes (exon skipping PSI, raw SJ counts)
+- binomial: Binary outcomes with denominator (exon skipping PSI, raw SJ counts)
 - normal: Continuous measurements (SpliZ scores)
-- mvnormal: Multivariate normal (SpliZVD)
+- mvnormal: Multivariate normal (SpliZVD with z0, z1, z2)
 
-Each distribution has:
-1. Technical model (_model_technical_<dist>): Estimates overdispersion from NTC data
-2. Trans model (_model_y_<dist>): Models trans effects with distribution-specific likelihood
+Cell-line covariate handling:
+- negbinom: Multiplicative effects on mu via alpha_y
+- normal/mvnormal: Additive effects on mu
+- binomial: Effects on logit scale
+- multinomial: Not supported yet (complex - need to maintain probability simplex)
 """
 
 import torch
 import pyro
 import pyro.distributions as dist
-import warnings
 
 
 #######################################
-# NEGATIVE BINOMIAL (current implementation)
+# NEGATIVE BINOMIAL
 #######################################
-
-def sample_negbinom_technical(
-    y_obs_ntc_tensor,
-    sum_factor_ntc_tensor,
-    alpha_y_used,
-    phi_y_used,
-    mu_ntc,
-    N,
-    T
-):
-    """
-    Sample observation from negative binomial likelihood for technical model.
-
-    Parameters
-    ----------
-    y_obs_ntc_tensor : torch.Tensor
-        Observed counts [N, T]
-    sum_factor_ntc_tensor : torch.Tensor
-        Sum factors [N]
-    alpha_y_used : torch.Tensor
-        Cell line effects [N, T]
-    phi_y_used : torch.Tensor
-        Overdispersion parameter [T]
-    mu_ntc : torch.Tensor
-        Baseline expression [T]
-    N : int
-        Number of cells
-    T : int
-        Number of features
-
-    Returns
-    -------
-    None (samples into Pyro trace)
-    """
-    with pyro.plate("data_plate", N, dim=-2):
-        pyro.sample(
-            "y_obs_ntc",
-            dist.NegativeBinomial(
-                total_count=phi_y_used,
-                logits=torch.log(alpha_y_used * mu_ntc * sum_factor_ntc_tensor.unsqueeze(-1)) - torch.log(phi_y_used)
-            ),
-            obs=y_obs_ntc_tensor
-        )
-
 
 def sample_negbinom_trans(
     y_obs_tensor,
@@ -79,158 +40,102 @@ def sample_negbinom_trans(
     C=None
 ):
     """
-    Sample observation from negative binomial likelihood for trans model.
+    Sample observations from negative binomial likelihood for trans model.
+
+    Cell-line effects: Multiplicative on mu (via alpha_y parameter).
 
     Parameters
     ----------
     y_obs_tensor : torch.Tensor
-        Observed counts [N, T]
+        Observed counts, shape [N, T]
     mu_y : torch.Tensor
-        Expected expression (from f(x)) [N, T]
+        Expected expression from f(x), shape [N, T]
     phi_y_used : torch.Tensor
-        Overdispersion parameter [T]
-    alpha_y_full : torch.Tensor
-        Cell line effects [C, T] or None
-    groups_tensor : torch.Tensor
-        Cell line group codes [N] or None
+        Overdispersion parameter, shape [1, T] or [T]
+    alpha_y_full : torch.Tensor or None
+        Cell-line effects, shape [C, T] if provided
+    groups_tensor : torch.Tensor or None
+        Cell-line group codes, shape [N] if provided
     sum_factor_tensor : torch.Tensor
-        Sum factors [N]
+        Size factors, shape [N]
     N : int
-        Number of cells
+        Number of guides/observations
     T : int
-        Number of features
+        Number of features (trans genes)
     C : int or None
-        Number of cell line groups
+        Number of cell-line groups
 
-    Returns
-    -------
-    None (samples into Pyro trace)
+    Notes
+    -----
+    mu_final = mu_y * alpha_y[group] * sum_factor
     """
-    # Apply cell line effects if present
+    # Apply cell-line effects if present (multiplicative)
     if alpha_y_full is not None and groups_tensor is not None:
         alpha_y_used = alpha_y_full[groups_tensor, :]  # [N, T]
-        mu_y_adjusted = mu_y * alpha_y_used
+        mu_adjusted = mu_y * alpha_y_used
     else:
-        mu_y_adjusted = mu_y
+        mu_adjusted = mu_y
+
+    # Apply sum factors
+    mu_final = mu_adjusted * sum_factor_tensor.unsqueeze(-1)  # [N, T]
 
     # Sample observations
-    with pyro.plate("data_plate", N, dim=-2):
+    with pyro.plate("obs_plate", N, dim=-2):
         pyro.sample(
             "y_obs",
             dist.NegativeBinomial(
                 total_count=phi_y_used,
-                logits=torch.log(mu_y_adjusted * sum_factor_tensor.unsqueeze(-1)) - torch.log(phi_y_used)
+                logits=torch.log(mu_final + 1e-8) - torch.log(phi_y_used + 1e-8)
             ),
             obs=y_obs_tensor
         )
 
 
 #######################################
-# MULTINOMIAL (isoform usage, donor/acceptor usage)
+# MULTINOMIAL
 #######################################
 
-def sample_multinomial_technical(
-    y_obs_ntc_tensor,
-    alpha_y_used,
-    mu_ntc,
+def sample_multinomial_trans(
+    y_obs_tensor,
+    mu_y,
     N,
     T,
     K
 ):
     """
-    Sample observation from multinomial likelihood for technical model.
+    Sample observations from multinomial likelihood for trans model.
 
-    For multinomial data (e.g., isoform usage), we model the probabilities
-    of each category using a Dirichlet prior and multinomial likelihood.
-
-    Parameters
-    ----------
-    y_obs_ntc_tensor : torch.Tensor
-        Observed counts [N, T, K] where K is number of categories
-    alpha_y_used : torch.Tensor
-        Cell line effects [N, T, K]
-    mu_ntc : torch.Tensor
-        Baseline probabilities [T, K]
-    N : int
-        Number of cells
-    T : int
-        Number of features
-    K : int
-        Number of categories (e.g., number of isoforms per gene)
-
-    Returns
-    -------
-    None (samples into Pyro trace)
-    """
-    # Compute total counts per feature per cell
-    total_counts = y_obs_ntc_tensor.sum(dim=-1)  # [N, T]
-
-    # Compute expected probabilities (must sum to 1 over K dimension)
-    probs = alpha_y_used * mu_ntc.unsqueeze(0)  # [N, T, K]
-    probs = probs / probs.sum(dim=-1, keepdim=True)  # Normalize
-
-    # Sample observations
-    with pyro.plate("feature_plate", T, dim=-1):
-        with pyro.plate("data_plate", N, dim=-2):
-            pyro.sample(
-                "y_obs_ntc",
-                dist.Multinomial(total_count=total_counts, probs=probs),
-                obs=y_obs_ntc_tensor
-            )
-
-
-def sample_multinomial_trans(
-    y_obs_tensor,
-    mu_y,
-    alpha_y_full,
-    groups_tensor,
-    N,
-    T,
-    K,
-    C=None
-):
-    """
-    Sample observation from multinomial likelihood for trans model.
+    Cell-line effects: NOT SUPPORTED YET (too complex).
 
     Parameters
     ----------
     y_obs_tensor : torch.Tensor
-        Observed counts [N, T, K]
+        Observed counts, shape [N, T, K] where K is number of categories
     mu_y : torch.Tensor
-        Expected probabilities (from f(x)) [N, T, K]
-    alpha_y_full : torch.Tensor
-        Cell line effects [C, T, K] or None
-    groups_tensor : torch.Tensor
-        Cell line group codes [N] or None
+        Expected probabilities from f(x), shape [N, T, K]
+        These should sum to 1 over K dimension
     N : int
-        Number of cells
+        Number of guides/observations
     T : int
         Number of features
     K : int
-        Number of categories
-    C : int or None
-        Number of cell line groups
+        Number of categories per feature
 
-    Returns
-    -------
-    None (samples into Pyro trace)
+    Notes
+    -----
+    For multinomial data, mu_y should already be normalized probabilities.
+    Cell-line effects are not yet supported due to complexity of maintaining
+    probability simplex constraints.
     """
-    # Compute total counts per feature per cell
+    # Compute total counts per feature per observation
     total_counts = y_obs_tensor.sum(dim=-1)  # [N, T]
 
-    # Apply cell line effects if present
-    if alpha_y_full is not None and groups_tensor is not None:
-        alpha_y_used = alpha_y_full[groups_tensor, :, :]  # [N, T, K]
-        probs = mu_y * alpha_y_used
-    else:
-        probs = mu_y
-
-    # Normalize probabilities
-    probs = probs / probs.sum(dim=-1, keepdim=True)
+    # Ensure probabilities sum to 1
+    probs = mu_y / (mu_y.sum(dim=-1, keepdim=True) + 1e-8)  # [N, T, K]
 
     # Sample observations
     with pyro.plate("feature_plate", T, dim=-1):
-        with pyro.plate("data_plate", N, dim=-2):
+        with pyro.plate("obs_plate", N, dim=-2):
             pyro.sample(
                 "y_obs",
                 dist.Multinomial(total_count=total_counts, probs=probs),
@@ -239,54 +144,8 @@ def sample_multinomial_trans(
 
 
 #######################################
-# BINOMIAL (exon skipping PSI, raw SJ counts)
+# BINOMIAL
 #######################################
-
-def sample_binomial_technical(
-    y_obs_ntc_tensor,
-    denominator_ntc_tensor,
-    alpha_y_used,
-    mu_ntc,
-    N,
-    T
-):
-    """
-    Sample observation from binomial likelihood for technical model.
-
-    For binomial data (e.g., exon inclusion counts), we model the probability
-    of "success" (e.g., inclusion) given total counts (denominator).
-
-    Parameters
-    ----------
-    y_obs_ntc_tensor : torch.Tensor
-        Observed success counts [N, T]
-    denominator_ntc_tensor : torch.Tensor
-        Total counts (denominator) [N, T]
-    alpha_y_used : torch.Tensor
-        Cell line effects [N, T]
-    mu_ntc : torch.Tensor
-        Baseline probability [T]
-    N : int
-        Number of cells
-    T : int
-        Number of features
-
-    Returns
-    -------
-    None (samples into Pyro trace)
-    """
-    # Compute probability (must be in [0, 1])
-    logits = torch.log(alpha_y_used * mu_ntc.unsqueeze(0) + 1e-6) - torch.log(1 - alpha_y_used * mu_ntc.unsqueeze(0) + 1e-6)
-    probs = torch.sigmoid(logits)
-
-    # Sample observations
-    with pyro.plate("data_plate", N, dim=-2):
-        pyro.sample(
-            "y_obs_ntc",
-            dist.Binomial(total_count=denominator_ntc_tensor, probs=probs),
-            obs=y_obs_ntc_tensor
-        )
-
 
 def sample_binomial_trans(
     y_obs_tensor,
@@ -299,43 +158,51 @@ def sample_binomial_trans(
     C=None
 ):
     """
-    Sample observation from binomial likelihood for trans model.
+    Sample observations from binomial likelihood for trans model.
+
+    Cell-line effects: Applied on LOGIT scale to maintain p ∈ [0, 1].
 
     Parameters
     ----------
     y_obs_tensor : torch.Tensor
-        Observed success counts [N, T]
+        Observed success counts, shape [N, T]
     denominator_tensor : torch.Tensor
-        Total counts (denominator) [N, T]
+        Total counts (denominator), shape [N, T]
     mu_y : torch.Tensor
-        Expected probability (from f(x)) [N, T]
-    alpha_y_full : torch.Tensor
-        Cell line effects [C, T] or None
-    groups_tensor : torch.Tensor
-        Cell line group codes [N] or None
+        Expected probability from f(x), shape [N, T]
+        Should be in [0, 1] but we'll apply sigmoid anyway
+    alpha_y_full : torch.Tensor or None
+        Cell-line effects (additive on logit scale), shape [C, T] if provided
+    groups_tensor : torch.Tensor or None
+        Cell-line group codes, shape [N] if provided
     N : int
-        Number of cells
+        Number of guides/observations
     T : int
         Number of features
     C : int or None
-        Number of cell line groups
+        Number of cell-line groups
 
-    Returns
-    -------
-    None (samples into Pyro trace)
+    Notes
+    -----
+    logit(p) = logit(mu_y) + alpha_y[group]
+    p = sigmoid(logit(p))
     """
-    # Apply cell line effects if present
+    # Convert mu_y to logit scale
+    mu_y_clamped = torch.clamp(mu_y, min=1e-6, max=1-1e-6)
+    logit_mu = torch.log(mu_y_clamped) - torch.log(1 - mu_y_clamped)
+
+    # Apply cell-line effects on logit scale (additive)
     if alpha_y_full is not None and groups_tensor is not None:
         alpha_y_used = alpha_y_full[groups_tensor, :]  # [N, T]
-        mu_y_adjusted = mu_y * alpha_y_used
+        logit_final = logit_mu + alpha_y_used
     else:
-        mu_y_adjusted = mu_y
+        logit_final = logit_mu
 
-    # Convert to probability
-    probs = torch.sigmoid(mu_y_adjusted)
+    # Convert back to probability
+    probs = torch.sigmoid(logit_final)
 
     # Sample observations
-    with pyro.plate("data_plate", N, dim=-2):
+    with pyro.plate("obs_plate", N, dim=-2):
         pyro.sample(
             "y_obs",
             dist.Binomial(total_count=denominator_tensor, probs=probs),
@@ -344,52 +211,8 @@ def sample_binomial_trans(
 
 
 #######################################
-# NORMAL (SpliZ scores)
+# NORMAL
 #######################################
-
-def sample_normal_technical(
-    y_obs_ntc_tensor,
-    alpha_y_used,
-    sigma_y,
-    mu_ntc,
-    N,
-    T
-):
-    """
-    Sample observation from normal likelihood for technical model.
-
-    For continuous measurements (e.g., SpliZ scores), we model with normal distribution.
-
-    Parameters
-    ----------
-    y_obs_ntc_tensor : torch.Tensor
-        Observed values [N, T]
-    alpha_y_used : torch.Tensor
-        Cell line effects [N, T]
-    sigma_y : torch.Tensor
-        Standard deviation [T]
-    mu_ntc : torch.Tensor
-        Baseline mean [T]
-    N : int
-        Number of cells
-    T : int
-        Number of features
-
-    Returns
-    -------
-    None (samples into Pyro trace)
-    """
-    # Compute expected mean
-    mu = alpha_y_used * mu_ntc.unsqueeze(0)
-
-    # Sample observations
-    with pyro.plate("data_plate", N, dim=-2):
-        pyro.sample(
-            "y_obs_ntc",
-            dist.Normal(mu, sigma_y.unsqueeze(0)),
-            obs=y_obs_ntc_tensor
-        )
-
 
 def sample_normal_trans(
     y_obs_tensor,
@@ -402,99 +225,54 @@ def sample_normal_trans(
     C=None
 ):
     """
-    Sample observation from normal likelihood for trans model.
+    Sample observations from normal likelihood for trans model.
+
+    Cell-line effects: ADDITIVE on mu (not multiplicative).
 
     Parameters
     ----------
     y_obs_tensor : torch.Tensor
-        Observed values [N, T]
+        Observed values, shape [N, T]
     mu_y : torch.Tensor
-        Expected mean (from f(x)) [N, T]
+        Expected mean from f(x), shape [N, T]
     sigma_y : torch.Tensor
-        Standard deviation [T]
-    alpha_y_full : torch.Tensor
-        Cell line effects [C, T] or None
-    groups_tensor : torch.Tensor
-        Cell line group codes [N] or None
+        Standard deviation, shape [1, T] or [T]
+    alpha_y_full : torch.Tensor or None
+        Cell-line effects (additive), shape [C, T] if provided
+    groups_tensor : torch.Tensor or None
+        Cell-line group codes, shape [N] if provided
     N : int
-        Number of cells
+        Number of guides/observations
     T : int
         Number of features
     C : int or None
-        Number of cell line groups
+        Number of cell-line groups
 
-    Returns
-    -------
-    None (samples into Pyro trace)
+    Notes
+    -----
+    mu_final = mu_y + alpha_y[group]
+    For normal distributions, additive cell-line shifts make more sense
+    than multiplicative effects.
     """
-    # Apply cell line effects if present
+    # Apply cell-line effects if present (additive)
     if alpha_y_full is not None and groups_tensor is not None:
         alpha_y_used = alpha_y_full[groups_tensor, :]  # [N, T]
-        mu_y_adjusted = mu_y * alpha_y_used
+        mu_adjusted = mu_y + alpha_y_used
     else:
-        mu_y_adjusted = mu_y
+        mu_adjusted = mu_y
 
     # Sample observations
-    with pyro.plate("data_plate", N, dim=-2):
+    with pyro.plate("obs_plate", N, dim=-2):
         pyro.sample(
             "y_obs",
-            dist.Normal(mu_y_adjusted, sigma_y.unsqueeze(0)),
+            dist.Normal(mu_adjusted, sigma_y.unsqueeze(0) if sigma_y.dim() == 1 else sigma_y),
             obs=y_obs_tensor
         )
 
 
 #######################################
-# MULTIVARIATE NORMAL (SpliZVD)
+# MULTIVARIATE NORMAL
 #######################################
-
-def sample_mvnormal_technical(
-    y_obs_ntc_tensor,
-    alpha_y_used,
-    cov_y,
-    mu_ntc,
-    N,
-    T,
-    D
-):
-    """
-    Sample observation from multivariate normal likelihood for technical model.
-
-    For multivariate continuous measurements (e.g., SpliZVD with z0, z1, z2),
-    we model with multivariate normal distribution.
-
-    Parameters
-    ----------
-    y_obs_ntc_tensor : torch.Tensor
-        Observed values [N, T, D] where D is dimensionality (e.g., 3 for SpliZVD)
-    alpha_y_used : torch.Tensor
-        Cell line effects [N, T, D]
-    cov_y : torch.Tensor
-        Covariance matrix [T, D, D]
-    mu_ntc : torch.Tensor
-        Baseline mean [T, D]
-    N : int
-        Number of cells
-    T : int
-        Number of features
-    D : int
-        Dimensionality
-
-    Returns
-    -------
-    None (samples into Pyro trace)
-    """
-    # Compute expected mean
-    mu = alpha_y_used * mu_ntc.unsqueeze(0)  # [N, T, D]
-
-    # Sample observations
-    with pyro.plate("feature_plate", T, dim=-1):
-        with pyro.plate("data_plate", N, dim=-2):
-            pyro.sample(
-                "y_obs_ntc",
-                dist.MultivariateNormal(mu, cov_y.unsqueeze(0)),
-                obs=y_obs_ntc_tensor
-            )
-
 
 def sample_mvnormal_trans(
     y_obs_tensor,
@@ -508,46 +286,48 @@ def sample_mvnormal_trans(
     C=None
 ):
     """
-    Sample observation from multivariate normal likelihood for trans model.
+    Sample observations from multivariate normal likelihood for trans model.
+
+    Cell-line effects: ADDITIVE on mu (not multiplicative).
 
     Parameters
     ----------
     y_obs_tensor : torch.Tensor
-        Observed values [N, T, D]
+        Observed values, shape [N, T, D] where D is dimensionality
     mu_y : torch.Tensor
-        Expected mean (from f(x)) [N, T, D]
+        Expected mean from f(x), shape [N, T, D]
     cov_y : torch.Tensor
-        Covariance matrix [T, D, D]
-    alpha_y_full : torch.Tensor
-        Cell line effects [C, T, D] or None
-    groups_tensor : torch.Tensor
-        Cell line group codes [N] or None
+        Covariance matrix, shape [T, D, D] or [1, T, D, D]
+    alpha_y_full : torch.Tensor or None
+        Cell-line effects (additive), shape [C, T, D] if provided
+    groups_tensor : torch.Tensor or None
+        Cell-line group codes, shape [N] if provided
     N : int
-        Number of cells
+        Number of guides/observations
     T : int
         Number of features
     D : int
-        Dimensionality
+        Dimensionality (e.g., 3 for SpliZVD)
     C : int or None
-        Number of cell line groups
+        Number of cell-line groups
 
-    Returns
-    -------
-    None (samples into Pyro trace)
+    Notes
+    -----
+    mu_final = mu_y + alpha_y[group]
     """
-    # Apply cell line effects if present
+    # Apply cell-line effects if present (additive)
     if alpha_y_full is not None and groups_tensor is not None:
         alpha_y_used = alpha_y_full[groups_tensor, :, :]  # [N, T, D]
-        mu_y_adjusted = mu_y * alpha_y_used
+        mu_adjusted = mu_y + alpha_y_used
     else:
-        mu_y_adjusted = mu_y
+        mu_adjusted = mu_y
 
     # Sample observations
-    with pyro.plate("feature_plate", T, dim=-1):
-        with pyro.plate("data_plate", N, dim=-2):
+    with pyro.plate("feature_plate", T, dim=-2):
+        with pyro.plate("obs_plate", N, dim=-3):
             pyro.sample(
                 "y_obs",
-                dist.MultivariateNormal(mu_y_adjusted, cov_y.unsqueeze(0)),
+                dist.MultivariateNormal(mu_adjusted, cov_y),
                 obs=y_obs_tensor
             )
 
@@ -558,48 +338,58 @@ def sample_mvnormal_trans(
 
 DISTRIBUTION_REGISTRY = {
     'negbinom': {
-        'technical': sample_negbinom_technical,
         'trans': sample_negbinom_trans,
         'requires_denominator': False,
-        'is_3d': False
+        'requires_sum_factor': True,
+        'is_3d': False,
+        'supports_cell_line': True,
+        'cell_line_type': 'multiplicative'
     },
     'multinomial': {
-        'technical': sample_multinomial_technical,
         'trans': sample_multinomial_trans,
         'requires_denominator': False,
-        'is_3d': True
+        'requires_sum_factor': False,
+        'is_3d': True,
+        'supports_cell_line': False,  # Not yet implemented
+        'cell_line_type': None
     },
     'binomial': {
-        'technical': sample_binomial_technical,
         'trans': sample_binomial_trans,
         'requires_denominator': True,
-        'is_3d': False
+        'requires_sum_factor': False,
+        'is_3d': False,
+        'supports_cell_line': True,
+        'cell_line_type': 'logit'
     },
     'normal': {
-        'technical': sample_normal_technical,
         'trans': sample_normal_trans,
         'requires_denominator': False,
-        'is_3d': False
+        'requires_sum_factor': False,
+        'is_3d': False,
+        'supports_cell_line': True,
+        'cell_line_type': 'additive'
     },
     'mvnormal': {
-        'technical': sample_mvnormal_technical,
         'trans': sample_mvnormal_trans,
         'requires_denominator': False,
-        'is_3d': True
+        'requires_sum_factor': False,
+        'is_3d': True,
+        'supports_cell_line': True,
+        'cell_line_type': 'additive'
     }
 }
 
 
 def get_observation_sampler(distribution, model_type='trans'):
     """
-    Get the appropriate observation sampler for a distribution and model type.
+    Get the appropriate observation sampler for a distribution.
 
     Parameters
     ----------
     distribution : str
         Distribution type: 'negbinom', 'multinomial', 'binomial', 'normal', 'mvnormal'
     model_type : str
-        Model type: 'technical' or 'trans'
+        Model type: currently only 'trans' is fully supported
 
     Returns
     -------
@@ -609,27 +399,60 @@ def get_observation_sampler(distribution, model_type='trans'):
     Raises
     ------
     ValueError
-        If distribution or model_type is not recognized
+        If distribution is not recognized
     """
     if distribution not in DISTRIBUTION_REGISTRY:
-        raise ValueError(f"Unknown distribution: {distribution}. "
-                        f"Must be one of: {list(DISTRIBUTION_REGISTRY.keys())}")
+        raise ValueError(
+            f"Unknown distribution: {distribution}. "
+            f"Must be one of: {list(DISTRIBUTION_REGISTRY.keys())}"
+        )
 
-    if model_type not in ['technical', 'trans']:
-        raise ValueError(f"Unknown model_type: {model_type}. Must be 'technical' or 'trans'")
+    if model_type != 'trans':
+        raise NotImplementedError(
+            f"Model type '{model_type}' not yet implemented. "
+            f"Currently only 'trans' model is supported."
+        )
 
     return DISTRIBUTION_REGISTRY[distribution][model_type]
 
 
 def requires_denominator(distribution):
-    """Check if a distribution requires a denominator array."""
+    """Check if a distribution requires a denominator array (e.g., binomial)."""
     if distribution not in DISTRIBUTION_REGISTRY:
         raise ValueError(f"Unknown distribution: {distribution}")
     return DISTRIBUTION_REGISTRY[distribution]['requires_denominator']
 
 
+def requires_sum_factor(distribution):
+    """Check if a distribution requires sum factors (only negbinom)."""
+    if distribution not in DISTRIBUTION_REGISTRY:
+        raise ValueError(f"Unknown distribution: {distribution}")
+    return DISTRIBUTION_REGISTRY[distribution]['requires_sum_factor']
+
+
 def is_3d_distribution(distribution):
-    """Check if a distribution uses 3D data structure."""
+    """Check if a distribution uses 3D data structure (multinomial, mvnormal)."""
     if distribution not in DISTRIBUTION_REGISTRY:
         raise ValueError(f"Unknown distribution: {distribution}")
     return DISTRIBUTION_REGISTRY[distribution]['is_3d']
+
+
+def supports_cell_line_effects(distribution):
+    """Check if cell-line covariate effects are supported for this distribution."""
+    if distribution not in DISTRIBUTION_REGISTRY:
+        raise ValueError(f"Unknown distribution: {distribution}")
+    return DISTRIBUTION_REGISTRY[distribution]['supports_cell_line']
+
+
+def get_cell_line_effect_type(distribution):
+    """
+    Get the type of cell-line effects for this distribution.
+
+    Returns
+    -------
+    str or None
+        'multiplicative', 'additive', 'logit', or None if not supported
+    """
+    if distribution not in DISTRIBUTION_REGISTRY:
+        raise ValueError(f"Unknown distribution: {distribution}")
+    return DISTRIBUTION_REGISTRY[distribution]['cell_line_type']
