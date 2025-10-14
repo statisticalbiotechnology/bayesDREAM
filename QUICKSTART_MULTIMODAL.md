@@ -34,7 +34,7 @@ model = MultiModalBayesDREAM(
 )
 
 # Run 3-step pipeline
-model.fit_technical(covariates=['cell_line'])
+model.fit_technical(covariates=['cell_line'], sum_factor_col='sum_factor')
 model.fit_cis(sum_factor_col='sum_factor')
 model.fit_trans(sum_factor_col='sum_factor_adj', function_type='additive_hill')
 ```
@@ -80,9 +80,9 @@ print(model.list_modalities())
 # 4 splicing_exon_skip binomial      20          500      NaN           False
 
 # Run pipeline (operates on gene modality)
-model.fit_technical(covariates=['cell_line'])
-model.fit_cis()
-model.fit_trans(function_type='additive_hill')
+model.fit_technical(covariates=['cell_line'], sum_factor_col='sum_factor')
+model.fit_cis(sum_factor_col='sum_factor')
+model.fit_trans(sum_factor_col='sum_factor_adj', function_type='additive_hill')
 
 # Access splicing data
 donor_mod = model.get_modality('splicing_donor')
@@ -148,6 +148,31 @@ model.add_custom_modality(
     feature_meta=gene_meta,
     distribution='mvnormal'
 )
+```
+
+### 5. Distribution-Flexible Fitting (NEW in v0.2.0+)
+
+```python
+# Fit with different distributions using the same model
+from bayesDREAM import MultiModalBayesDREAM
+
+# Example 1: Gene counts (negbinom) - DEFAULT
+model = MultiModalBayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B')
+model.fit_technical(covariates=['cell_line'], sum_factor_col='sum_factor', distribution='negbinom')
+model.fit_trans(sum_factor_col='sum_factor_adj', distribution='negbinom', function_type='additive_hill')
+
+# Example 2: Continuous measurements (normal) - e.g., SpliZ scores
+model = MultiModalBayesDREAM(meta=meta, counts=spliz_scores, cis_gene='GFI1B')
+model.fit_technical(covariates=['cell_line'], distribution='normal')
+model.fit_trans(distribution='normal', function_type='polynomial')
+
+# Example 3: Exon skipping PSI (binomial)
+model = MultiModalBayesDREAM(meta=meta, counts=inclusion_counts, cis_gene='GFI1B')
+model.fit_trans(distribution='binomial', denominator=total_counts, function_type='single_hill')
+
+# Example 4: Donor usage (multinomial)
+model = MultiModalBayesDREAM(meta=meta, counts=donor_usage_3d, cis_gene='GFI1B')
+model.fit_trans(distribution='multinomial', function_type='additive_hill')
 ```
 
 ## Required Data Formats
@@ -263,9 +288,9 @@ model.add_splicing_modality(
 )
 
 # 3. Run pipeline
-model.fit_technical(covariates=['cell_line'])
-model.fit_cis()
-model.fit_trans(function_type='additive_hill')
+model.fit_technical(covariates=['cell_line'], sum_factor_col='sum_factor')
+model.fit_cis(sum_factor_col='sum_factor')
+model.fit_trans(sum_factor_col='sum_factor_adj', function_type='additive_hill')
 
 # 4. Analyze splicing
 sj_mod = model.get_modality('splicing_sj')  # Raw SJ counts
@@ -289,9 +314,9 @@ model.add_transcript_modality(
 model.add_splicing_modality(sj_counts, sj_meta, ['sj', 'exon_skip'])
 
 # 4. Run pipeline
-model.fit_technical(covariates=['cell_line'])
-model.fit_cis()
-model.fit_trans(function_type='polynomial')
+model.fit_technical(covariates=['cell_line'], sum_factor_col='sum_factor')
+model.fit_cis(sum_factor_col='sum_factor')
+model.fit_trans(sum_factor_col='sum_factor_adj', function_type='polynomial')
 
 # 5. Compare modalities
 print(model.list_modalities())
@@ -355,14 +380,25 @@ See `examples/multimodal_example.py` for complete working examples covering:
 5. Pre-constructed modalities
 6. Subsetting operations
 
+## What's New in v0.2.0+
+
+✅ **Distribution-Flexible Fitting**: `fit_technical()` and `fit_trans()` now support all 5 distributions (negbinom, normal, binomial, multinomial, mvnormal)
+
+✅ **Cell-Line Covariate Effects**: Distribution-specific handling (multiplicative for negbinom, additive for normal, logit-scale for binomial)
+
+✅ **Optional Sum Factors**: `sum_factor_col` parameter now defaults to `None` (only required for negbinom)
+
+✅ **Backward Compatible**: Existing code continues to work with default parameters
+
 ## Next Steps
 
-- **Current**: Store multiple modalities, model genes only
-- **Future**: Develop modality-specific probabilistic models
+- **Current**: Multi-modal data storage + distribution-flexible fitting for primary modality
+- **Future**: Modality-specific fitting via wrapper methods
 - **Future**: Cross-modality joint modeling
 - **Future**: Modality-specific normalization strategies
 
 For more details, see:
 - `MULTIMODAL_IMPLEMENTATION.md`: Technical implementation details
+- `MULTIMODAL_FITTING_INFRASTRUCTURE.md`: Distribution-flexible fitting guide
 - `CLAUDE.md`: Full architecture documentation
 - `examples/multimodal_example.py`: Complete code examples

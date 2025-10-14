@@ -59,7 +59,7 @@ model = MultiModalBayesDREAM(
 )
 
 # Run 3-step pipeline
-model.fit_technical(covariates=['cell_line'])
+model.fit_technical(covariates=['cell_line'], sum_factor_col='sum_factor')
 model.fit_cis(sum_factor_col='sum_factor')
 model.fit_trans(sum_factor_col='sum_factor_adj', function_type='additive_hill')
 ```
@@ -86,9 +86,9 @@ model.add_custom_modality('spliz', spliz_scores, gene_meta, 'normal')
 print(model.list_modalities())
 
 # Run pipeline (operates on primary gene modality)
-model.fit_technical(covariates=['cell_line'])
-model.fit_cis()
-model.fit_trans(function_type='additive_hill')
+model.fit_technical(covariates=['cell_line'], sum_factor_col='sum_factor')
+model.fit_cis(sum_factor_col='sum_factor')
+model.fit_trans(sum_factor_col='sum_factor_adj', function_type='additive_hill')
 
 # Access other modalities
 donor_mod = model.get_modality('splicing_donor')
@@ -116,17 +116,25 @@ donor_mod = model.get_modality('splicing_donor')
 
 See [QUICKSTART_MULTIMODAL.md](QUICKSTART_MULTIMODAL.md) for detailed format specifications.
 
-## Multi-Modal Fitting (Future)
+## Distribution-Flexible Fitting
 
-Infrastructure for distribution-specific fitting is in place:
+bayesDREAM supports multiple statistical distributions for different data types:
 
 ```python
-# Once implemented, fit different modalities
-model.fit_modality_trans('splicing_donor', function_type='additive_hill')
-model.fit_modality_trans('spliz', function_type='polynomial')
+# Fit with different distributions
+# For negbinom (gene counts)
+model.fit_technical(covariates=['cell_line'], sum_factor_col='sum_factor', distribution='negbinom')
+model.fit_trans(sum_factor_col='sum_factor', distribution='negbinom', function_type='additive_hill')
+
+# For normal (continuous measurements like SpliZ)
+model.fit_technical(covariates=['cell_line'], distribution='normal')
+model.fit_trans(distribution='normal', function_type='polynomial')
+
+# For binomial (exon skipping PSI)
+model.fit_trans(distribution='binomial', denominator=total_counts, function_type='single_hill')
 ```
 
-See **[MULTIMODAL_FITTING_INFRASTRUCTURE.md](MULTIMODAL_FITTING_INFRASTRUCTURE.md)** for implementation details.
+See **[MULTIMODAL_FITTING_INFRASTRUCTURE.md](MULTIMODAL_FITTING_INFRASTRUCTURE.md)** for complete details on distribution-specific fitting.
 
 ## Supported Distributions
 
@@ -151,8 +159,14 @@ If you use bayesDREAM in your research, please cite:
 ### Running Tests
 
 ```bash
-# Infrastructure test (requires pyroenv conda environment)
+# Test multi-modal infrastructure
 /opt/anaconda3/envs/pyroenv/bin/python test_multimodal_fitting.py
+
+# Test trans model backward compatibility
+/opt/anaconda3/envs/pyroenv/bin/python test_negbinom_compat.py
+
+# Test technical model backward compatibility
+/opt/anaconda3/envs/pyroenv/bin/python test_technical_compat.py
 ```
 
 ### Project Structure
@@ -160,11 +174,12 @@ If you use bayesDREAM in your research, please cite:
 ```
 bayesDREAM_forClaude/
 ├── bayesDREAM/           # Core package
-│   ├── model.py          # Base bayesDREAM class
+│   ├── model.py          # Base bayesDREAM class (~2500 lines)
 │   ├── multimodal.py     # Multi-modal wrapper
 │   ├── modality.py       # Modality data structure
-│   ├── distributions.py  # Distribution-specific samplers
-│   └── splicing.py       # Splicing processing (pure Python)
+│   ├── distributions.py  # Distribution-specific observation samplers
+│   ├── splicing.py       # Splicing processing (pure Python)
+│   └── utils.py          # Helper functions (Hill, polynomial, etc.)
 ├── examples/             # Usage examples
 └── toydata/              # Test datasets
 ```

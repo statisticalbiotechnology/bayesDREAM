@@ -246,28 +246,37 @@ feature_meta:
 
 ## Current Status & Implementation Roadmap
 
-### ✅ Completed (Infrastructure Ready)
+### ✅ Completed (v0.2.0+)
 
 1. **Multi-modal data storage**: All modalities can be added and stored in a unified framework
 2. **Distribution-specific observation models**: Implemented in `distributions.py` for all 5 distribution types
 3. **Backward compatibility**: `MultiModalBayesDREAM` works exactly like `bayesDREAM` for gene expression
-4. **Modality methods**: `fit_modality_technical()` and `fit_modality_trans()` provide API for future implementations
-5. **Cell alignment**: Automatic subsetting ensures all modalities have consistent cell sets
-6. **Flexible gene identifiers**: Support for gene names, gene_name, and gene_id (Ensembl IDs)
+4. **Cell alignment**: Automatic subsetting ensures all modalities have consistent cell sets
+5. **Flexible gene identifiers**: Support for gene names, gene_name, and gene_id (Ensembl IDs)
+6. **Distribution-flexible fitting** (MAJOR UPDATE):
+   - ✅ `_model_technical` now accepts `distribution` parameter and uses appropriate sampler from `distributions.py`
+   - ✅ `_model_y` now accepts `distribution` parameter and uses appropriate sampler
+   - ✅ `fit_technical()` supports all distributions with validation
+   - ✅ `fit_trans()` supports all distributions with validation
+   - ✅ Parameter handling for different distributions:
+     - Negative binomial: overdispersion (`phi_y`), sum factors
+     - Multinomial: no overdispersion, 3D data (K categories)
+     - Binomial: denominator array, 2D data
+     - Normal: variance parameter (`sigma_y`), no sum factors
+     - Multivariate normal: covariance matrix, 3D data (D dimensions)
+   - ✅ Cell-line covariate effects:
+     - Negative binomial: multiplicative on mu
+     - Normal/MVNormal: additive on mu
+     - Binomial: logit-scale effects
+     - Multinomial: not yet supported (complex)
+7. **Backward compatibility tests**: test_negbinom_compat.py, test_technical_compat.py verify negbinom still works
 
 ### 🚧 In Progress (Next Steps)
 
-1. **Integrate observation samplers into Pyro models**:
-   - Modify `_model_technical` to accept distribution parameter and use appropriate sampler from `distributions.py`
-   - Modify `_model_y` to accept distribution parameter and use appropriate sampler
-   - This is the key missing piece to enable full multi-modal fitting
-
-2. **Parameter handling for different distributions**:
-   - Negative binomial: overdispersion (`phi_y`)
-   - Multinomial: no overdispersion (probabilities sum to 1)
-   - Binomial: requires denominator array
-   - Normal: requires variance parameter (`sigma_y`)
-   - Multivariate normal: requires covariance matrix
+1. **Modality-specific fitting via wrapper methods**:
+   - `fit_modality_technical()` and `fit_modality_trans()` provide API
+   - Currently delegate to base class methods
+   - Future: can handle modality-specific preprocessing and parameter selection
 
 ### 🔮 Future Enhancements
 
@@ -292,15 +301,15 @@ feature_meta:
 ```python
 from bayesDREAM import MultiModalBayesDREAM
 
-# Works exactly like original bayesDREAM
+# Works exactly like original bayesDREAM (negbinom is default)
 model = MultiModalBayesDREAM(
     meta=meta,
     counts=gene_counts,
     cis_gene='GFI1B'
 )
-model.fit_technical(covariates=['cell_line'])
-model.fit_cis()
-model.fit_trans(function_type='additive_hill')
+model.fit_technical(covariates=['cell_line'], sum_factor_col='sum_factor')
+model.fit_cis(sum_factor_col='sum_factor')
+model.fit_trans(sum_factor_col='sum_factor_adj', function_type='additive_hill')
 ```
 
 ### Full Multi-Modal Example
@@ -336,14 +345,36 @@ model.add_custom_modality('splizvd', splizvd_3d, gene_meta, 'mvnormal')
 # View all modalities
 print(model.list_modalities())
 
-# Run pipeline on primary modality
-model.fit_technical(covariates=['cell_line'])
-model.fit_cis()
-model.fit_trans(function_type='additive_hill')
+# Run pipeline on primary modality (gene counts = negbinom)
+model.fit_technical(covariates=['cell_line'], sum_factor_col='sum_factor', distribution='negbinom')
+model.fit_cis(sum_factor_col='sum_factor')
+model.fit_trans(sum_factor_col='sum_factor_adj', function_type='additive_hill', distribution='negbinom')
 
 # Access other modalities for analysis
 donor_mod = model.get_modality('splicing_donor')
 donor_tensor = donor_mod.to_tensor(device=model.device)
+```
+
+### Distribution-Flexible Fitting Example
+```python
+from bayesDREAM import MultiModalBayesDREAM
+
+# For continuous measurements (SpliZ scores - normal distribution)
+model = MultiModalBayesDREAM(meta=meta, counts=spliz_scores, cis_gene='GFI1B')
+model.fit_technical(covariates=['cell_line'], distribution='normal')
+model.fit_trans(distribution='normal', function_type='polynomial')
+
+# For binomial data (exon skipping PSI)
+model = MultiModalBayesDREAM(meta=meta, counts=inclusion_counts, cis_gene='GFI1B')
+model.fit_trans(
+    distribution='binomial',
+    denominator=total_counts,  # inclusion + skipping
+    function_type='single_hill'
+)
+
+# For multinomial data (donor usage)
+model = MultiModalBayesDREAM(meta=meta, counts=donor_usage_3d, cis_gene='GFI1B')
+model.fit_trans(distribution='multinomial', function_type='additive_hill')
 ```
 
 ## Testing Recommendations

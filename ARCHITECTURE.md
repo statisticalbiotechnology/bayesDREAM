@@ -210,9 +210,9 @@ mvnormal                  3D: (F, C, D)          SpliZVD
 ┌─────────────────────────────────────────────────────────────────┐
 │                    Modeling Pipeline                             │
 │                                                                  │
-│  model.fit_technical(covariates=['cell_line'])                  │
+│  model.fit_technical(covariates=['cell_line'], distribution=...) │
 │    → Uses self.counts from primary modality                     │
-│    → Fits _model_technical (NegBinom)                           │
+│    → Fits _model_technical (distribution-flexible)              │
 │    → Saves self.alpha_y_prefit                                  │
 │                                                                  │
 │  model.fit_cis(sum_factor_col='sum_factor')                     │
@@ -220,9 +220,10 @@ mvnormal                  3D: (F, C, D)          SpliZVD
 │    → Fits _model_x (cis effects)                                │
 │    → Saves self.x_true, self.posterior_samples_cis              │
 │                                                                  │
-│  model.fit_trans(function_type='additive_hill')                 │
+│  model.fit_trans(function_type='...', distribution=...)         │
 │    → Uses self.counts from primary modality                     │
 │    → Fits _model_y (trans effects as f(x_true))                 │
+│    → Distribution-flexible (negbinom, normal, binomial, etc.)   │
 │    → Saves self.posterior_samples_trans                         │
 └──────────────────────┬──────────────────────────────────────────┘
                        │
@@ -294,43 +295,63 @@ mvnormal                  3D: (F, C, D)          SpliZVD
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-## Future Architecture (Modality-Specific Models)
+## Distribution-Flexible Fitting (Implemented)
 
 ```
-Current:
-  model.fit_trans() → fits _model_y for primary modality only
+Current (v0.2.0+):
+  Both fit_technical() and fit_trans() support all distributions:
+
+┌─────────────────────────────────────────────────────────────────┐
+│  # Gene counts (negbinom)                                        │
+│  model.fit_technical(covariates=['cell_line'],                  │
+│                      sum_factor_col='sum_factor',               │
+│                      distribution='negbinom')                    │
+│  model.fit_trans(sum_factor_col='sum_factor',                   │
+│                  distribution='negbinom',                        │
+│                  function_type='additive_hill')                 │
+│                                                                  │
+│  # Continuous measurements (normal)                             │
+│  model.fit_technical(covariates=['cell_line'],                  │
+│                      distribution='normal')                      │
+│  model.fit_trans(distribution='normal',                         │
+│                  function_type='polynomial')                     │
+│                                                                  │
+│  # Exon skipping PSI (binomial)                                 │
+│  model.fit_trans(distribution='binomial',                       │
+│                  denominator=total_counts,                       │
+│                  function_type='single_hill')                   │
+│                                                                  │
+│  # Donor/acceptor usage (multinomial)                           │
+│  model.fit_trans(distribution='multinomial',                    │
+│                  function_type='additive_hill')                 │
+└─────────────────────────────────────────────────────────────────┘
 
 Future:
-┌─────────────────────────────────────────────────────────────────┐
-│  model.fit_trans(modality='gene', ...)                          │
-│    → _model_y_negbinom(x_true, y_counts, alpha_y, ...)         │
-│                                                                  │
-│  model.fit_trans(modality='splicing_donor', ...)                │
-│    → _model_y_multinomial(x_true, donor_usage, alpha_d, ...)   │
-│                                                                  │
-│  model.fit_trans(modality='spliz', ...)                         │
-│    → _model_y_normal(x_true, spliz_scores, sigma, ...)         │
-│                                                                  │
-│  model.fit_cross_modality(['gene', 'splicing_donor'])           │
-│    → Joint model: gene expression + donor usage                 │
-└─────────────────────────────────────────────────────────────────┘
+  - Modality-specific fitting via fit_modality_trans()
+  - Cross-modality joint models
 ```
 
 ## Module Dependencies
 
 ```
-model.py (original)
+model.py (~2500 lines)
   ├── pandas, numpy
   ├── torch, pyro
-  └── scipy, sklearn
+  ├── scipy, sklearn
+  └── distributions.py (observation samplers)
 
 modality.py
   ├── pandas, numpy
   └── torch
 
-distributions.py
+distributions.py (observation samplers)
   ├── torch
   └── pyro
+
+utils.py (helper functions)
+  ├── numpy
+  ├── torch
+  └── scipy
 
 splicing.py (Pure Python - no R dependencies)
   ├── pandas, numpy
@@ -349,5 +370,6 @@ __init__.py
   ├── modality.py
   ├── multimodal.py
   ├── splicing.py
-  └── distributions.py
+  ├── distributions.py
+  └── utils.py
 ```
