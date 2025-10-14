@@ -1,3 +1,14 @@
+"""
+bayesDREAM: Bayesian Dosage Response Effects Across Modalities
+
+Core bayesDREAM class implementing three-step Bayesian CRISPR perturbation modeling:
+1. fit_technical() - Model technical variation in non-targeting controls
+2. fit_cis() - Model direct effects on targeted genes
+3. fit_trans() - Model downstream effects as dose-response functions
+
+For multi-modal support, use MultiModalBayesDREAM from multimodal.py.
+"""
+
 import os
 import subprocess
 import warnings
@@ -12,140 +23,31 @@ import pyro.optim as optim
 import pyro.infer as infer
 import h5py
 import matplotlib.pyplot as plt
-from scipy.special import betainc
-from scipy.optimize import brentq
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import SplineTransformer
 from sklearn.linear_model import Ridge
 import gc
 
+# Import utility functions
+from .utils import (
+    set_max_threads,
+    find_beta,
+    calculate_mu_x_guide,
+    Hill_based_positive,
+    Hill_based_negative,
+    Hill_based_piecewise,
+    Polynomial_function,
+    cutoff_sigmoid,
+    sample_or_use_point,
+    check_tensor
+)
+
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
 
 ########################################
-# Helper functions & sum-factor routines
+# bayesDREAM Class
 ########################################
-
-def set_max_threads(cores: int):
-    """
-    Set the number of threads for Pyro and backend computations.
-    """
-    os.environ["OMP_NUM_THREADS"] = str(cores)
-    os.environ["OPENBLAS_NUM_THREADS"] = str(cores)
-    os.environ["MKL_NUM_THREADS"] = str(cores)
-    os.environ["VECLIB_MAXIMUM_THREADS"] = str(cores)
-    os.environ["NUMEXPR_NUM_THREADS"] = str(cores)
-
-def find_beta(alpha: float, gamma_threshold: float, p0: float, epsilon: float=1e-6) -> float:
-    """
-    Numerically solve for beta given Betainc(alpha, beta, gamma_threshold) = p0.
-    """
-    def equation(bet):
-        return betainc(alpha, bet, gamma_threshold) - p0
-    beta_lower = epsilon
-    beta_upper = 1
-    return brentq(equation, beta_lower, beta_upper)
-
-def calculate_mu_x_guide(guide, x_obs_ntc_factored, guides_ntc):
-    """Helper function to calculate mean per guide for mu_x_sd"""
-    mask = guides_ntc == guide
-    return torch.mean(x_obs_ntc_factored[mask])
-
-# Define Hill-based function
-def Hill_based_positive(x, Vmax, A, K, n, epsilon=1e-6):
-    x_safe = x + epsilon
-    K_safe = K + epsilon  # Ensure K is positive
-    x_log = torch.log(x_safe)
-    K_log = torch.log(K_safe)
-    x_n = torch.exp(n * x_log)
-    K_n = torch.exp(n * K_log)
-    denominator = K_n + x_n
-    return Vmax * (x_n / denominator) + A
-
-def Hill_based_negative(x, Vmax, A, K, n, epsilon=1e-6):
-    x_safe = x + epsilon
-    K_safe = K + epsilon
-    x_log = torch.log(x_safe)
-    K_log = torch.log(K_safe)
-    x_n = torch.exp(n * x_log)
-    K_n = torch.exp(n * K_log)
-    fraction = K_n / (K_n + x_n)
-    return Vmax * fraction + A
-
-def Hill_based_piecewise(x, Vmax, A, K, n, epsilon=1e-6):
-    x_safe = x + epsilon
-    K_safe = K + epsilon  # Ensure K is positive
-    x_log = torch.log(x_safe)
-    K_log = torch.log(K_safe)
-    x_n = torch.exp(torch.abs(n) * x_log)
-    K_n = torch.exp(torch.abs(n) * K_log)
-    denominator = K_n + x_n
-    fraction = torch.where(n < 0, K_n / denominator, x_n / denominator)
-    return Vmax * fraction + A
-
-def Polynomial_function(x, coeffs):
-    """
-    x: Tensor of shape [N] or [N, 1]
-    coeffs: Tensor of shape [degree, T] or [S, degree, T]
-    returns: [N, T] if coeffs is [degree, T]; [S, N, T] if coeffs is [S, degree, T]
-    """
-    if x.dim() == 1:
-        x = x.unsqueeze(-1)
-
-    powers = torch.arange(1, coeffs.shape[-2] + 1, device=x.device).view(1, -1)  # [1, degree]
-    x_powers = x ** powers  # [N, degree]
-
-    if coeffs.dim() == 2:
-        return x_powers @ coeffs  # [N, T]
-    elif coeffs.dim() == 3:
-        x_powers = x_powers.unsqueeze(0)  # [1, N, degree]
-        return torch.matmul(x_powers, coeffs).squeeze(-2)  # [S, N, T]
-    else:
-        raise ValueError(f"Expected coeffs to have 2 or 3 dims, got shape {coeffs.shape}")
-
-
-
-def cutoff_sigmoid(x, threshold=0.1, slope=50.0):
-    """
-    Returns x * sigmoid( slope*(threshold - x) ).
-    - Near threshold=0.1, the logistic factor is ~0.5
-    - For x << 0.1, the factor approaches 1
-    - For x >> 0.1, the factor approaches 0
-    """
-    return x * torch.sigmoid(slope*(threshold - x))
-
-def sample_or_use_point(name, value, device):
-    """
-    Handles whether `value` is a point estimate (float/tensor) or a posterior distribution.
-    
-    Parameters:
-    - name (str): The name of the Pyro variable if sampling from a posterior.
-    - value (torch.Tensor | float | int): The value to process.
-    - device (torch.device): The computation device (CPU/GPU).
-    - is_posterior (bool): Whether the input is a posterior distribution.
-    
-    Returns:
-    - torch.Tensor: The processed tensor or sampled posterior.
-    """
-    if isinstance(value, torch.Tensor):
-        return value.to(device)  # Treat as a fixed tensor (point estimate)
-
-    elif isinstance(value, (int, float, np.ndarray)):  # Scalars (float, int)
-        return torch.tensor(value, dtype=torch.float32, device=device)
-
-    else:
-        raise TypeError(f"Expected a tensor, float, or posterior samples, but got {type(value)}.")
-
-def check_tensor(name, tensor):
-    print(f"--- {name} ---")
-    print(f"  shape: {tensor.shape}")
-    print(f"  min: {tensor.min().item()}, max: {tensor.max().item()}")
-    print(f"  has NaN: {torch.isnan(tensor).any().item()}")
-    print(f"  has Inf: {torch.isinf(tensor).any().item()}")
-
-##########################################################
-# The main class that organizes the 3 modeling steps (OOP)
-##########################################################
 
 class bayesDREAM:
     """
@@ -547,12 +449,40 @@ class bayesDREAM:
         covariates: list[str] = None # ["lane", "cell_line"] or could be empty
     ):
         """
-        Replicates the 'NTC' guide-level sum-factor adjustment from R code, in Python.
+        Step 1 of sum factor adjustment: Normalize guides to NTC controls.
 
-        - Assumes sum_factor_col_old already exists (e.g., an existing sum factor column).
-        - Groups by covariates to compute average sum_factor of the NTC cells.
-        - Then for each guide, we compute the ratio: mean_ntc / mean_guide.
-        - We apply that ratio to create a final adjusted sum factor.
+        Use BEFORE fit_cis() to account for guide-level technical variation.
+        Computes adjustment factor = mean_ntc_sum_factor / mean_guide_sum_factor
+        within covariate groups (e.g., cell_line, lane).
+
+        Typical workflow:
+            1. adjust_ntc_sum_factor() -> creates 'sum_factor_adj'
+            2. fit_cis(sum_factor_col='sum_factor_adj')
+            3. refit_sumfactor() -> creates 'sum_factor_refit'
+            4. fit_trans(sum_factor_col='sum_factor_refit')
+
+        Parameters
+        ----------
+        sum_factor_col_old : str
+            Name of existing sum factor column in meta (default: 'sum_factor')
+        sum_factor_col_adj : str
+            Name for adjusted sum factor column to create (default: 'sum_factor_adj')
+        covariates : list of str, optional
+            Columns to group by for adjustment (e.g., ['cell_line', 'lane']).
+            If None or empty, uses global mean across all cells.
+
+        Returns
+        -------
+        None
+            Creates new column sum_factor_col_adj in self.meta
+
+        Notes
+        -----
+        For each guide within each covariate group:
+        - Compute mean NTC sum factor: mean_ntc
+        - Compute mean guide sum factor: mean_guide
+        - Adjustment factor = mean_ntc / mean_guide
+        - Adjusted sum factor = sum_factor * adjustment_factor
         """
         meta_out = self.meta.copy()
         meta_out["original_index"] = np.arange(len(meta_out))
@@ -1535,6 +1465,54 @@ class bayesDREAM:
         degree: int = 3,
         alpha: float = 0.1
     ):
+        """
+        Step 2 of sum factor adjustment: Remove cis gene contribution.
+
+        Use AFTER fit_cis() and BEFORE fit_trans().
+        Fits a spline regression: (sum_factor - baseline_ntc) ~ f(x_true)
+        Then removes the predicted x_true contribution from sum factors.
+
+        This ensures trans modeling isn't confounded by cis expression levels.
+
+        Typical workflow:
+            1. adjust_ntc_sum_factor() -> creates 'sum_factor_adj'
+            2. fit_cis(sum_factor_col='sum_factor_adj')
+            3. refit_sumfactor() -> creates 'sum_factor_refit'  <-- This step
+            4. fit_trans(sum_factor_col='sum_factor_refit')
+
+        Parameters
+        ----------
+        sum_factor_col_old : str
+            Name of existing sum factor column (typically from adjust_ntc_sum_factor)
+        sum_factor_col_refit : str
+            Name for refitted sum factor column to create (default: 'sum_factor_new')
+        covariates : list of str, optional
+            Columns to group by for baseline NTC calculation (e.g., ['cell_line', 'lane'])
+        n_knots : int
+            Number of spline knots for regression (default: 5)
+        degree : int
+            Polynomial degree of spline pieces (default: 3)
+        alpha : float
+            Ridge regression regularization parameter (default: 0.1)
+
+        Returns
+        -------
+        None
+            Creates new column sum_factor_col_refit in self.meta
+
+        Notes
+        -----
+        Algorithm:
+        1. Compute baseline NTC sum factor for each covariate group
+        2. Compute leftover = sum_factor - baseline_ntc
+        3. Fit spline model: leftover ~ f(x_true)
+        4. Predict x_true contribution: y_pred = model(x_true)
+        5. Adjusted sum factor = max(0, leftover - y_pred + baseline_ntc)
+
+        Requires:
+        - self.x_true must be set (from fit_cis())
+        - self.x_true_type must be 'posterior' or 'point'
+        """
         sum_factor_data = self.meta[sum_factor_col_old].values  # shape (N,)
         
         if covariates is None:

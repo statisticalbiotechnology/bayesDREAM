@@ -19,6 +19,13 @@ from .distributions import (
     is_3d_distribution,
     DISTRIBUTION_REGISTRY
 )
+from .utils import (
+    set_max_threads,
+    Hill_based_positive,
+    Hill_based_negative,
+    Hill_based_piecewise,
+    Polynomial_function
+)
 
 __version__ = "0.2.0"
 
@@ -34,4 +41,9 @@ __all__ = [
     'requires_denominator',
     'is_3d_distribution',
     'DISTRIBUTION_REGISTRY',
+    'set_max_threads',
+    'Hill_based_positive',
+    'Hill_based_negative',
+    'Hill_based_piecewise',
+    'Polynomial_function',
 ]
