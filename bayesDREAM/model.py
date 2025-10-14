@@ -490,6 +490,9 @@ class bayesDREAM:
         if sum_factor_col_old not in meta_out.columns:
             raise ValueError(f"No column '{sum_factor_col_old}' found in meta. Provide a precomputed sum_factor.")
 
+        # Drop existing adjustment_factor column if it exists (prevents merge conflicts)
+        if "adjustment_factor" in meta_out.columns:
+            meta_out = meta_out.drop(columns=["adjustment_factor"])
 
         # Make sure all covariates are actually in meta_out
         if covariates:
