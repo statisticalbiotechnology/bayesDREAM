@@ -653,6 +653,10 @@ class bayesDREAM:
         mu_x_mean_tensor,
         mu_x_sd_tensor,
         epsilon_tensor,
+        distribution='negbinom',
+        denominator_ntc_tensor=None,
+        K=None,
+        D=None,
     ):
     
         # Global parameters (no plate needed here)
@@ -704,22 +708,82 @@ class bayesDREAM:
         #phi_y_used = phi_y[..., groups_ntc_tensor, :] # shape => [N, T]
         phi_y_used = phi_y.unsqueeze(-2)
     
-        # Now we sample y_obs which is [N, T]
-        with pyro.plate("obs_plate", T, dim=-1):  # Explicitly including T
+        # Sample mu_ntc (baseline expression for each feature)
+        with pyro.plate("feature_plate_technical", T, dim=-1):
             mu_ntc = pyro.sample(
                 "mu_ntc",
                 dist.Gamma((mu_x_mean_tensor**2) / (mu_x_sd_tensor**2), mu_x_mean_tensor / (mu_x_sd_tensor**2))
             )  # [T]
-    
-            with pyro.plate("data_plate", N, dim=-2):
-                pyro.sample(
-                    "y_obs_ntc",
-                    dist.NegativeBinomial(
-                        total_count=phi_y_used,
-                        logits=torch.log(alpha_y_used * mu_ntc * sum_factor_ntc_tensor.unsqueeze(-1)) - torch.log(phi_y_used)
-                    ),
-                    obs=y_obs_ntc_tensor
-                )
+
+        # Compute mu_y from mu_ntc and alpha_y
+        mu_y = alpha_y_used * mu_ntc  # [N, T]
+
+        # Call distribution-specific observation sampler
+        from .distributions import get_observation_sampler
+        observation_sampler = get_observation_sampler(distribution, 'trans')
+
+        if distribution == 'negbinom':
+            # For negbinom, we pass mu_y and sum_factor separately
+            # Note: alpha_y already applied in mu_y, so we pass alpha_y_full=None
+            observation_sampler(
+                y_obs_tensor=y_obs_ntc_tensor,
+                mu_y=mu_y,
+                phi_y_used=phi_y_used,
+                alpha_y_full=None,  # Already applied in mu_y
+                groups_tensor=None,
+                sum_factor_tensor=sum_factor_ntc_tensor,
+                N=N,
+                T=T,
+                C=C
+            )
+        elif distribution == 'normal':
+            sigma_y = 1.0 / torch.sqrt(phi_y)
+            observation_sampler(
+                y_obs_tensor=y_obs_ntc_tensor,
+                mu_y=mu_y,
+                sigma_y=sigma_y,
+                alpha_y_full=None,  # Already applied in mu_y
+                groups_tensor=None,
+                N=N,
+                T=T,
+                C=C
+            )
+        elif distribution == 'binomial':
+            observation_sampler(
+                y_obs_tensor=y_obs_ntc_tensor,
+                denominator_tensor=denominator_ntc_tensor,
+                mu_y=mu_y,
+                alpha_y_full=None,  # Already applied in mu_y
+                groups_tensor=None,
+                N=N,
+                T=T,
+                C=C
+            )
+        elif distribution == 'multinomial':
+            observation_sampler(
+                y_obs_tensor=y_obs_ntc_tensor,
+                mu_y=mu_y,
+                N=N,
+                T=T,
+                K=K
+            )
+        elif distribution == 'mvnormal':
+            # For mvnormal, need covariance matrix
+            # For now, use diagonal covariance from phi_y
+            cov_y = torch.diag_embed(1.0 / phi_y.unsqueeze(0).expand(T, D))  # [T, D, D]
+            observation_sampler(
+                y_obs_tensor=y_obs_ntc_tensor,
+                mu_y=mu_y,
+                cov_y=cov_y,
+                alpha_y_full=None,  # Already applied in mu_y
+                groups_tensor=None,
+                N=N,
+                T=T,
+                D=D,
+                C=C
+            )
+        else:
+            raise ValueError(f"Unknown distribution: {distribution}")
 
 
 
@@ -729,7 +793,7 @@ class bayesDREAM:
     def fit_technical(
         self,
         covariates: list[str], # ["cell_line"] NOT empty. The point is to fit to the covariates. Lane is typically not included as this tends to be corrected by sum factor adjustment alone
-        sum_factor_col: str = 'sum_factor',
+        sum_factor_col: str = None,
         lr: float = 1e-3,
         niters: int = 50000,
         nsamples: int = 1000,
@@ -740,14 +804,38 @@ class bayesDREAM:
         alpha_alpha_mu: float = 5.8,
         epsilon: float = 1e-6,
         minibatch_size: int = None,
+        distribution: str = 'negbinom',
+        denominator: np.ndarray = None,
         **kwargs
     ):
         """
         Prefits gene-level "technical" variables (alpha_y) using only NTC samples,
         grouped by arbitrary covariates (e.g. ["cell_line"]).
-    
+
         If you skip this method, you'd provide alpha_y_fixed manually in the next step.
+
+        Parameters
+        ----------
+        distribution : str, default='negbinom'
+            Distribution type: 'negbinom', 'multinomial', 'binomial', 'normal', 'mvnormal'
+        sum_factor_col : str, optional
+            Column name for size factors (required for negbinom, ignored otherwise)
+        denominator : np.ndarray, optional
+            Denominator array for binomial distribution (shape: [n_features, n_cells])
+
+        Notes
+        -----
+        BREAKING: sum_factor_col now defaults to None (optional, only for negbinom)
         """
+
+        # Validate distribution-specific requirements
+        from .distributions import requires_sum_factor, requires_denominator
+
+        if requires_sum_factor(distribution) and sum_factor_col is None:
+            raise ValueError(f"Distribution '{distribution}' requires sum_factor_col parameter")
+
+        if requires_denominator(distribution) and denominator is None:
+            raise ValueError(f"Distribution '{distribution}' requires denominator parameter")
         
         # Check covariates exist
         if not covariates:
@@ -802,22 +890,50 @@ class bayesDREAM:
         guides = meta_ntc['guide_code'].values
 
         # Calculate priors
-        y_obs_ntc_factored = y_obs_ntc / meta_ntc[sum_factor_col].values.reshape(-1, 1)
+        # Handle sum factors (only for distributions that need them)
+        if sum_factor_col is not None:
+            y_obs_ntc_factored = y_obs_ntc / meta_ntc[sum_factor_col].values.reshape(-1, 1)
+        else:
+            y_obs_ntc_factored = y_obs_ntc
+
         baseline_mask = (groups_ntc == 0)
-        mu_x_mean = np.mean(y_obs_ntc_factored[baseline_mask, :],axis=0)
+        mu_x_mean = np.mean(y_obs_ntc_factored[baseline_mask, :],axis=0) + epsilon
         guide_means = np.array([np.mean(y_obs_ntc_factored[guides == g], axis=0) for g in np.unique(guides)])
-        mu_x_sd = np.std(guide_means, axis=0)
+        mu_x_sd = np.std(guide_means, axis=0) + epsilon
 
         # Convert to tensors
         beta_o_beta_tensor = torch.tensor(beta_o_beta, dtype=torch.float32, device=self.device)
         beta_o_alpha_tensor = torch.tensor(beta_o_alpha, dtype=torch.float32, device=self.device)
         alpha_alpha_mu_tensor = torch.tensor(alpha_alpha_mu, dtype=torch.float32, device=self.device)
-        sum_factor_ntc_tensor = torch.tensor(meta_ntc[sum_factor_col].values, dtype=torch.float32, device=self.device)
+
+        # Handle sum factors
+        if sum_factor_col is not None:
+            sum_factor_ntc_tensor = torch.tensor(meta_ntc[sum_factor_col].values, dtype=torch.float32, device=self.device)
+        else:
+            sum_factor_ntc_tensor = torch.ones(N, dtype=torch.float32, device=self.device)
+
         groups_ntc_tensor = torch.tensor(groups_ntc, dtype=torch.long, device=self.device)
         y_obs_ntc_tensor = torch.tensor(y_obs_ntc, dtype=torch.float32, device=self.device)
         mu_x_mean_tensor = torch.tensor(mu_x_mean, dtype=torch.float32, device=self.device)
         mu_x_sd_tensor = torch.tensor(mu_x_sd, dtype=torch.float32, device=self.device)
         epsilon_tensor = torch.tensor(epsilon, dtype=torch.float32, device=self.device)
+
+        # Handle denominator (for binomial)
+        denominator_ntc_tensor = None
+        if denominator is not None:
+            denominator_ntc = denominator[:, meta_ntc.index].T  # Subset to NTC cells, transpose to [N, T]
+            denominator_ntc_tensor = torch.tensor(denominator_ntc, dtype=torch.float32, device=self.device)
+
+        # Detect data dimensions (for multinomial and mvnormal)
+        from .distributions import is_3d_distribution
+        K = None
+        D = None
+        if is_3d_distribution(distribution):
+            if y_obs_ntc.ndim == 3:
+                if distribution == 'multinomial':
+                    K = y_obs_ntc.shape[2]
+                elif distribution == 'mvnormal':
+                    D = y_obs_ntc.shape[2]
 
         def init_loc_fn(site):
             if site["name"] == "log2_alpha_y":
@@ -858,6 +974,10 @@ class bayesDREAM:
                 mu_x_mean_tensor,
                 mu_x_sd_tensor,
                 epsilon_tensor,
+                distribution,
+                denominator_ntc_tensor,
+                K,
+                D,
             )
             losses.append(loss)
             if step % 1000 == 0:
@@ -893,6 +1013,10 @@ class bayesDREAM:
                 "mu_x_mean_tensor": mu_x_mean_tensor.cpu(),
                 "mu_x_sd_tensor": mu_x_sd_tensor.cpu(),
                 "epsilon_tensor": epsilon_tensor.cpu(),
+                "distribution": distribution,
+                "denominator_ntc_tensor": denominator_ntc_tensor.cpu() if denominator_ntc_tensor is not None else None,
+                "K": K,
+                "D": D,
             }
 
         else:
@@ -909,6 +1033,10 @@ class bayesDREAM:
                 "mu_x_mean_tensor": mu_x_mean_tensor,
                 "mu_x_sd_tensor": mu_x_sd_tensor,
                 "epsilon_tensor": epsilon_tensor,
+                "distribution": distribution,
+                "denominator_ntc_tensor": denominator_ntc_tensor,
+                "K": K,
+                "D": D,
             }
 
         if self.device.type == "cuda":
