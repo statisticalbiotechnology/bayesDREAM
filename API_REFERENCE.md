@@ -552,6 +552,10 @@ Modality(
 - `feature_meta`: Metadata DataFrame
 - `distribution`: Distribution type
 - `denominator`: Denominator array (binomial only)
+- `inc1`: Inclusion junction 1 counts (exon skipping only)
+- `inc2`: Inclusion junction 2 counts (exon skipping only)
+- `skip`: Skipping junction counts (exon skipping only)
+- `exon_aggregate_method`: How inc1/inc2 are aggregated ('min' or 'mean', exon skipping only)
 - `dims`: Dictionary with dimensions:
   - `n_features`: Number of features
   - `n_cells`: Number of cells
@@ -604,6 +608,54 @@ Subset to specific cells.
 - `cell_indices` (list or array): Cell indices
 
 **Returns:** New Modality object
+
+---
+
+#### set_exon_aggregate_method()
+
+```python
+modality.set_exon_aggregate_method(method, allow_after_technical_fit=False)
+```
+
+Change the exon skipping aggregation method and recompute inclusion counts.
+
+Only available for exon skipping modalities (those with `inc1`, `inc2`, `skip` data).
+
+**Parameters:**
+- `method` (str): Aggregation method - `'min'` or `'mean'`
+- `allow_after_technical_fit` (bool): Allow changing after technical fit. Default: False
+
+**Raises:** ValueError if invalid method, not an exon skipping modality, or changing after technical fit without permission
+
+**Example:**
+```python
+exon_mod = model.get_modality('splicing_exon_skip')
+exon_mod.set_exon_aggregate_method('mean')  # Changes from 'min' to 'mean'
+```
+
+---
+
+#### is_exon_skipping()
+
+```python
+modality.is_exon_skipping()
+```
+
+Check if this is an exon skipping modality with inc1/inc2/skip data.
+
+**Returns:** bool
+
+---
+
+#### mark_technical_fit_complete()
+
+```python
+modality.mark_technical_fit_complete()
+```
+
+Mark that technical fit has been performed with current aggregation method.
+
+This locks the aggregation method to prevent accidental changes that would invalidate the prefit overdispersion parameters.
 
 ---
 

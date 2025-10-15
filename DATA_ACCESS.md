@@ -119,6 +119,14 @@ total = exon_mod.denominator        # denominator (events × cells)
 
 # Calculate PSI (proportion spliced in)
 psi = inclusion / (total + 1e-9)  # add small constant to avoid division by zero
+
+# For exon skipping, raw junction counts are also available
+if exon_mod.is_exon_skipping():
+    inc1 = exon_mod.inc1  # Inclusion junction 1 (d1->a2)
+    inc2 = exon_mod.inc2  # Inclusion junction 2 (d2->a3)
+    skip = exon_mod.skip  # Skipping junction (d1->a3)
+
+    print(f"Aggregation method: {exon_mod.exon_aggregate_method}")  # 'min' or 'mean'
 ```
 
 ---
@@ -499,6 +507,38 @@ top_donors = np.argsort(max_diff)[-10:]  # Top 10
 # Get metadata for top donors
 print(donor_mod.feature_meta.iloc[top_donors])
 ```
+
+---
+
+## Changing Exon Skipping Aggregation
+
+For exon skipping modalities, you can change how `inc1` and `inc2` are aggregated to compute inclusion:
+
+```python
+# Get exon skipping modality
+exon_mod = model.get_modality('splicing_exon_skip')
+print(f"Current method: {exon_mod.exon_aggregate_method}")  # e.g., 'min'
+
+# Change to mean aggregation
+exon_mod.set_exon_aggregate_method('mean')
+# This recomputes exon_mod.counts (inclusion) and exon_mod.denominator (total)
+
+# After fit_technical(), changing is prevented by default
+model.fit_technical(covariates=['cell_line'], distribution='binomial', denominator=exon_mod.denominator)
+exon_mod.mark_technical_fit_complete()  # Lock the aggregation method
+
+try:
+    exon_mod.set_exon_aggregate_method('min')  # Will raise ValueError
+except ValueError as e:
+    print(f"Prevented: {e}")
+
+# Override if you really want to (invalidates technical fit parameters)
+exon_mod.set_exon_aggregate_method('min', allow_after_technical_fit=True)
+```
+
+**Why lock after technical fit?**
+
+The technical model estimates overdispersion parameters (`alpha_y`) based on the current aggregation method. Changing the aggregation method changes the inclusion counts, which would make the prefit parameters incorrect. The lock prevents accidental invalidation of these parameters.
 
 ---
 

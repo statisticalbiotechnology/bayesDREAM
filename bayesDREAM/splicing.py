@@ -495,10 +495,12 @@ def process_exon_skipping(sj_counts: pd.DataFrame,
 
     Returns
     -------
-    inclusion_counts : np.ndarray
-        Shape: (n_events, n_cells)
-    total_counts : np.ndarray
-        Shape: (n_events, n_cells)
+    inc1_counts : np.ndarray
+        Shape: (n_events, n_cells) - Counts for first inclusion junction (d1->a2)
+    inc2_counts : np.ndarray
+        Shape: (n_events, n_cells) - Counts for second inclusion junction (d2->a3)
+    skip_counts : np.ndarray
+        Shape: (n_events, n_cells) - Counts for skipping junction (d1->a3)
     feature_meta : pd.DataFrame
         Event metadata with columns: trip_id, chrom, strand, d1, a2, d2, a3, sj_inc1, sj_inc2, sj_skip
     cell_names : list
@@ -516,6 +518,7 @@ def process_exon_skipping(sj_counts: pd.DataFrame,
         cell_names = sj_counts.columns.tolist()
         return (np.zeros((0, len(cell_names))),
                 np.zeros((0, len(cell_names))),
+                np.zeros((0, len(cell_names))),
                 pd.DataFrame(columns=['trip_id', 'chrom', 'strand', 'd1', 'a2', 'd2', 'a3',
                                      'sj_inc1', 'sj_inc2', 'sj_skip']),
                 cell_names)
@@ -524,9 +527,10 @@ def process_exon_skipping(sj_counts: pd.DataFrame,
     n_cells = len(cell_names)
     n_events = len(trips)
 
-    # Initialize arrays
-    inclusion_counts = np.zeros((n_events, n_cells), dtype=float)
-    total_counts = np.zeros((n_events, n_cells), dtype=float)
+    # Initialize arrays for raw counts
+    inc1_counts = np.zeros((n_events, n_cells), dtype=float)
+    inc2_counts = np.zeros((n_events, n_cells), dtype=float)
+    skip_counts = np.zeros((n_events, n_cells), dtype=float)
 
     # Get counts for all needed junctions
     needed_sjs = pd.concat([trips['sj_inc1'], trips['sj_inc2'], trips['sj_skip']]).unique()
@@ -538,32 +542,35 @@ def process_exon_skipping(sj_counts: pd.DataFrame,
         sj_inc2 = row['sj_inc2']
         sj_skip = row['sj_skip']
 
-        # Get counts
+        # Get raw counts
         inc1 = sj_data.loc[sj_inc1].values if sj_inc1 in sj_data.index else np.zeros(n_cells)
         inc2 = sj_data.loc[sj_inc2].values if sj_inc2 in sj_data.index else np.zeros(n_cells)
         skip = sj_data.loc[sj_skip].values if sj_skip in sj_data.index else np.zeros(n_cells)
 
-        # Compute inclusion
+        # Compute aggregated inclusion for filtering only
         if method == 'min':
-            inc = np.minimum(inc1, inc2)
+            inc_agg = np.minimum(inc1, inc2)
         elif method == 'mean':
-            inc = (inc1 + inc2) / 2.0
+            inc_agg = (inc1 + inc2) / 2.0
         else:
             raise ValueError(f"method must be 'min' or 'mean', got: {method}")
 
-        # Total = inclusion + skipping
-        tot = inc + skip
+        # Total = aggregated inclusion + skipping
+        tot = inc_agg + skip
 
-        # Apply minimum total filter
+        # Apply minimum total filter to ALL raw counts
         if min_total_exon > 0:
             mask = tot < min_total_exon
-            inc[mask] = 0
-            tot[mask] = 0
+            inc1[mask] = 0
+            inc2[mask] = 0
+            skip[mask] = 0
 
-        inclusion_counts[i, :] = inc
-        total_counts[i, :] = tot
+        # Store raw counts
+        inc1_counts[i, :] = inc1
+        inc2_counts[i, :] = inc2
+        skip_counts[i, :] = skip
 
-    return inclusion_counts, total_counts, trips, cell_names
+    return inc1_counts, inc2_counts, skip_counts, trips, cell_names
 
 
 def process_sj_counts(sj_counts: pd.DataFrame,
@@ -802,16 +809,28 @@ def create_splicing_modality(sj_counts: pd.DataFrame,
         method = kwargs.get('method', 'min')
         fallback_genomic = kwargs.get('fallback_genomic', True)
 
-        inc_counts, tot_counts, feature_meta, cell_names = process_exon_skipping(
+        inc1_counts, inc2_counts, skip_counts, feature_meta, cell_names = process_exon_skipping(
             sj_counts, sj_meta, min_total_exon, method, fallback_genomic
         )
+
+        # Compute inclusion and total using specified method
+        if method == 'min':
+            inc_counts = np.minimum(inc1_counts, inc2_counts)
+        elif method == 'mean':
+            inc_counts = (inc1_counts + inc2_counts) / 2.0
+        tot_counts = inc_counts + skip_counts
+
         return Modality(
             name='splicing_exon_skip',
             counts=inc_counts,
             feature_meta=feature_meta,
             distribution='binomial',
             denominator=tot_counts,
-            cells_axis=1
+            cells_axis=1,
+            inc1=inc1_counts,
+            inc2=inc2_counts,
+            skip=skip_counts,
+            exon_aggregate_method=method
         )
 
     else:

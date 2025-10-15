@@ -796,7 +796,7 @@ class bayesDREAM:
     def fit_technical(
         self,
         covariates: list[str], # ["cell_line"] NOT empty. The point is to fit to the covariates. Lane is typically not included as this tends to be corrected by sum factor adjustment alone
-        sum_factor_col: str = None,
+        sum_factor_col: str = 'sum_factor',
         lr: float = 1e-3,
         niters: int = 50000,
         nsamples: int = 1000,

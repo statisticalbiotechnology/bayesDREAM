@@ -43,6 +43,11 @@ class Modality:
         distribution: Literal['negbinom', 'multinomial', 'binomial', 'normal', 'mvnormal'],
         denominator: Optional[np.ndarray] = None,
         cells_axis: int = 1,  # 0 if cells are rows, 1 if cells are columns
+        # Exon skipping specific parameters
+        inc1: Optional[np.ndarray] = None,
+        inc2: Optional[np.ndarray] = None,
+        skip: Optional[np.ndarray] = None,
+        exon_aggregate_method: Optional[str] = None,
     ):
         """
         Initialize a Modality.
@@ -61,6 +66,14 @@ class Modality:
             For binomial: denominator counts (e.g., total gene expression for SJ usage)
         cells_axis : int
             Which axis represents cells (0 or 1 for 2D data)
+        inc1 : np.ndarray, optional
+            For exon skipping: inclusion counts from first junction (d1->a2)
+        inc2 : np.ndarray, optional
+            For exon skipping: inclusion counts from second junction (d2->a3)
+        skip : np.ndarray, optional
+            For exon skipping: skipping counts (d1->a3)
+        exon_aggregate_method : str, optional
+            For exon skipping: how inc1 and inc2 were aggregated ('min' or 'mean')
         """
         if distribution not in self.VALID_DISTRIBUTIONS:
             raise ValueError(f"distribution must be one of {self.VALID_DISTRIBUTIONS}, got {distribution}")
@@ -88,6 +101,13 @@ class Modality:
 
         self.feature_meta = feature_meta.copy()
         self.denominator = np.asarray(denominator) if denominator is not None else None
+
+        # Exon skipping specific storage
+        self.inc1 = np.asarray(inc1) if inc1 is not None else None
+        self.inc2 = np.asarray(inc2) if inc2 is not None else None
+        self.skip = np.asarray(skip) if skip is not None else None
+        self.exon_aggregate_method = exon_aggregate_method
+        self._technical_fit_aggregate_method = None  # Track method used during technical fit
 
         # Validate shapes
         self._validate()
@@ -122,6 +142,17 @@ class Modality:
                 raise ValueError("binomial distribution requires denominator")
             if self.denominator.shape != self.counts.shape:
                 raise ValueError(f"denominator shape {self.denominator.shape} must match counts shape {self.counts.shape}")
+
+        # Validate exon skipping data if provided
+        if self.inc1 is not None or self.inc2 is not None or self.skip is not None:
+            if self.distribution != 'binomial':
+                raise ValueError("inc1/inc2/skip are only valid for binomial distribution (exon skipping)")
+            if self.inc1 is None or self.inc2 is None or self.skip is None:
+                raise ValueError("For exon skipping, must provide all three: inc1, inc2, skip")
+            if self.inc1.shape != self.counts.shape or self.inc2.shape != self.counts.shape or self.skip.shape != self.counts.shape:
+                raise ValueError(f"inc1, inc2, skip must all have same shape as counts: {self.counts.shape}")
+            if self.exon_aggregate_method not in ['min', 'mean']:
+                raise ValueError(f"exon_aggregate_method must be 'min' or 'mean', got: {self.exon_aggregate_method}")
 
     def _compute_dims(self) -> Dict[str, int]:
         """Compute dimensionality information."""
@@ -173,13 +204,22 @@ class Modality:
             if self.cells_axis == 1:
                 new_counts = self.counts[feature_indices, :]
                 new_denom = self.denominator[feature_indices, :] if self.denominator is not None else None
+                new_inc1 = self.inc1[feature_indices, :] if self.inc1 is not None else None
+                new_inc2 = self.inc2[feature_indices, :] if self.inc2 is not None else None
+                new_skip = self.skip[feature_indices, :] if self.skip is not None else None
             else:
                 new_counts = self.counts[:, feature_indices]
                 new_denom = self.denominator[:, feature_indices] if self.denominator is not None else None
+                new_inc1 = self.inc1[:, feature_indices] if self.inc1 is not None else None
+                new_inc2 = self.inc2[:, feature_indices] if self.inc2 is not None else None
+                new_skip = self.skip[:, feature_indices] if self.skip is not None else None
         else:
             # multinomial or mvnormal: features on axis 0
             new_counts = self.counts[feature_indices, :, :]
             new_denom = None
+            new_inc1 = None
+            new_inc2 = None
+            new_skip = None
 
         # Subset metadata
         new_feature_meta = self.feature_meta.iloc[feature_indices].copy()
@@ -190,7 +230,11 @@ class Modality:
             feature_meta=new_feature_meta,
             distribution=self.distribution,
             denominator=new_denom,
-            cells_axis=self.cells_axis
+            cells_axis=self.cells_axis,
+            inc1=new_inc1,
+            inc2=new_inc2,
+            skip=new_skip,
+            exon_aggregate_method=self.exon_aggregate_method
         )
 
     def get_cell_subset(self, cell_indices: Union[list, np.ndarray]) -> 'Modality':
@@ -219,13 +263,22 @@ class Modality:
             if self.cells_axis == 1:
                 new_counts = self.counts[:, cell_indices]
                 new_denom = self.denominator[:, cell_indices] if self.denominator is not None else None
+                new_inc1 = self.inc1[:, cell_indices] if self.inc1 is not None else None
+                new_inc2 = self.inc2[:, cell_indices] if self.inc2 is not None else None
+                new_skip = self.skip[:, cell_indices] if self.skip is not None else None
             else:
                 new_counts = self.counts[cell_indices, :]
                 new_denom = self.denominator[cell_indices, :] if self.denominator is not None else None
+                new_inc1 = self.inc1[cell_indices, :] if self.inc1 is not None else None
+                new_inc2 = self.inc2[cell_indices, :] if self.inc2 is not None else None
+                new_skip = self.skip[cell_indices, :] if self.skip is not None else None
         else:
             # multinomial or mvnormal: cells on axis 1
             new_counts = self.counts[:, cell_indices, :]
             new_denom = None
+            new_inc1 = None
+            new_inc2 = None
+            new_skip = None
 
         return Modality(
             name=self.name,
@@ -233,8 +286,80 @@ class Modality:
             feature_meta=self.feature_meta.copy(),
             distribution=self.distribution,
             denominator=new_denom,
-            cells_axis=self.cells_axis
+            cells_axis=self.cells_axis,
+            inc1=new_inc1,
+            inc2=new_inc2,
+            skip=new_skip,
+            exon_aggregate_method=self.exon_aggregate_method
         )
 
+    def set_exon_aggregate_method(self, method: str, allow_after_technical_fit: bool = False):
+        """
+        Change the exon skipping aggregation method and recompute inclusion counts.
+
+        This recomputes self.counts (inclusion) and self.denominator (total) based on
+        the new aggregation method.
+
+        Parameters
+        ----------
+        method : str
+            Aggregation method: 'min' or 'mean'
+        allow_after_technical_fit : bool
+            If True, allow changing method even after technical fit. Default: False.
+            WARNING: Changing aggregation after technical fit invalidates the prefit
+            overdispersion parameters.
+
+        Raises
+        ------
+        ValueError
+            If method is invalid, modality is not exon skipping, or changing after
+            technical fit without explicit permission.
+        """
+        if self.inc1 is None:
+            raise ValueError("This modality does not have exon skipping data (inc1/inc2/skip)")
+
+        if method not in ['min', 'mean']:
+            raise ValueError(f"method must be 'min' or 'mean', got: {method}")
+
+        # Check if technical fit was done with different method
+        if self._technical_fit_aggregate_method is not None:
+            if self._technical_fit_aggregate_method != method and not allow_after_technical_fit:
+                raise ValueError(
+                    f"Technical fit was performed with '{self._technical_fit_aggregate_method}' aggregation. "
+                    f"Cannot change to '{method}' without invalidating prefit parameters. "
+                    f"Set allow_after_technical_fit=True to override (not recommended)."
+                )
+
+        # Recompute inclusion
+        if method == 'min':
+            inclusion = np.minimum(self.inc1, self.inc2)
+        elif method == 'mean':
+            inclusion = (self.inc1 + self.inc2) / 2.0
+
+        # Recompute total
+        total = inclusion + self.skip
+
+        # Update
+        self.counts = inclusion
+        self.denominator = total
+        self.exon_aggregate_method = method
+
+        print(f"[INFO] Recomputed exon skipping inclusion with method='{method}'")
+
+    def is_exon_skipping(self) -> bool:
+        """Check if this is an exon skipping modality with inc1/inc2/skip data."""
+        return self.inc1 is not None
+
+    def mark_technical_fit_complete(self):
+        """
+        Mark that technical fit has been performed with current aggregation method.
+
+        This locks the aggregation method to prevent accidental changes that would
+        invalidate the prefit overdispersion parameters.
+        """
+        if self.is_exon_skipping():
+            self._technical_fit_aggregate_method = self.exon_aggregate_method
+
     def __repr__(self) -> str:
-        return f"Modality(name='{self.name}', distribution='{self.distribution}', dims={self.dims})"
+        exon_info = f", exon_agg='{self.exon_aggregate_method}'" if self.is_exon_skipping() else ""
+        return f"Modality(name='{self.name}', distribution='{self.distribution}', dims={self.dims}{exon_info})"
