@@ -126,6 +126,9 @@ def sample_multinomial_trans(
     For multinomial data, mu_y should already be normalized probabilities.
     Cell-line effects are not yet supported due to complexity of maintaining
     probability simplex constraints.
+
+    We use a single plate for the N*T observations to avoid issues with
+    nested plates and varying total_count.
     """
     # Compute total counts per feature per observation
     total_counts = y_obs_tensor.sum(dim=-1)  # [N, T]
@@ -133,14 +136,19 @@ def sample_multinomial_trans(
     # Ensure probabilities sum to 1
     probs = mu_y / (mu_y.sum(dim=-1, keepdim=True) + 1e-8)  # [N, T, K]
 
-    # Sample observations
-    with pyro.plate("feature_plate", T, dim=-1):
-        with pyro.plate("obs_plate", N, dim=-2):
-            pyro.sample(
-                "y_obs",
-                dist.Multinomial(total_count=total_counts, probs=probs),
-                obs=y_obs_tensor
-            )
+    # Flatten to treat each (observation, feature) pair independently
+    # Reshape from [N, T, K] to [N*T, K]
+    total_counts_flat = total_counts.reshape(-1)  # [N*T]
+    probs_flat = probs.reshape(-1, K)  # [N*T, K]
+    y_obs_flat = y_obs_tensor.reshape(-1, K)  # [N*T, K]
+
+    # Sample observations with single plate
+    with pyro.plate("obs_plate", N * T):
+        pyro.sample(
+            "y_obs",
+            dist.Multinomial(total_count=total_counts_flat, probs=probs_flat),
+            obs=y_obs_flat
+        )
 
 
 #######################################

@@ -122,6 +122,7 @@ def process_donor_usage(sj_counts: pd.DataFrame,
     cell_names : list
         Cell identifiers
     """
+    print("[INFO] Processing donor usage (5' splice sites)...")
     idx = _build_sj_index(sj_counts, sj_meta)
 
     # Group by (chrom, strand, donor)
@@ -172,16 +173,61 @@ def process_donor_usage(sj_counts: pd.DataFrame,
             'n_acceptors': n_acceptors
         })
 
+    # Filter donors with only one acceptor OR with zero variance in ALL ratios
+    n_before_filter = len(feature_rows)
+    filtered_rows = []
+    filtered_counts = []
+    n_single_acceptor = 0
+    n_zero_var = 0
+
+    for i, row in enumerate(feature_rows):
+        donor_counts = all_counts[i]  # Shape: (n_cells, n_acceptors)
+
+        # Filter 1: Only one acceptor
+        if row['n_acceptors'] <= 1:
+            n_single_acceptor += 1
+            continue
+
+        # Filter 2: Check if ALL ratios have zero variance across cells
+        # Compute total counts per cell
+        totals = donor_counts.sum(axis=1, keepdims=True)  # (n_cells, 1)
+
+        # Compute ratios (proportion of each acceptor per cell)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            ratios = np.where(totals > 0, donor_counts / totals, 0)  # (n_cells, n_acceptors)
+
+        # Check if ALL ratios have zero std across cells
+        ratio_stds = ratios.std(axis=0)  # std for each acceptor across cells
+        if np.all(ratio_stds == 0):
+            n_zero_var += 1
+            continue
+
+        filtered_rows.append(row)
+        filtered_counts.append(all_counts[i])
+
+    if n_single_acceptor > 0:
+        print(f"[INFO] Filtered {n_single_acceptor} donor site(s) with only one acceptor (no alternative splicing to model)")
+
+    if n_zero_var > 0:
+        print(f"[INFO] Filtered {n_zero_var} donor site(s) with zero variance in all acceptor usage ratios")
+
+    if len(filtered_rows) == 0:
+        warnings.warn("No donors with multiple acceptors found after filtering!")
+        # Return empty arrays
+        return (np.zeros((0, n_cells, 0), dtype=float),
+                pd.DataFrame(columns=['chrom', 'strand', 'donor', 'acceptors', 'n_acceptors']),
+                cell_names)
+
     # Stack into 3D array: (n_donors, n_cells, max_acceptors)
-    max_acceptors = max(row['n_acceptors'] for row in feature_rows)
-    n_donors = len(feature_rows)
+    max_acceptors = max(row['n_acceptors'] for row in filtered_rows)
+    n_donors = len(filtered_rows)
 
     counts_3d = np.zeros((n_donors, n_cells, max_acceptors), dtype=float)
-    for i, donor_counts in enumerate(all_counts):
+    for i, donor_counts in enumerate(filtered_counts):
         n_acc = donor_counts.shape[1]
         counts_3d[i, :, :n_acc] = donor_counts
 
-    feature_meta = pd.DataFrame(feature_rows)
+    feature_meta = pd.DataFrame(filtered_rows)
 
     return counts_3d, feature_meta, cell_names
 
@@ -214,6 +260,7 @@ def process_acceptor_usage(sj_counts: pd.DataFrame,
     cell_names : list
         Cell identifiers
     """
+    print("[INFO] Processing acceptor usage (3' splice sites)...")
     idx = _build_sj_index(sj_counts, sj_meta)
 
     # Group by (chrom, strand, acceptor)
@@ -264,16 +311,61 @@ def process_acceptor_usage(sj_counts: pd.DataFrame,
             'n_donors': n_donors
         })
 
+    # Filter acceptors with only one donor OR with zero variance in ALL ratios
+    n_before_filter = len(feature_rows)
+    filtered_rows = []
+    filtered_counts = []
+    n_single_donor = 0
+    n_zero_var = 0
+
+    for i, row in enumerate(feature_rows):
+        acceptor_counts = all_counts[i]  # Shape: (n_cells, n_donors)
+
+        # Filter 1: Only one donor
+        if row['n_donors'] <= 1:
+            n_single_donor += 1
+            continue
+
+        # Filter 2: Check if ALL ratios have zero variance across cells
+        # Compute total counts per cell
+        totals = acceptor_counts.sum(axis=1, keepdims=True)  # (n_cells, 1)
+
+        # Compute ratios (proportion of each donor per cell)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            ratios = np.where(totals > 0, acceptor_counts / totals, 0)  # (n_cells, n_donors)
+
+        # Check if ALL ratios have zero std across cells
+        ratio_stds = ratios.std(axis=0)  # std for each donor across cells
+        if np.all(ratio_stds == 0):
+            n_zero_var += 1
+            continue
+
+        filtered_rows.append(row)
+        filtered_counts.append(all_counts[i])
+
+    if n_single_donor > 0:
+        print(f"[INFO] Filtered {n_single_donor} acceptor site(s) with only one donor (no alternative splicing to model)")
+
+    if n_zero_var > 0:
+        print(f"[INFO] Filtered {n_zero_var} acceptor site(s) with zero variance in all donor usage ratios")
+
+    if len(filtered_rows) == 0:
+        warnings.warn("No acceptors with multiple donors found after filtering!")
+        # Return empty arrays
+        return (np.zeros((0, n_cells, 0), dtype=float),
+                pd.DataFrame(columns=['chrom', 'strand', 'acceptor', 'donors', 'n_donors']),
+                cell_names)
+
     # Stack into 3D array: (n_acceptors, n_cells, max_donors)
-    max_donors = max(row['n_donors'] for row in feature_rows)
-    n_acceptors = len(feature_rows)
+    max_donors = max(row['n_donors'] for row in filtered_rows)
+    n_acceptors = len(filtered_rows)
 
     counts_3d = np.zeros((n_acceptors, n_cells, max_donors), dtype=float)
-    for i, acceptor_counts in enumerate(all_counts):
+    for i, acceptor_counts in enumerate(filtered_counts):
         n_don = acceptor_counts.shape[1]
         counts_3d[i, :, :n_don] = acceptor_counts
 
-    feature_meta = pd.DataFrame(feature_rows)
+    feature_meta = pd.DataFrame(filtered_rows)
 
     return counts_3d, feature_meta, cell_names
 
@@ -469,7 +561,8 @@ def process_exon_skipping(sj_counts: pd.DataFrame,
                          sj_meta: pd.DataFrame,
                          min_total_exon: int = 2,
                          method: str = 'min',
-                         fallback_genomic: bool = True) -> Tuple[np.ndarray, np.ndarray, pd.DataFrame, List[str]]:
+                         fallback_genomic: bool = True,
+                         return_unfiltered: bool = True) -> Tuple:
     """
     Compute exon skipping (cassette exon) inclusion counts.
 
@@ -492,20 +585,32 @@ def process_exon_skipping(sj_counts: pd.DataFrame,
         'min' (default) or 'mean' for computing inclusion from inc1 and inc2
     fallback_genomic : bool
         If True, use genomic coordinates when strand-aware search finds no events
+    return_unfiltered : bool
+        If True (default), also return unfiltered data before variance filtering.
+        This allows recovery of filtered events when changing aggregation method.
 
     Returns
     -------
     inc1_counts : np.ndarray
-        Shape: (n_events, n_cells) - Counts for first inclusion junction (d1->a2)
+        Shape: (n_events_filtered, n_cells) - Filtered counts for first inclusion junction (d1->a2)
     inc2_counts : np.ndarray
-        Shape: (n_events, n_cells) - Counts for second inclusion junction (d2->a3)
+        Shape: (n_events_filtered, n_cells) - Filtered counts for second inclusion junction (d2->a3)
     skip_counts : np.ndarray
-        Shape: (n_events, n_cells) - Counts for skipping junction (d1->a3)
+        Shape: (n_events_filtered, n_cells) - Filtered counts for skipping junction (d1->a3)
     feature_meta : pd.DataFrame
-        Event metadata with columns: trip_id, chrom, strand, d1, a2, d2, a3, sj_inc1, sj_inc2, sj_skip
+        Filtered event metadata with columns: trip_id, chrom, strand, d1, a2, d2, a3, sj_inc1, sj_inc2, sj_skip
     cell_names : list
         Cell identifiers
+    inc1_unfiltered : np.ndarray or None
+        If return_unfiltered=True: Shape (n_events_total, n_cells) - ALL events before variance filtering
+    inc2_unfiltered : np.ndarray or None
+        If return_unfiltered=True: Shape (n_events_total, n_cells) - ALL events before variance filtering
+    skip_unfiltered : np.ndarray or None
+        If return_unfiltered=True: Shape (n_events_total, n_cells) - ALL events before variance filtering
+    feature_meta_unfiltered : pd.DataFrame or None
+        If return_unfiltered=True: ALL event metadata before variance filtering
     """
+    print(f"[INFO] Processing exon skipping (cassette exons) with method='{method}'...")
     # Find cassette triplets
     trips = _find_cassette_triplets_strand(sj_counts, sj_meta)
 
@@ -516,12 +621,15 @@ def process_exon_skipping(sj_counts: pd.DataFrame,
     if len(trips) == 0:
         # Return empty arrays
         cell_names = sj_counts.columns.tolist()
-        return (np.zeros((0, len(cell_names))),
-                np.zeros((0, len(cell_names))),
-                np.zeros((0, len(cell_names))),
-                pd.DataFrame(columns=['trip_id', 'chrom', 'strand', 'd1', 'a2', 'd2', 'a3',
-                                     'sj_inc1', 'sj_inc2', 'sj_skip']),
-                cell_names)
+        empty_meta = pd.DataFrame(columns=['trip_id', 'chrom', 'strand', 'd1', 'a2', 'd2', 'a3',
+                                           'sj_inc1', 'sj_inc2', 'sj_skip'])
+        if return_unfiltered:
+            return (np.zeros((0, len(cell_names))), np.zeros((0, len(cell_names))),
+                    np.zeros((0, len(cell_names))), empty_meta, cell_names,
+                    None, None, None, None)
+        else:
+            return (np.zeros((0, len(cell_names))), np.zeros((0, len(cell_names))),
+                    np.zeros((0, len(cell_names))), empty_meta, cell_names)
 
     cell_names = sj_counts.columns.tolist()
     n_cells = len(cell_names)
@@ -570,7 +678,70 @@ def process_exon_skipping(sj_counts: pd.DataFrame,
         inc2_counts[i, :] = inc2
         skip_counts[i, :] = skip
 
-    return inc1_counts, inc2_counts, skip_counts, trips, cell_names
+    # Store unfiltered data before variance filtering
+    inc1_unfiltered = inc1_counts.copy() if return_unfiltered else None
+    inc2_unfiltered = inc2_counts.copy() if return_unfiltered else None
+    skip_unfiltered = skip_counts.copy() if return_unfiltered else None
+    trips_unfiltered = trips.copy() if return_unfiltered else None
+
+    # Filter events with zero variance in inclusion/total ratio across cells
+    # Compute inclusion using specified method
+    if method == 'min':
+        inc_for_filter = np.minimum(inc1_counts, inc2_counts)
+    elif method == 'mean':
+        inc_for_filter = (inc1_counts + inc2_counts) / 2.0
+
+    tot_for_filter = inc_for_filter + skip_counts
+
+    # Check ratio variance for each event
+    valid_events = []
+    n_zero_var = 0
+
+    for i in range(n_events):
+        numer = inc_for_filter[i, :]  # inclusion counts across cells
+        denom = tot_for_filter[i, :]   # total counts across cells
+
+        # Compute ratios, excluding cells where denominator is 0
+        valid_mask = denom > 0
+        if valid_mask.sum() == 0:
+            # All denominators are zero - can't compute ratio
+            n_zero_var += 1
+            continue
+
+        ratios = numer[valid_mask] / denom[valid_mask]
+        if ratios.std() == 0:
+            n_zero_var += 1
+            continue
+
+        valid_events.append(i)
+
+    if n_zero_var > 0:
+        print(f"[INFO] Filtered {n_zero_var} exon skipping event(s) with zero variance in inclusion ratio")
+
+    if len(valid_events) == 0:
+        warnings.warn("No exon skipping events with variable inclusion ratios found after filtering!")
+        empty_meta = pd.DataFrame(columns=['trip_id', 'chrom', 'strand', 'd1', 'a2', 'd2', 'a3',
+                                           'sj_inc1', 'sj_inc2', 'sj_skip'])
+        if return_unfiltered:
+            return (np.zeros((0, n_cells)), np.zeros((0, n_cells)), np.zeros((0, n_cells)),
+                    empty_meta, cell_names,
+                    inc1_unfiltered, inc2_unfiltered, skip_unfiltered, trips_unfiltered)
+        else:
+            return (np.zeros((0, n_cells)), np.zeros((0, n_cells)), np.zeros((0, n_cells)),
+                    empty_meta, cell_names)
+
+    # Subset to valid events
+    inc1_counts_filt = inc1_counts[valid_events, :]
+    inc2_counts_filt = inc2_counts[valid_events, :]
+    skip_counts_filt = skip_counts[valid_events, :]
+    trips_filt = trips.iloc[valid_events].reset_index(drop=True)
+    trips_filt['trip_id'] = range(len(trips_filt))
+
+    if return_unfiltered:
+        return (inc1_counts_filt, inc2_counts_filt, skip_counts_filt, trips_filt, cell_names,
+                inc1_unfiltered, inc2_unfiltered, skip_unfiltered, trips_unfiltered)
+    else:
+        return inc1_counts_filt, inc2_counts_filt, skip_counts_filt, trips_filt, cell_names
 
 
 def process_sj_counts(sj_counts: pd.DataFrame,
@@ -605,6 +776,7 @@ def process_sj_counts(sj_counts: pd.DataFrame,
     sj_meta_filtered : pd.DataFrame
         Filtered SJ metadata
     """
+    print("[INFO] Processing raw splice junction counts...")
     # Find overlapping cells between sj_counts and gene_counts
     common_cells = [c for c in sj_counts.columns if c in gene_counts.columns]
 
@@ -714,8 +886,70 @@ def process_sj_counts(sj_counts: pd.DataFrame,
         columns=sj_filtered.columns
     )
 
+    # Check that numerator <= denominator for all SJs
+    # If not, clip numerator to min(numerator, denominator) and warn
+    violations = (sj_filtered.values > gene_denom.values)
+    n_violations_total = violations.sum()
+
+    if n_violations_total > 0:
+        # Count how many SJs have at least one violation
+        n_sjs_with_violations = (violations.sum(axis=1) > 0).sum()
+        warnings.warn(
+            f"Found {n_violations_total} cell(s) where SJ counts > gene counts across {n_sjs_with_violations} junction(s). "
+            f"This is biologically implausible (splice junction reads cannot exceed total gene expression). "
+            f"Clipping SJ counts to min(SJ, gene) for affected cells.",
+            UserWarning
+        )
+        # Apply clipping
+        sj_filtered = pd.DataFrame(
+            np.minimum(sj_filtered.values, gene_denom.values),
+            index=sj_filtered.index,
+            columns=sj_filtered.columns
+        )
+
+    # Filter SJs with zero variance in SJ/gene ratio across cells
+    valid_sjs_final = []
+    sj_denom_final = []
+    idx_final = []
+    n_zero_var = 0
+
+    for i, sj in enumerate(valid_sjs):
+        numer = sj_filtered.loc[sj].values  # SJ counts across cells
+        denom = gene_denom.loc[sj].values   # Gene counts across cells
+
+        # Compute ratios, excluding cells where denominator is 0
+        valid_mask = denom > 0
+        if valid_mask.sum() == 0:
+            # All denominators are zero - can't compute ratio
+            n_zero_var += 1
+            continue
+
+        ratios = numer[valid_mask] / denom[valid_mask]
+        if ratios.std() == 0:
+            n_zero_var += 1
+            continue
+
+        valid_sjs_final.append(sj)
+        sj_denom_final.append(gene_denom.loc[sj].values)
+        idx_final.append(sj)
+
+    if n_zero_var > 0:
+        print(f"[INFO] Filtered {n_zero_var} splice junction(s) with zero variance in SJ/gene ratio")
+
+    if len(valid_sjs_final) == 0:
+        raise ValueError("No splice junctions left after filtering zero-variance SJ/gene ratios!")
+
+    # Update to final filtered SJs
+    sj_filtered = sj_filtered.loc[valid_sjs_final].copy()
+    gene_denom = pd.DataFrame(
+        data=np.array(sj_denom_final),
+        index=valid_sjs_final,
+        columns=sj_filtered.columns
+    )
+    idx = idx[idx['coord.intron'].isin(valid_sjs_final)].copy()
+
     # Print summary of dropped SJs
-    n_kept = len(valid_sjs)
+    n_kept = len(valid_sjs_final)
     n_total_dropped = n_total - n_kept
     if n_total_dropped > 0:
         reasons = []
@@ -725,6 +959,8 @@ def process_sj_counts(sj_counts: pd.DataFrame,
             reasons.append(f"{n_dropped_diff_gene} spanning different genes")
         if n_dropped_gene_not_in_counts > 0:
             reasons.append(f"{n_dropped_gene_not_in_counts} gene not in gene_counts")
+        if n_zero_var > 0:
+            reasons.append(f"{n_zero_var} zero variance in SJ/gene ratio")
 
         print(f"[INFO] Kept {n_kept}/{n_total} splice junctions. Dropped {n_total_dropped} SJs: {', '.join(reasons)}")
 
@@ -790,7 +1026,8 @@ def create_splicing_modality(sj_counts: pd.DataFrame,
             counts=counts_3d,
             feature_meta=feature_meta,
             distribution='multinomial',
-            cells_axis=1
+            cells_axis=1,
+            cell_names=cell_names
         )
 
     elif splicing_type == 'acceptor':
@@ -802,16 +1039,25 @@ def create_splicing_modality(sj_counts: pd.DataFrame,
             counts=counts_3d,
             feature_meta=feature_meta,
             distribution='multinomial',
-            cells_axis=1
+            cells_axis=1,
+            cell_names=cell_names
         )
 
     elif splicing_type == 'exon_skip':
         method = kwargs.get('method', 'min')
         fallback_genomic = kwargs.get('fallback_genomic', True)
 
-        inc1_counts, inc2_counts, skip_counts, feature_meta, cell_names = process_exon_skipping(
-            sj_counts, sj_meta, min_total_exon, method, fallback_genomic
+        result = process_exon_skipping(
+            sj_counts, sj_meta, min_total_exon, method, fallback_genomic, return_unfiltered=True
         )
+
+        # Unpack result (with or without unfiltered data)
+        if len(result) == 9:
+            inc1_counts, inc2_counts, skip_counts, feature_meta, cell_names, \
+                inc1_unfilt, inc2_unfilt, skip_unfilt, meta_unfilt = result
+        else:
+            inc1_counts, inc2_counts, skip_counts, feature_meta, cell_names = result
+            inc1_unfilt, inc2_unfilt, skip_unfilt, meta_unfilt = None, None, None, None
 
         # Compute inclusion and total using specified method
         if method == 'min':
@@ -820,18 +1066,29 @@ def create_splicing_modality(sj_counts: pd.DataFrame,
             inc_counts = (inc1_counts + inc2_counts) / 2.0
         tot_counts = inc_counts + skip_counts
 
-        return Modality(
+        # Create modality
+        modality = Modality(
             name='splicing_exon_skip',
             counts=inc_counts,
             feature_meta=feature_meta,
             distribution='binomial',
             denominator=tot_counts,
             cells_axis=1,
+            cell_names=cell_names,
             inc1=inc1_counts,
             inc2=inc2_counts,
             skip=skip_counts,
             exon_aggregate_method=method
         )
+
+        # Store unfiltered data for potential recovery when switching methods
+        if inc1_unfilt is not None:
+            modality._unfiltered_inc1 = inc1_unfilt
+            modality._unfiltered_inc2 = inc2_unfilt
+            modality._unfiltered_skip = skip_unfilt
+            modality._unfiltered_feature_meta = meta_unfilt
+
+        return modality
 
     else:
         raise ValueError(f"splicing_type must be 'sj', 'donor', 'acceptor', or 'exon_skip', got: {splicing_type}")

@@ -43,7 +43,8 @@ The main class in `bayesDREAM/model.py` implements the three-step modeling pipel
 
 **Key Methods:**
 
-- `fit_technical(covariates, sum_factor_col, ...)`: Fits NTC-only model to estimate `alpha_y_prefit`
+- `set_technical_groups(covariates)`: Sets technical_group_code based on covariates (must be called before fit_technical)
+- `fit_technical(sum_factor_col, modality_name, ...)`: Fits NTC-only model to estimate `alpha_y_prefit`
 - `set_alpha_x(alpha_x, is_posterior, covariates)`: Sets cis gene overdispersion parameters
 - `set_alpha_y(alpha_y, is_posterior, covariates)`: Sets trans gene overdispersion parameters
 - `adjust_ntc_sum_factor(covariates, ...)`: Adjusts NTC sum factors for covariates
@@ -51,7 +52,7 @@ The main class in `bayesDREAM/model.py` implements the three-step modeling pipel
 - `set_x_true(x_true, is_posterior)`: Sets true cis expression for trans modeling
 - `permute_genes(genes2permute, ...)`: Permutes guide-gene associations for null testing
 - `refit_sumfactor(covariates, ...)`: Re-estimates sum factors based on posterior cis expression
-- `fit_trans(sum_factor_col, function_type, ...)`: Fits trans effects using `_model_y`
+- `fit_trans(sum_factor_col, function_type, modality_name, ...)`: Fits trans effects using `_model_y`
 
 **Function Types for Trans Modeling:**
 
@@ -311,8 +312,11 @@ model.add_splicing_modality(
 # Inspect modalities
 print(model.list_modalities())
 
+# Set technical groups first (required before fit_technical)
+model.set_technical_groups(['cell_line'])
+
 # Run standard pipeline (operates on primary 'gene' modality)
-model.fit_technical(covariates=['cell_line'])
+model.fit_technical()
 model.fit_cis(sum_factor_col='sum_factor')
 model.fit_trans(sum_factor_col='sum_factor_adj', function_type='additive_hill')
 

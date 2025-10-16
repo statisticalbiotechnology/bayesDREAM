@@ -37,8 +37,11 @@ def example_gene_only():
 
     print(model.list_modalities())
 
+    # Set technical groups first (required before fit_technical)
+    model.set_technical_groups(['cell_line'])
+
     # Run pipeline as usual
-    model.fit_technical(covariates=['cell_line'])
+    model.fit_technical()
     model.fit_cis(sum_factor_col='sum_factor')
     model.fit_trans(sum_factor_col='sum_factor_adj', function_type='additive_hill')
 
@@ -91,8 +94,11 @@ def example_with_transcripts():
     print(f"Transcript modality: {transcript_mod}")
     print(f"Feature metadata:\n{transcript_mod.feature_meta.head()}")
 
+    # Set technical groups first (required before fit_technical)
+    model.set_technical_groups(['cell_line'])
+
     # Run pipeline on primary (gene) modality
-    model.fit_technical(covariates=['cell_line'])
+    model.fit_technical()
     model.fit_cis(sum_factor_col='sum_factor')
     model.fit_trans(sum_factor_col='sum_factor_adj', function_type='additive_hill')
 
@@ -153,8 +159,11 @@ def example_with_splicing():
     print(f"Distribution: {exon_skip_mod.distribution}")  # 'binomial'
     print(f"Has denominator: {exon_skip_mod.denominator is not None}")
 
+    # Set technical groups first (required before fit_technical)
+    model.set_technical_groups(['cell_line'])
+
     # Run pipeline
-    model.fit_technical(covariates=['cell_line'])
+    model.fit_technical()
     model.fit_cis(sum_factor_col='sum_factor')
     model.fit_trans(sum_factor_col='sum_factor_adj', function_type='additive_hill')
 
@@ -227,8 +236,11 @@ def example_custom_modalities():
     print(f"\nSpliZVD modality: {splizvd_mod}")
     print(f"Dimensions per feature: {splizvd_mod.dims['n_dimensions']}")
 
+    # Set technical groups first (required before fit_technical)
+    model.set_technical_groups(['cell_line'])
+
     # Run pipeline
-    model.fit_technical(covariates=['cell_line'])
+    model.fit_technical()
     model.fit_cis(sum_factor_col='sum_factor')
     model.fit_trans(sum_factor_col='sum_factor_adj', function_type='additive_hill')
 
@@ -287,8 +299,11 @@ def example_preconstruced_modalities():
 
     print(model.list_modalities())
 
+    # Set technical groups first (required before fit_technical)
+    model.set_technical_groups(['cell_line'])
+
     # Run pipeline
-    model.fit_technical(covariates=['cell_line'])
+    model.fit_technical()
     model.fit_cis(sum_factor_col='sum_factor')
     model.fit_trans(sum_factor_col='sum_factor_adj', function_type='additive_hill')
 

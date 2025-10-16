@@ -93,6 +93,15 @@ class MultiModalBayesDREAM(bayesDREAM):
             if 'gene' in self.modalities:
                 warnings.warn("Both counts and modalities['gene'] provided. Using counts.")
 
+            # Check if cis gene has zero variance (critical for cis modeling)
+            if cis_gene is not None and cis_gene in counts.index:
+                cis_gene_std = counts.loc[cis_gene].std()
+                if cis_gene_std == 0:
+                    raise ValueError(
+                        f"Cis gene '{cis_gene}' has zero standard deviation across all cells. "
+                        f"Cannot model cis effects for a gene with constant expression."
+                    )
+
             # Exclude cis gene from gene count modality features
             # (The base class still gets the full counts with cis gene for cis modeling)
             if cis_gene is not None and cis_gene in counts.index:
@@ -100,6 +109,19 @@ class MultiModalBayesDREAM(bayesDREAM):
                 counts_trans = counts.drop(index=cis_gene)
             else:
                 counts_trans = counts
+
+            # Filter genes with zero standard deviation across ALL cells
+            # (genes that are constant across all cells can't be modeled)
+            gene_stds = counts_trans.std(axis=1)
+            zero_std_mask = gene_stds == 0
+            num_zero_std = zero_std_mask.sum()
+
+            if num_zero_std > 0:
+                print(f"[INFO] Filtering {num_zero_std} gene(s) with zero standard deviation across all cells")
+                counts_trans = counts_trans.loc[~zero_std_mask]
+
+            if len(counts_trans) == 0:
+                raise ValueError("No genes left after filtering genes with zero standard deviation!")
 
             # Create gene modality (trans genes only, without cis gene)
             gene_feature_meta = pd.DataFrame({
@@ -316,14 +338,28 @@ class MultiModalBayesDREAM(bayesDREAM):
                 # Ensure counts are in same order as metadata
                 transcript_counts_ordered = transcript_counts_subset.loc[valid_tx]
 
-                modality = Modality(
-                    name=counts_name,
-                    counts=transcript_counts_ordered,
-                    feature_meta=tx_meta_subset.reset_index(drop=True),
-                    distribution='negbinom',
-                    cells_axis=1
-                )
-                self.add_modality(counts_name, modality)
+                # Filter transcripts with zero standard deviation across ALL cells
+                # (transcripts that are constant across all cells can't be modeled)
+                tx_stds = transcript_counts_ordered.std(axis=1)
+                zero_std_mask = tx_stds == 0
+                num_zero_std = zero_std_mask.sum()
+
+                if num_zero_std > 0:
+                    print(f"[INFO] Filtering {num_zero_std} transcript(s) with zero standard deviation across all cells")
+                    transcript_counts_ordered = transcript_counts_ordered.loc[~zero_std_mask]
+                    tx_meta_subset = tx_meta_subset[tx_meta_subset['transcript_id'].isin(transcript_counts_ordered.index)].copy()
+
+                if len(transcript_counts_ordered) == 0:
+                    warnings.warn(f"No transcripts left after filtering zero-variance transcripts. Skipping '{counts_name}' modality.")
+                else:
+                    modality = Modality(
+                        name=counts_name,
+                        counts=transcript_counts_ordered,
+                        feature_meta=tx_meta_subset.reset_index(drop=True),
+                        distribution='negbinom',
+                        cells_axis=1
+                    )
+                    self.add_modality(counts_name, modality)
 
         # Add usage modality
         if 'usage' in modality_types:
@@ -472,7 +508,7 @@ class MultiModalBayesDREAM(bayesDREAM):
         denominator: Optional[np.ndarray] = None
     ):
         """
-        Add a custom user-defined modality.
+        Add a custom user-defined modality with distribution-specific filtering.
 
         Parameters
         ----------
@@ -487,13 +523,141 @@ class MultiModalBayesDREAM(bayesDREAM):
         denominator : array, optional
             For binomial: denominator counts
         """
+        # Convert counts to ndarray for consistent filtering
+        if isinstance(counts, pd.DataFrame):
+            counts_array = counts.values
+            is_dataframe = True
+            counts_index = counts.index
+        else:
+            counts_array = np.asarray(counts)
+            is_dataframe = False
+            counts_index = None
+
+        # Apply distribution-specific filtering
+        valid_features = None
+
+        if distribution in ['negbinom', 'normal']:
+            # Filter features with zero standard deviation
+            if counts_array.ndim == 2:
+                feature_stds = counts_array.std(axis=1)
+                valid_features = feature_stds != 0
+                num_filtered = (~valid_features).sum()
+                if num_filtered > 0:
+                    print(f"[INFO] Filtering {num_filtered} feature(s) with zero std in '{name}' modality ({distribution})")
+
+        elif distribution == 'binomial':
+            # Filter features with zero variance in numerator/denominator ratio
+            if denominator is None:
+                raise ValueError(f"denominator required for binomial distribution in '{name}' modality")
+
+            if isinstance(denominator, pd.DataFrame):
+                denom_array = denominator.values
+            else:
+                denom_array = np.asarray(denominator)
+
+            if counts_array.shape != denom_array.shape:
+                raise ValueError(f"counts and denominator must have same shape for binomial in '{name}' modality")
+
+            if counts_array.ndim == 2:
+                n_features = counts_array.shape[0]
+                valid_features = np.ones(n_features, dtype=bool)
+
+                for i in range(n_features):
+                    numer = counts_array[i, :]
+                    denom = denom_array[i, :]
+
+                    # Compute ratios, excluding cells where denominator is 0
+                    valid_mask = denom > 0
+                    if valid_mask.sum() == 0:
+                        valid_features[i] = False
+                        continue
+
+                    ratios = numer[valid_mask] / denom[valid_mask]
+                    if ratios.std() == 0:
+                        valid_features[i] = False
+
+                num_filtered = (~valid_features).sum()
+                if num_filtered > 0:
+                    print(f"[INFO] Filtering {num_filtered} feature(s) with zero ratio variance in '{name}' modality (binomial)")
+
+        elif distribution == 'multinomial':
+            # Filter features where ALL category ratios have zero variance
+            if counts_array.ndim != 3:
+                raise ValueError(f"multinomial requires 3D counts (features, cells, categories) in '{name}' modality")
+
+            n_features = counts_array.shape[0]
+            valid_features = np.ones(n_features, dtype=bool)
+
+            for i in range(n_features):
+                feature_counts = counts_array[i, :, :]  # (cells, categories)
+                totals = feature_counts.sum(axis=1, keepdims=True)  # (cells, 1)
+
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    ratios = np.where(totals > 0, feature_counts / totals, 0)  # (cells, categories)
+
+                # Check if ALL ratios have zero std across cells
+                ratio_stds = ratios.std(axis=0)  # std for each category across cells
+                if np.all(ratio_stds == 0):
+                    valid_features[i] = False
+
+            num_filtered = (~valid_features).sum()
+            if num_filtered > 0:
+                print(f"[INFO] Filtering {num_filtered} feature(s) with zero variance in ALL category ratios in '{name}' modality (multinomial)")
+
+        elif distribution == 'mvnormal':
+            # Filter features where ALL dimensions have zero variance
+            if counts_array.ndim != 3:
+                raise ValueError(f"mvnormal requires 3D counts (features, cells, dimensions) in '{name}' modality")
+
+            n_features = counts_array.shape[0]
+            valid_features = np.ones(n_features, dtype=bool)
+
+            for i in range(n_features):
+                feature_data = counts_array[i, :, :]  # (cells, dimensions)
+                dim_stds = feature_data.std(axis=0)  # std for each dimension
+                if np.all(dim_stds == 0):
+                    valid_features[i] = False
+
+            num_filtered = (~valid_features).sum()
+            if num_filtered > 0:
+                print(f"[INFO] Filtering {num_filtered} feature(s) with zero variance in ALL dimensions in '{name}' modality (mvnormal)")
+
+        # Apply filtering if necessary
+        if valid_features is not None:
+            if not np.any(valid_features):
+                raise ValueError(f"No features left after filtering zero-variance features in '{name}' modality!")
+
+            if not np.all(valid_features):
+                # Apply mask
+                counts_array = counts_array[valid_features]
+                feature_meta = feature_meta.iloc[valid_features].copy()
+                if denominator is not None:
+                    if isinstance(denominator, pd.DataFrame):
+                        denominator = denominator.iloc[valid_features]
+                    else:
+                        denominator = denom_array[valid_features]
+
+        # Convert back to DataFrame if original was DataFrame
+        if is_dataframe:
+            if counts_array.ndim == 2:
+                counts_final = pd.DataFrame(
+                    counts_array,
+                    index=feature_meta.index,
+                    columns=counts_index if counts_index is not None else range(counts_array.shape[1])
+                )
+            else:
+                # For 3D data, keep as ndarray
+                counts_final = counts_array
+        else:
+            counts_final = counts_array
+
         modality = Modality(
             name=name,
-            counts=counts,
+            counts=counts_final,
             feature_meta=feature_meta,
             distribution=distribution,
             denominator=denominator,
-            cells_axis=1 if isinstance(counts, pd.DataFrame) else 1
+            cells_axis=1
         )
         self.add_modality(name, modality)
 

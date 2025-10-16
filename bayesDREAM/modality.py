@@ -43,6 +43,7 @@ class Modality:
         distribution: Literal['negbinom', 'multinomial', 'binomial', 'normal', 'mvnormal'],
         denominator: Optional[np.ndarray] = None,
         cells_axis: int = 1,  # 0 if cells are rows, 1 if cells are columns
+        cell_names: Optional[list] = None,  # Explicit cell names (when counts is ndarray)
         # Exon skipping specific parameters
         inc1: Optional[np.ndarray] = None,
         inc2: Optional[np.ndarray] = None,
@@ -66,6 +67,8 @@ class Modality:
             For binomial: denominator counts (e.g., total gene expression for SJ usage)
         cells_axis : int
             Which axis represents cells (0 or 1 for 2D data)
+        cell_names : list, optional
+            Explicit cell names/identifiers (used when counts is ndarray, not DataFrame)
         inc1 : np.ndarray, optional
             For exon skipping: inclusion counts from first junction (d1->a2)
         inc2 : np.ndarray, optional
@@ -97,7 +100,8 @@ class Modality:
             self.counts = np.asarray(counts)
             self.count_df = None
             self.feature_names = None
-            self.cell_names = None
+            # Use provided cell_names if available, otherwise None
+            self.cell_names = cell_names if cell_names is not None else None
 
         self.feature_meta = feature_meta.copy()
         self.denominator = np.asarray(denominator) if denominator is not None else None
@@ -108,6 +112,20 @@ class Modality:
         self.skip = np.asarray(skip) if skip is not None else None
         self.exon_aggregate_method = exon_aggregate_method
         self._technical_fit_aggregate_method = None  # Track method used during technical fit
+
+        # Store unfiltered versions for recovery when switching methods
+        # (Only used for exon skipping modalities)
+        self._unfiltered_inc1 = None
+        self._unfiltered_inc2 = None
+        self._unfiltered_skip = None
+        self._unfiltered_feature_meta = None
+
+        # Per-modality fitting results storage
+        self.alpha_y_prefit = None          # Technical fit: overdispersion parameters
+        self.sigma_y_prefit = None          # Technical fit: variance (normal distribution)
+        self.cov_y_prefit = None            # Technical fit: covariance (mvnormal distribution)
+        self.posterior_samples_technical = None  # Technical fit: full posterior samples
+        self.posterior_samples_trans = None      # Trans fit: full posterior samples
 
         # Validate shapes
         self._validate()
@@ -280,6 +298,9 @@ class Modality:
             new_inc2 = None
             new_skip = None
 
+        # Subset cell_names if available
+        new_cell_names = [self.cell_names[i] for i in cell_indices] if self.cell_names is not None else None
+
         return Modality(
             name=self.name,
             counts=new_counts,
@@ -287,18 +308,21 @@ class Modality:
             distribution=self.distribution,
             denominator=new_denom,
             cells_axis=self.cells_axis,
+            cell_names=new_cell_names,
             inc1=new_inc1,
             inc2=new_inc2,
             skip=new_skip,
             exon_aggregate_method=self.exon_aggregate_method
         )
 
-    def set_exon_aggregate_method(self, method: str, allow_after_technical_fit: bool = False):
+    def set_exon_aggregate_method(self, method: str, allow_after_technical_fit: bool = False, recover_filtered: bool = True):
         """
         Change the exon skipping aggregation method and recompute inclusion counts.
 
         This recomputes self.counts (inclusion) and self.denominator (total) based on
-        the new aggregation method.
+        the new aggregation method. If unfiltered data was stored during modality creation,
+        this will reprocess from that data and potentially recover features that were
+        filtered with the old method but pass filtering with the new method.
 
         Parameters
         ----------
@@ -308,6 +332,10 @@ class Modality:
             If True, allow changing method even after technical fit. Default: False.
             WARNING: Changing aggregation after technical fit invalidates the prefit
             overdispersion parameters.
+        recover_filtered : bool
+            If True (default), reprocess from unfiltered data to potentially recover
+            features that were filtered with old method. If False or if unfiltered
+            data is not available, just recompute from current data.
 
         Raises
         ------
@@ -330,21 +358,101 @@ class Modality:
                     f"Set allow_after_technical_fit=True to override (not recommended)."
                 )
 
-        # Recompute inclusion
-        if method == 'min':
-            inclusion = np.minimum(self.inc1, self.inc2)
-        elif method == 'mean':
-            inclusion = (self.inc1 + self.inc2) / 2.0
+        # Check if we can recover from unfiltered data
+        can_recover = (recover_filtered and
+                      self._unfiltered_inc1 is not None and
+                      self._unfiltered_inc2 is not None and
+                      self._unfiltered_skip is not None and
+                      self._unfiltered_feature_meta is not None)
 
-        # Recompute total
-        total = inclusion + self.skip
+        if can_recover:
+            # Reprocess from unfiltered data with new method
+            print(f"[INFO] Reprocessing from unfiltered data with method='{method}'...")
 
-        # Update
-        self.counts = inclusion
-        self.denominator = total
-        self.exon_aggregate_method = method
+            # Apply binomial ratio filtering with new method
+            inc1_unfilt = self._unfiltered_inc1
+            inc2_unfilt = self._unfiltered_inc2
+            skip_unfilt = self._unfiltered_skip
+            meta_unfilt = self._unfiltered_feature_meta
 
-        print(f"[INFO] Recomputed exon skipping inclusion with method='{method}'")
+            n_events = inc1_unfilt.shape[0]
+
+            # Compute inclusion using new method
+            if method == 'min':
+                inc_for_filter = np.minimum(inc1_unfilt, inc2_unfilt)
+            elif method == 'mean':
+                inc_for_filter = (inc1_unfilt + inc2_unfilt) / 2.0
+
+            tot_for_filter = inc_for_filter + skip_unfilt
+
+            # Check ratio variance for each event
+            valid_events = []
+            n_zero_var = 0
+
+            for i in range(n_events):
+                numer = inc_for_filter[i, :]  # inclusion counts across cells
+                denom = tot_for_filter[i, :]   # total counts across cells
+
+                # Compute ratios, excluding cells where denominator is 0
+                valid_mask = denom > 0
+                if valid_mask.sum() == 0:
+                    n_zero_var += 1
+                    continue
+
+                ratios = numer[valid_mask] / denom[valid_mask]
+                if ratios.std() == 0:
+                    n_zero_var += 1
+                    continue
+
+                valid_events.append(i)
+
+            if n_zero_var > 0:
+                print(f"[INFO] Filtered {n_zero_var} exon skipping event(s) with zero variance in inclusion ratio (method='{method}')")
+
+            if len(valid_events) == 0:
+                raise ValueError(f"No exon skipping events with variable inclusion ratios after refiltering with method='{method}'!")
+
+            # Update to valid events
+            self.inc1 = inc1_unfilt[valid_events, :]
+            self.inc2 = inc2_unfilt[valid_events, :]
+            self.skip = skip_unfilt[valid_events, :]
+            self.feature_meta = meta_unfilt.iloc[valid_events].reset_index(drop=True)
+
+            # Recompute inclusion and total
+            if method == 'min':
+                self.counts = np.minimum(self.inc1, self.inc2)
+            elif method == 'mean':
+                self.counts = (self.inc1 + self.inc2) / 2.0
+
+            self.denominator = self.counts + self.skip
+            self.exon_aggregate_method = method
+
+            # Report recovery stats
+            n_before = inc1_unfilt.shape[0]
+            n_after = len(valid_events)
+            n_recovered = n_after - (n_before - n_zero_var)  # Difference from current filtered set
+            print(f"[INFO] Recomputed with method='{method}': {n_after}/{n_before} events retained")
+
+        else:
+            # Just recompute from current filtered data (no recovery)
+            if recover_filtered and self._unfiltered_inc1 is None:
+                print(f"[INFO] Unfiltered data not available - recomputing from current filtered data")
+
+            # Recompute inclusion
+            if method == 'min':
+                inclusion = np.minimum(self.inc1, self.inc2)
+            elif method == 'mean':
+                inclusion = (self.inc1 + self.inc2) / 2.0
+
+            # Recompute total
+            total = inclusion + self.skip
+
+            # Update
+            self.counts = inclusion
+            self.denominator = total
+            self.exon_aggregate_method = method
+
+            print(f"[INFO] Recomputed exon skipping inclusion with method='{method}' (no feature recovery)")
 
     def is_exon_skipping(self) -> bool:
         """Check if this is an exon skipping modality with inc1/inc2/skip data."""

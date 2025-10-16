@@ -712,11 +712,19 @@ class bayesDREAM:
         phi_y_used = phi_y.unsqueeze(-2)
     
         # Sample mu_ntc (baseline expression for each feature)
+        # Use Normal prior for distributions with potentially negative values
         with pyro.plate("feature_plate_technical", T, dim=-1):
-            mu_ntc = pyro.sample(
-                "mu_ntc",
-                dist.Gamma((mu_x_mean_tensor**2) / (mu_x_sd_tensor**2), mu_x_mean_tensor / (mu_x_sd_tensor**2))
-            )  # [T]
+            if distribution in ['normal', 'mvnormal']:
+                mu_ntc = pyro.sample(
+                    "mu_ntc",
+                    dist.Normal(mu_x_mean_tensor, mu_x_sd_tensor)
+                )  # [T]
+            else:
+                # Use Gamma prior for count-based distributions
+                mu_ntc = pyro.sample(
+                    "mu_ntc",
+                    dist.Gamma((mu_x_mean_tensor**2) / (mu_x_sd_tensor**2), mu_x_mean_tensor / (mu_x_sd_tensor**2))
+                )  # [T]
 
         # Compute mu_y from mu_ntc and alpha_y
         mu_y = alpha_y_used * mu_ntc  # [N, T]
@@ -763,9 +771,29 @@ class bayesDREAM:
                 C=C
             )
         elif distribution == 'multinomial':
+            # For multinomial, need to sample category probabilities for each feature
+            # y_obs_ntc_tensor is [N, T, K]
+            # Sample baseline category probabilities for each feature
+            # Use Dirichlet distribution to sample probability vectors
+            with pyro.plate("feature_plate_technical", T, dim=-1):
+                # Compute empirical category proportions as concentration parameters
+                # Sum over observations to get total counts per feature per category
+                total_counts_per_feature = y_obs_ntc_tensor.sum(dim=0)  # [T, K]
+                # Add pseudocount to avoid zeros
+                concentration = total_counts_per_feature + 1.0  # [T, K]
+
+                # Sample category probabilities
+                probs_baseline = pyro.sample(
+                    "probs_baseline",
+                    dist.Dirichlet(concentration)
+                )  # [T, K]
+
+            # Expand to [N, T, K] by broadcasting
+            mu_y_multi = probs_baseline.unsqueeze(0).expand(N, T, K)  # [N, T, K]
+
             observation_sampler(
                 y_obs_tensor=y_obs_ntc_tensor,
-                mu_y=mu_y,
+                mu_y=mu_y_multi,
                 N=N,
                 T=T,
                 K=K
@@ -773,10 +801,19 @@ class bayesDREAM:
         elif distribution == 'mvnormal':
             # For mvnormal, need covariance matrix
             # For now, use diagonal covariance from phi_y
-            cov_y = torch.diag_embed(1.0 / phi_y.unsqueeze(0).expand(T, D))  # [T, D, D]
+            # phi_y is [T], we need [T, D, D] covariance matrices
+            # Create diagonal covariance: each feature has same variance for all dimensions
+            variance_per_feature = 1.0 / phi_y  # [T]
+            # Expand to [T, D] then create diagonal matrices [T, D, D]
+            cov_y = torch.diag_embed(variance_per_feature.unsqueeze(-1).expand(T, D))  # [T, D, D]
+
+            # Also need to expand mu_y from [N, T] to [N, T, D]
+            # For technical fit, assume same mean across all dimensions
+            mu_y_mv = mu_y.unsqueeze(-1).expand(N, T, D)  # [N, T, D]
+
             observation_sampler(
                 y_obs_tensor=y_obs_ntc_tensor,
-                mu_y=mu_y,
+                mu_y=mu_y_mv,
                 cov_y=cov_y,
                 alpha_y_full=None,  # Already applied in mu_y
                 groups_tensor=None,
@@ -789,13 +826,41 @@ class bayesDREAM:
             raise ValueError(f"Unknown distribution: {distribution}")
 
 
+    def set_technical_groups(self, covariates: list[str]):
+        """
+        Set technical_group_code based on covariates.
+
+        This should be called before fit_technical() to define technical groups.
+        The technical_group_code will be used for:
+        - fit_technical(): modeling technical variation across groups
+        - fit_cis(): optional correction for group effects
+        - fit_trans(): optional correction for group effects
+
+        Parameters
+        ----------
+        covariates : list[str]
+            Column names in self.meta to group by (e.g., ['cell_line'])
+
+        Examples
+        --------
+        >>> model.set_technical_groups(['cell_line'])
+        >>> model.fit_technical(sum_factor_col='sum_factor')
+        """
+        if not covariates:
+            raise ValueError("covariates must not be empty")
+
+        missing_cols = [c for c in covariates if c not in self.meta.columns]
+        if missing_cols:
+            raise ValueError(f"Missing columns in meta: {missing_cols}")
+
+        self.meta["technical_group_code"] = self.meta.groupby(covariates).ngroup()
+        print(f"[INFO] Set technical_group_code with {self.meta['technical_group_code'].nunique()} groups based on {covariates}")
 
     ########################################################
-    # Step 1: Optional Prefit for alpha_y (NTC only) 
+    # Step 1: Optional Prefit for alpha_y (NTC only)
     ########################################################
     def fit_technical(
         self,
-        covariates: list[str], # ["cell_line"] NOT empty. The point is to fit to the covariates. Lane is typically not included as this tends to be corrected by sum factor adjustment alone
         sum_factor_col: str = 'sum_factor',
         lr: float = 1e-3,
         niters: int = 50000,
@@ -807,29 +872,79 @@ class bayesDREAM:
         alpha_alpha_mu: float = 5.8,
         epsilon: float = 1e-6,
         minibatch_size: int = None,
-        distribution: str = 'negbinom',
+        distribution: str = None,
         denominator: np.ndarray = None,
+        modality_name: str = None,
         **kwargs
     ):
         """
         Prefits gene-level "technical" variables (alpha_y) using only NTC samples,
-        grouped by arbitrary covariates (e.g. ["cell_line"]).
+        grouped by technical groups.
 
         If you skip this method, you'd provide alpha_y_fixed manually in the next step.
 
         Parameters
         ----------
-        distribution : str, default='negbinom'
+        modality_name : str, optional
+            Name of modality to fit. If None, uses primary modality (for MultiModalBayesDREAM)
+            or self.counts (for regular bayesDREAM). For backward compatibility.
+        distribution : str, optional
             Distribution type: 'negbinom', 'multinomial', 'binomial', 'normal', 'mvnormal'
+            If None, auto-detected from modality (for MultiModalBayesDREAM) or defaults to 'negbinom'
         sum_factor_col : str, optional
             Column name for size factors (required for negbinom, ignored otherwise)
         denominator : np.ndarray, optional
             Denominator array for binomial distribution (shape: [n_features, n_cells])
+            If None, auto-detected from modality (for MultiModalBayesDREAM)
 
         Notes
         -----
-        BREAKING: sum_factor_col now defaults to None (optional, only for negbinom)
+        For multi-modal models, each modality stores its own fitting results.
+        Primary modality results are also stored at model level for backward compatibility.
+
+        Examples
+        --------
+        >>> model.set_technical_groups(['cell_line'])
+        >>> model.fit_technical(sum_factor_col='sum_factor')
         """
+
+        # Determine if this is a multi-modal model
+        is_multimodal = hasattr(self, 'modalities')
+        modality = None
+
+        if is_multimodal:
+            # Determine which modality to use
+            if modality_name is None:
+                modality_name = self.primary_modality
+            modality = self.get_modality(modality_name)
+
+            # Auto-detect distribution from modality
+            if distribution is None:
+                distribution = modality.distribution
+
+            # Auto-detect denominator from modality (for binomial)
+            if denominator is None and modality.denominator is not None:
+                denominator = modality.denominator
+
+            # Get counts from modality
+            counts_to_fit = modality.counts
+
+            # Get cell names from modality
+            if modality.cell_names is not None:
+                modality_cells = modality.cell_names
+            else:
+                # Modality doesn't have cell names - assume same order as model.meta['cell']
+                # This is safe because add_modality() subsets to common cells in same order
+                modality_cells = self.meta['cell'].values[:counts_to_fit.shape[modality.cells_axis]]
+
+            print(f"[INFO] Fitting technical model for modality '{modality_name}' (distribution: {distribution})")
+        else:
+            # Regular bayesDREAM - use self.counts
+            counts_to_fit = self.counts.values
+            modality_cells = self.meta['cell'].values
+            if distribution is None:
+                distribution = 'negbinom'
+            print(f"[INFO] Fitting technical model (distribution: {distribution})")
 
         # Validate distribution-specific requirements
         from .distributions import requires_sum_factor, requires_denominator
@@ -840,69 +955,323 @@ class bayesDREAM:
         if requires_denominator(distribution) and denominator is None:
             raise ValueError(f"Distribution '{distribution}' requires denominator parameter")
         
-        # Check covariates exist
-        if not covariates:
+        # Check technical_group_code exists
+        if "technical_group_code" not in self.meta.columns:
             raise ValueError(
-                "The 'covariates' argument must not be empty. "
-                "Please provide at least one covariate column to group by."
+                "technical_group_code not set. Call set_technical_groups(covariates) before fit_technical().\n"
+                "Example: model.set_technical_groups(['cell_line'])"
             )
-        missing_cols = [c for c in covariates if c not in self.meta.columns]
-        if missing_cols:
-            raise ValueError(f"Missing these columns in meta: {missing_cols}")
 
         print("Running prefit_cellline...")
 
-        self.meta["technical_group_code"] = self.meta.groupby(covariates).ngroup()
+        # For modalities: subset model.meta to cells present in this modality
+        if is_multimodal:
+            # Create a mapping of cell -> index in modality cells
+            modality_cell_set = set(modality_cells)
 
-        # Subset data to NTC only
-        meta_ntc = self.meta[self.meta["target"] == "ntc"].copy()
-        counts_ntc = self.counts.loc[:, meta_ntc["cell"]].copy()
+            # Subset meta to cells in this modality (work with copy)
+            meta_subset = self.meta[self.meta['cell'].isin(modality_cell_set)].copy()
 
-        # Remove genes with zero counts in NTC
-        gene_sums_ntc = pd.Series(counts_ntc.values.sum(axis=1), index=counts_ntc.index)
-        detected_mask_ntc = gene_sums_ntc > 0
-        num_removed = (~detected_mask_ntc).sum()
-        
-        # Check cis gene detection
-        if self.cis_gene is not None:
-            if not detected_mask_ntc.get(self.cis_gene, False):
-                raise ValueError(f"[ERROR] The cis gene '{self.cis_gene}' has zero counts in NTC cells!")
-        
-        # Subset counts_ntc and self.counts to detected genes only
-        counts_ntc = counts_ntc.loc[detected_mask_ntc]
-        self.counts = self.counts.loc[detected_mask_ntc]
-        
-        # Recompute trans genes
-        self.trans_genes = [g for g in self.counts.index if g != self.cis_gene]
-        
-        if num_removed > 0:
-            num_trans_removed = num_removed - int(not detected_mask_ntc[self.cis_gene])
+            # Further subset to NTC cells
+            meta_ntc = meta_subset[meta_subset["target"] == "ntc"].copy()
+
+            # Get indices of NTC cells in the modality's cell list
+            ntc_cell_list = meta_ntc["cell"].tolist()
+            ntc_indices = [i for i, c in enumerate(modality_cells) if c in ntc_cell_list]
+
+            # Subset counts to NTC cells
+            # counts_to_fit is already the modality's counts (numpy array)
+            # Handle both 2D and 3D arrays
+            if counts_to_fit.ndim == 2:
+                if modality.cells_axis == 1:
+                    counts_ntc_array = counts_to_fit[:, ntc_indices]
+                else:
+                    counts_ntc_array = counts_to_fit[ntc_indices, :]
+            elif counts_to_fit.ndim == 3:
+                # 3D data: (features, cells, categories) or (features, cells, dimensions)
+                # For multinomial/mvnormal, cells are always on axis 1
+                counts_ntc_array = counts_to_fit[:, ntc_indices, :]
+            else:
+                raise ValueError(f"Unexpected number of dimensions: {counts_to_fit.ndim}")
+
+            print(f"[INFO] Modality '{modality_name}': {len(modality_cells)} total cells, {len(ntc_indices)} NTC cells")
+        else:
+            # Regular bayesDREAM - use original logic
+            meta_ntc = self.meta[self.meta["target"] == "ntc"].copy()
+            counts_ntc_array = self.counts.loc[:, meta_ntc["cell"]].values
+
+        # Filter features based on NTC data quality
+        # This applies to all modalities (including multi-modal)
+
+        # Step 1: Identify features with zero counts in NTC
+        # Handle both 2D and 3D data
+        if counts_ntc_array.ndim == 2:
+            # For 2D: sum across cells (axis 1 if features are rows)
+            if is_multimodal and modality.cells_axis == 0:
+                feature_sums_ntc = counts_ntc_array.sum(axis=0)  # cells are rows
+            else:
+                feature_sums_ntc = counts_ntc_array.sum(axis=1)  # features are rows
+        elif counts_ntc_array.ndim == 3:
+            # For 3D: sum across cells and categories/dimensions
+            # Shape is (features, cells, categories/dimensions)
+            feature_sums_ntc = counts_ntc_array.sum(axis=(1, 2))
+        else:
+            raise ValueError(f"Unexpected number of dimensions: {counts_ntc_array.ndim}")
+
+        zero_count_mask = feature_sums_ntc == 0
+        num_zero_count = zero_count_mask.sum()
+
+        # Step 2: Identify features with zero standard deviation in NTC
+        # Different approaches for different distributions
+        zero_std_mask = np.zeros(len(feature_sums_ntc), dtype=bool)
+
+        if distribution == 'multinomial':
+            # For multinomial: check if ALL ratios (k/total) have std=0
+            # counts_ntc_array shape: (features, cells, categories)
+            for f_idx in range(counts_ntc_array.shape[0]):
+                feature_counts = counts_ntc_array[f_idx, :, :]  # (cells, categories)
+                # Compute total counts per cell
+                totals = feature_counts.sum(axis=1, keepdims=True)  # (cells, 1)
+
+                # Compute ratios, avoiding division by zero
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    ratios = np.where(totals > 0, feature_counts / totals, 0)  # (cells, categories)
+
+                # Check if ALL ratios have zero std across cells
+                ratio_stds = ratios.std(axis=0)  # std across cells for each category
+                if np.all(ratio_stds == 0):
+                    zero_std_mask[f_idx] = True
+
+        elif distribution == 'binomial':
+            # For binomial: check if (numerator/denominator) ratio has std=0
+            # (excluding where denominator is 0)
+            # counts_ntc_array: (features, cells) - numerator
+            # denominator_ntc_array: (features, cells) - denominator
+            if denominator is None:
+                raise ValueError("Binomial distribution requires denominator for variance check")
+
+            # Get denominator for NTC cells
+            if is_multimodal:
+                if denominator.ndim == 2:
+                    if modality.cells_axis == 1:
+                        denom_ntc = denominator[:, ntc_indices]
+                    else:
+                        denom_ntc = denominator[ntc_indices, :]
+                else:
+                    raise ValueError(f"Unexpected denominator dimensions: {denominator.ndim}")
+            else:
+                # For regular bayesDREAM
+                denom_ntc = denominator[:, meta_ntc.index] if denominator is not None else None
+
+            for f_idx in range(counts_ntc_array.shape[0]):
+                if is_multimodal and modality.cells_axis == 0:
+                    numer = counts_ntc_array[:, f_idx]  # cells are rows
+                    denom = denom_ntc[:, f_idx]
+                else:
+                    numer = counts_ntc_array[f_idx, :]  # features are rows
+                    denom = denom_ntc[f_idx, :]
+
+                # Compute ratios, excluding cells where denominator is 0
+                valid_mask = denom > 0
+                if valid_mask.sum() == 0:
+                    # All denominators are zero - can't compute ratio
+                    zero_std_mask[f_idx] = True
+                else:
+                    ratios = numer[valid_mask] / denom[valid_mask]
+                    if ratios.std() == 0:
+                        zero_std_mask[f_idx] = True
+
+        elif distribution == 'mvnormal':
+            # For mvnormal: check if std=0 in ALL dimensions
+            # counts_ntc_array shape: (features, cells, dimensions)
+            for f_idx in range(counts_ntc_array.shape[0]):
+                feature_data = counts_ntc_array[f_idx, :, :]  # (cells, dimensions)
+                # Compute std across cells for each dimension
+                dim_stds = feature_data.std(axis=0)  # std for each dimension
+                if np.all(dim_stds == 0):
+                    zero_std_mask[f_idx] = True
+
+        else:
+            # For negbinom, normal: check if std=0 in raw counts
+            if counts_ntc_array.ndim == 2:
+                if is_multimodal and modality.cells_axis == 0:
+                    feature_std_ntc = counts_ntc_array.std(axis=0)  # cells are rows
+                else:
+                    feature_std_ntc = counts_ntc_array.std(axis=1)  # features are rows
+                zero_std_mask = feature_std_ntc == 0
+            else:
+                raise ValueError(f"Unexpected dimensions for distribution '{distribution}': {counts_ntc_array.ndim}")
+
+        num_zero_std = zero_std_mask.sum()
+
+        # Step 3: For multinomial (donor/acceptor), filter features with only one category
+        only_one_category_mask = np.zeros(len(feature_sums_ntc), dtype=bool)
+        if distribution == 'multinomial':
+            # Check how many categories have non-zero counts for each feature
+            # counts_ntc_array shape: (features, cells, categories)
+            for f_idx in range(counts_ntc_array.shape[0]):
+                # Sum across cells to get total counts per category
+                category_totals = counts_ntc_array[f_idx, :, :].sum(axis=0)
+                num_nonzero_categories = (category_totals > 0).sum()
+                if num_nonzero_categories <= 1:
+                    only_one_category_mask[f_idx] = True
+        num_single_category = only_one_category_mask.sum()
+
+        # Step 4: Combine filtering criteria
+        # Features to REMOVE from fitting (but not from data)
+        needs_filtering_mask = zero_std_mask | only_one_category_mask
+
+        # Features with zero counts will NOT be removed, but will be handled post-hoc
+        # They still need to be excluded from fitting
+        needs_exclusion_mask = zero_count_mask | needs_filtering_mask
+
+        # Step 5: Warnings and checks
+        if num_zero_count > 0:
             warnings.warn(
-                f"[WARNING] {num_trans_removed} trans gene(s) had zero counts in NTC and were removed.",
+                f"[WARNING] {num_zero_count} feature(s) have zero counts in NTC. "
+                f"These will not be corrected for technical factors (alpha_y will be set to 1).",
                 UserWarning
             )
 
+        if num_zero_std > 0:
+            warnings.warn(
+                f"[WARNING] {num_zero_std} feature(s) have zero standard deviation in NTC and will be excluded from fitting.",
+                UserWarning
+            )
 
-        
+        if num_single_category > 0:
+            warnings.warn(
+                f"[WARNING] {num_single_category} donor/acceptor feature(s) have only one category and will be excluded from fitting.",
+                UserWarning
+            )
+
+        # Check if cis gene has zero counts (for gene modality only)
+        if is_multimodal and modality_name == 'gene' and self.cis_gene is not None:
+            # Find cis gene index in feature_meta
+            cis_gene_features = modality.feature_meta.index.tolist()
+            if self.cis_gene in cis_gene_features:
+                cis_gene_idx = cis_gene_features.index(self.cis_gene)
+                if zero_count_mask[cis_gene_idx]:
+                    warnings.warn(
+                        f"[WARNING] The cis gene '{self.cis_gene}' has zero counts in NTC! "
+                        f"This may affect trans modeling.",
+                        UserWarning
+                    )
+        elif not is_multimodal and self.cis_gene is not None:
+            cis_gene_idx = self.counts.index.tolist().index(self.cis_gene)
+            if zero_count_mask[cis_gene_idx]:
+                warnings.warn(
+                    f"[WARNING] The cis gene '{self.cis_gene}' has zero counts in NTC! "
+                    f"This may affect trans modeling.",
+                    UserWarning
+                )
+
+        # Step 6: Subset data for fitting (exclude features that can't be fit)
+        fit_mask = ~needs_exclusion_mask
+        num_features_to_fit = fit_mask.sum()
+
+        if num_features_to_fit == 0:
+            raise ValueError("No features left to fit after filtering! All features have zero counts, zero variance, or single categories.")
+
+        # Subset counts_ntc_array and denominator for fitting
+        if counts_ntc_array.ndim == 2:
+            if is_multimodal and modality.cells_axis == 0:
+                counts_ntc_for_fit = counts_ntc_array[:, fit_mask]
+            else:
+                counts_ntc_for_fit = counts_ntc_array[fit_mask, :]
+        elif counts_ntc_array.ndim == 3:
+            counts_ntc_for_fit = counts_ntc_array[fit_mask, :, :]
+
+        # Also subset denominator if present
+        denominator_ntc_array = None
+        if denominator is not None:
+            if is_multimodal:
+                # Get denominator for NTC cells
+                if denominator.ndim == 2:
+                    if modality.cells_axis == 1:
+                        denominator_ntc_array = denominator[:, ntc_indices]
+                    else:
+                        denominator_ntc_array = denominator[ntc_indices, :]
+                elif denominator.ndim == 3:
+                    denominator_ntc_array = denominator[:, ntc_indices, :]
+
+                # Subset denominator for fitting
+                if denominator_ntc_array.ndim == 2:
+                    if modality.cells_axis == 0:
+                        denominator_ntc_for_fit = denominator_ntc_array[:, fit_mask]
+                    else:
+                        denominator_ntc_for_fit = denominator_ntc_array[fit_mask, :]
+                elif denominator_ntc_array.ndim == 3:
+                    denominator_ntc_for_fit = denominator_ntc_array[fit_mask, :, :]
+            else:
+                # For regular bayesDREAM, denominator handling would go here
+                # (Not currently used in base bayesDREAM)
+                denominator_ntc_for_fit = None
+        else:
+            denominator_ntc_for_fit = None
+
+        # Replace counts_ntc_array with filtered version for fitting
+        counts_ntc_array = counts_ntc_for_fit
+        if denominator is not None:
+            denominator_ntc_array = denominator_ntc_for_fit
+
         # Prepare inputs to pyro
         N = meta_ntc.shape[0]
-        T = counts_ntc.shape[0]
+
+        # Transpose to [N, T, ...] format expected by model
+        if is_multimodal:
+            if counts_ntc_array.ndim == 2:
+                if modality.cells_axis == 1:
+                    y_obs_ntc = counts_ntc_array.T  # [T, N] -> [N, T]
+                    T = counts_ntc_array.shape[0]  # Number of features
+                else:
+                    y_obs_ntc = counts_ntc_array  # Already [N, T]
+                    T = counts_ntc_array.shape[1]  # Number of features
+            elif counts_ntc_array.ndim == 3:
+                # 3D: (features, cells, categories/dimensions)
+                # Transpose to (cells, features, categories/dimensions)
+                y_obs_ntc = counts_ntc_array.transpose(1, 0, 2)  # [T, N, K] -> [N, T, K]
+                T = counts_ntc_array.shape[0]  # Number of features
+            else:
+                raise ValueError(f"Unexpected number of dimensions: {counts_ntc_array.ndim}")
+        else:
+            y_obs_ntc = counts_ntc_array.T  # [T, N] -> [N, T]
+            T = counts_ntc_array.shape[0]  # Number of features
+
         C = meta_ntc['technical_group_code'].nunique()
-        y_obs_ntc = counts_ntc.values.T
         groups_ntc = meta_ntc['technical_group_code'].values
         guides = meta_ntc['guide_code'].values
 
         # Calculate priors
+        # For 3D distributions, handle specially based on distribution type
+        if y_obs_ntc.ndim == 3:
+            if distribution == 'multinomial':
+                # For multinomial, sum over categories to get total counts per feature per cell
+                y_obs_ntc_for_priors = y_obs_ntc.sum(axis=2)  # [N, T, K] -> [N, T]
+            elif distribution == 'mvnormal':
+                # For mvnormal, DON'T sum - compute priors from mean across dimensions
+                # This gives us a better estimate of central tendency
+                y_obs_ntc_for_priors = y_obs_ntc.mean(axis=2)  # [N, T, D] -> [N, T]
+            else:
+                y_obs_ntc_for_priors = y_obs_ntc.sum(axis=2)  # Default: sum
+        else:
+            y_obs_ntc_for_priors = y_obs_ntc
+
         # Handle sum factors (only for distributions that need them)
         if sum_factor_col is not None:
-            y_obs_ntc_factored = y_obs_ntc / meta_ntc[sum_factor_col].values.reshape(-1, 1)
+            y_obs_ntc_factored = y_obs_ntc_for_priors / meta_ntc[sum_factor_col].values.reshape(-1, 1)
         else:
-            y_obs_ntc_factored = y_obs_ntc
+            y_obs_ntc_factored = y_obs_ntc_for_priors
 
         baseline_mask = (groups_ntc == 0)
-        mu_x_mean = np.mean(y_obs_ntc_factored[baseline_mask, :],axis=0) + epsilon
+        mu_x_mean = np.mean(y_obs_ntc_factored[baseline_mask, :],axis=0)
         guide_means = np.array([np.mean(y_obs_ntc_factored[guides == g], axis=0) for g in np.unique(guides)])
         mu_x_sd = np.std(guide_means, axis=0) + epsilon
+
+        # For distributions with potentially negative values, don't add epsilon to mean
+        # Only add epsilon to avoid division by zero in sd
+        if distribution not in ['normal', 'mvnormal']:
+            mu_x_mean = mu_x_mean + epsilon
 
         # Convert to tensors
         beta_o_beta_tensor = torch.tensor(beta_o_beta, dtype=torch.float32, device=self.device)
@@ -924,7 +1293,15 @@ class bayesDREAM:
         # Handle denominator (for binomial)
         denominator_ntc_tensor = None
         if denominator is not None:
-            denominator_ntc = denominator[:, meta_ntc.index].T  # Subset to NTC cells, transpose to [N, T]
+            if is_multimodal:
+                # Subset denominator using same ntc_indices
+                if modality.cells_axis == 1:
+                    denominator_ntc = denominator[:, ntc_indices].T  # [T, N_ntc] -> [N_ntc, T]
+                else:
+                    denominator_ntc = denominator[ntc_indices, :]  # [N_ntc, T]
+            else:
+                # Original logic for regular bayesDREAM
+                denominator_ntc = denominator[:, meta_ntc.index].T  # Subset to NTC cells, transpose to [N, T]
             denominator_ntc_tensor = torch.tensor(denominator_ntc, dtype=torch.float32, device=self.device)
 
         # Detect data dimensions (for multinomial and mvnormal)
@@ -1096,17 +1473,104 @@ class bayesDREAM:
 
         for k, v in posterior_samples.items():
             posterior_samples[k] = v.cpu()
-        
-        self.loss_technical = losses
-        self.posterior_samples_technical = posterior_samples
-        if self.cis_gene is not None:
-            self.alpha_y_prefit = posterior_samples["alpha_y"][:,:,self.counts.index.values != self.cis_gene]
-            self.alpha_y_type = 'posterior'
-            self.alpha_x_prefit = posterior_samples["alpha_y"][:,:,self.counts.index.values == self.cis_gene].squeeze(-1)
-            self.alpha_x_type = 'posterior'
+
+        # Reconstruct full alpha_y array with 1s for excluded features
+        # posterior_samples["alpha_y"] has shape [num_samples, C-1, T_fitted] or [C, T_fitted]
+        # We need to expand to [..., C, T_total] where T_total is the original number of features
+        alpha_y_fitted = posterior_samples["alpha_y"]
+        original_shape = alpha_y_fitted.shape
+
+        # Get total number of features before filtering
+        if is_multimodal:
+            T_total = len(fit_mask)  # Original number of features
         else:
-            self.alpha_y_prefit = posterior_samples["alpha_y"]
-            self.alpha_y_type = 'posterior'
+            T_total = len(fit_mask)  # Same for regular bayesDREAM
+
+        # Determine if we have samples dimension
+        if alpha_y_fitted.ndim == 3:
+            # Shape: [num_samples, C-1, T_fitted]
+            num_samples = original_shape[0]
+            C_groups = original_shape[1]
+            T_fitted = original_shape[2]
+
+            # Create full alpha_y array initialized with 1s
+            alpha_y_full = torch.ones((num_samples, C_groups, T_total),
+                                     dtype=alpha_y_fitted.dtype, device=alpha_y_fitted.device)
+
+            # Fill in fitted values at positions indicated by fit_mask
+            fit_indices = np.where(fit_mask)[0]
+            alpha_y_full[:, :, fit_indices] = alpha_y_fitted
+
+        elif alpha_y_fitted.ndim == 2:
+            # Shape: [C, T_fitted]
+            C_groups = original_shape[0]
+            T_fitted = original_shape[1]
+
+            # Create full alpha_y array initialized with 1s
+            alpha_y_full = torch.ones((C_groups, T_total),
+                                     dtype=alpha_y_fitted.dtype, device=alpha_y_fitted.device)
+
+            # Fill in fitted values at positions indicated by fit_mask
+            fit_indices = np.where(fit_mask)[0]
+            alpha_y_full[:, fit_indices] = alpha_y_fitted
+        else:
+            raise ValueError(f"Unexpected alpha_y shape: {original_shape}")
+
+        # Replace alpha_y in posterior_samples with the full version
+        posterior_samples["alpha_y"] = alpha_y_full
+
+        # Also update feature metadata to record which features were excluded
+        if is_multimodal:
+            modality.feature_meta['ntc_zero_count'] = zero_count_mask
+            modality.feature_meta['ntc_zero_std'] = zero_std_mask
+            modality.feature_meta['ntc_single_category'] = only_one_category_mask
+            modality.feature_meta['ntc_excluded_from_fit'] = needs_exclusion_mask
+            modality.feature_meta['technical_correction_applied'] = ~needs_exclusion_mask
+        else:
+            # For regular bayesDREAM, update self.counts index
+            # Note: fit_mask corresponds to rows in self.counts after any previous filtering
+            if not hasattr(self, 'feature_technical_meta'):
+                self.feature_technical_meta = pd.DataFrame(index=self.counts.index)
+            self.feature_technical_meta['ntc_zero_count'] = zero_count_mask
+            self.feature_technical_meta['ntc_zero_std'] = zero_std_mask
+            self.feature_technical_meta['ntc_excluded_from_fit'] = needs_exclusion_mask
+            self.feature_technical_meta['technical_correction_applied'] = ~needs_exclusion_mask
+
+        # Store results
+        if is_multimodal:
+            # Store in modality
+            modality.alpha_y_prefit = posterior_samples["alpha_y"]
+            modality.posterior_samples_technical = posterior_samples
+
+            # Mark exon skipping aggregation as locked (if applicable)
+            if modality.is_exon_skipping():
+                modality.mark_technical_fit_complete()
+
+            # If primary modality, also store at model level (backward compatibility)
+            if modality_name == self.primary_modality:
+                self.loss_technical = losses
+                self.posterior_samples_technical = posterior_samples
+                # For multi-modal, the modality already excludes the cis gene,
+                # so alpha_y_prefit is just the modality results (all trans genes)
+                self.alpha_y_prefit = posterior_samples["alpha_y"]
+                self.alpha_y_type = 'posterior'
+                # Note: alpha_x_prefit would be set during cis fitting, not here
+                print(f"[INFO] Stored results in modality '{modality_name}' and at model level (primary modality)")
+            else:
+                print(f"[INFO] Stored results in modality '{modality_name}'")
+        else:
+            # Regular bayesDREAM - store at model level
+            self.loss_technical = losses
+            self.posterior_samples_technical = posterior_samples
+            if self.cis_gene is not None:
+                self.alpha_y_prefit = posterior_samples["alpha_y"][:,:,self.counts.index.values != self.cis_gene]
+                self.alpha_y_type = 'posterior'
+                self.alpha_x_prefit = posterior_samples["alpha_y"][:,:,self.counts.index.values == self.cis_gene].squeeze(-1)
+                self.alpha_x_type = 'posterior'
+            else:
+                self.alpha_y_prefit = posterior_samples["alpha_y"]
+                self.alpha_y_type = 'posterior'
+
         if self.device.type == "cuda":
             torch.cuda.empty_cache()
         pyro.clear_param_store()
@@ -2008,7 +2472,6 @@ class bayesDREAM:
     ########################################################
     def fit_trans(
         self,
-        technical_covariates: list[str] = None,
         sum_factor_col: str = None,
         function_type: str = 'single_hill',  # or 'additive', 'nested'
         polynomial_degree: int = 6,
@@ -2036,8 +2499,9 @@ class bayesDREAM:
         #final_temp: float = 1e-8,
         final_temp: float = 0.1,
         minibatch_size: int = None,
-        distribution: str = 'negbinom',
+        distribution: str = None,
         denominator: np.ndarray = None,
+        modality_name: str = None,
         **kwargs
     ):
         """
@@ -2045,20 +2509,87 @@ class bayesDREAM:
 
         Parameters
         ----------
-        distribution : str
+        modality_name : str, optional
+            Name of modality to fit. If None, uses primary modality (for MultiModalBayesDREAM)
+            or self.counts (for regular bayesDREAM).
+        distribution : str, optional
             Distribution type: 'negbinom', 'multinomial', 'binomial', 'normal', 'mvnormal'
+            If None, auto-detected from modality (for MultiModalBayesDREAM) or defaults to 'negbinom'
         sum_factor_col : str, optional
             Sum factor column name. Required for negbinom, ignored for others.
         denominator : np.ndarray, optional
             Denominator array for binomial distribution (e.g., total counts for PSI)
-        technical_covariates : list of str, optional
-            Covariates for cell-line effects
+            If None, auto-detected from modality (for MultiModalBayesDREAM)
         function_type : str
             Dose-response function: 'single_hill', 'additive_hill', 'polynomial'
         **kwargs
             Additional parameters for specific distributions
+
+        Notes
+        -----
+        For multi-modal models, each modality stores its own fitting results.
+        Primary modality results are also stored at model level for backward compatibility.
+        Trans fitting requires that technical fit has been performed for the modality.
+
+        If technical_group_code is set (via set_technical_groups()), it will be used for
+        correction. Otherwise, no group correction is applied.
+
+        Examples
+        --------
+        >>> model.set_technical_groups(['cell_line'])  # Optional, for correction
+        >>> model.fit_trans(sum_factor_col='sum_factor', function_type='additive_hill')
         """
-        print(f"Running fit_trans with distribution={distribution}...")
+
+        # Determine if this is a multi-modal model
+        is_multimodal = hasattr(self, 'modalities')
+        modality = None
+
+        if is_multimodal:
+            # Determine which modality to use
+            if modality_name is None:
+                modality_name = self.primary_modality
+            modality = self.get_modality(modality_name)
+
+            # Auto-detect distribution from modality
+            if distribution is None:
+                distribution = modality.distribution
+
+            # Auto-detect denominator from modality (for binomial)
+            if denominator is None and modality.denominator is not None:
+                denominator = modality.denominator
+
+            # Check that technical fit has been done for this modality
+            if modality.alpha_y_prefit is None:
+                raise ValueError(
+                    f"Modality '{modality_name}' has not been fit with fit_technical(). "
+                    f"Please run fit_technical(modality_name='{modality_name}') first."
+                )
+
+            # Get counts from modality
+            counts_to_fit = modality.counts
+
+            # Get cell names from modality
+            if modality.cell_names is not None:
+                modality_cells = modality.cell_names
+            else:
+                # Modality doesn't have cell names - assume same order as model.meta['cell']
+                modality_cells = self.meta['cell'].values[:counts_to_fit.shape[modality.cells_axis]]
+
+            # Get technical fit results from modality (NOT self.alpha_y_prefit!)
+            alpha_y_prefit = modality.alpha_y_prefit
+            # For multi-modal, alpha_y_type is always 'posterior' since it came from fit_technical
+            alpha_y_type = 'posterior' if alpha_y_prefit is not None else None
+
+            print(f"[INFO] Fitting trans model for modality '{modality_name}' (distribution: {distribution})")
+        else:
+            # Regular bayesDREAM - use self.counts and self.alpha_y_prefit
+            counts_to_fit = self.counts.values
+            modality_cells = self.meta['cell'].values
+            alpha_y_prefit = self.alpha_y_prefit
+            alpha_y_type = self.alpha_y_type
+            if distribution is None:
+                distribution = 'negbinom'
+            print(f"[INFO] Fitting trans model (distribution: {distribution})")
 
         # Validate distribution-specific requirements
         from .distributions import requires_sum_factor, requires_denominator
@@ -2072,51 +2603,103 @@ class bayesDREAM:
         # convert to gpu for fitting if applicable
         if self.x_true is not None and self.x_true.device != self.device:
             self.x_true = self.x_true.to(self.device)
-        if self.alpha_y_prefit is not None and self.alpha_y_prefit.device != self.device:
-            self.alpha_y_prefit = self.alpha_y_prefit.to(self.device)
+        if alpha_y_prefit is not None and alpha_y_prefit.device != self.device:
+            alpha_y_prefit = alpha_y_prefit.to(self.device)
 
         if not hasattr(self, "log2_x_true") or self.log2_x_true is None:
             if self.x_true is not None:
                 self.log2_x_true = torch.log2(self.x_true)
                 self.log2_x_true_type = self.x_true_type
-        
-        if technical_covariates:
+
+        # Handle cell subsetting for multi-modal
+        if is_multimodal:
+            # Subset meta to cells in this modality (work with copy)
+            modality_cell_set = set(modality_cells)
+            meta_subset = self.meta[self.meta['cell'].isin(modality_cell_set)].copy()
+
+            # Check if technical_group_code exists (for correction)
+            if "technical_group_code" in meta_subset.columns:
+                C = meta_subset['technical_group_code'].nunique()
+                groups_tensor = torch.tensor(meta_subset['technical_group_code'].values, dtype=torch.long, device=self.device)
+                print(f"[INFO] Using technical_group_code with {C} groups for correction")
+            else:
+                C = None
+                groups_tensor = None
+                if alpha_y_prefit is None:
+                    warnings.warn("no alpha_y_prefit and no technical_group_code, assuming no confounding effect.")
+
+            # Get cell indices for this modality
+            cell_indices = [i for i, c in enumerate(modality_cells) if c in modality_cell_set]
+            N = len(cell_indices)
+
+            # Subset counts to modality cells
+            # Handle both 2D and 3D arrays
+            if counts_to_fit.ndim == 2:
+                if modality.cells_axis == 1:
+                    y_obs = counts_to_fit[:, cell_indices].T  # [T, N] -> [N, T]
+                else:
+                    y_obs = counts_to_fit[cell_indices, :]  # Already [N, T]
+                T = y_obs.shape[1]
+            elif counts_to_fit.ndim == 3:
+                # 3D data: (features, cells, categories/dimensions)
+                # Subset and transpose to (cells, features, categories/dimensions)
+                counts_subset = counts_to_fit[:, cell_indices, :]  # [T, N, K]
+                y_obs = counts_subset.transpose(1, 0, 2)  # [T, N, K] -> [N, T, K]
+                T = counts_subset.shape[0]
+            else:
+                raise ValueError(f"Unexpected number of dimensions: {counts_to_fit.ndim}")
+
+            # Handle sum factors for modality cells
+            if sum_factor_col is not None:
+                sum_factor_tensor = torch.tensor(meta_subset[sum_factor_col].values, dtype=torch.float32, device=self.device)
+            else:
+                sum_factor_tensor = torch.ones(N, dtype=torch.float32, device=self.device)
+
+            # Handle denominator for modality cells
+            denominator_tensor = None
+            if denominator is not None:
+                if denominator.ndim == 2:
+                    if modality.cells_axis == 1:
+                        denominator_subset = denominator[:, cell_indices].T  # [T, N] -> [N, T]
+                    else:
+                        denominator_subset = denominator[cell_indices, :]  # [N, T]
+                    denominator_tensor = torch.tensor(denominator_subset, dtype=torch.float32, device=self.device)
+                elif denominator.ndim == 3:
+                    # 3D denominator (shouldn't happen for current distributions, but handle it)
+                    denominator_subset = denominator[:, cell_indices, :].transpose(1, 0, 2)
+                    denominator_tensor = torch.tensor(denominator_subset, dtype=torch.float32, device=self.device)
+
+        else:
+            # Regular bayesDREAM - check if technical_group_code exists
             if "technical_group_code" in self.meta.columns:
-                warnings.warn("technical_group already set. Overwriting.")
-                if self.alpha_y_prefit:
-                    warnings.warn("Overwriting alpha_y prefit, and refitting.")
-                    self.alpha_y_prefit = None
-                
-            self.meta["technical_group_code"] = self.meta.groupby(technical_covariates).ngroup()
-            C = self.meta['technical_group_code'].nunique()
-            groups_tensor = torch.tensor(self.meta['technical_group_code'].values, dtype=torch.long, device=self.device)
-        elif self.alpha_y_prefit is None:
-            C = None
-            groups_tensor = None
-            warnings.warn("no alpha_y_prefit and no technical_covariates provided, assuming no confounding effect.")
-        else:
-            C = self.meta['technical_group_code'].nunique()
-            groups_tensor = torch.tensor(self.meta['technical_group_code'].values, dtype=torch.long, device=self.device)
-        
-        N = self.meta.shape[0]
-        if self.cis_gene is not None:
-            y_obs = self.counts.drop([self.cis_gene]).values.T
-        else:
-            warnings.warn("self.cis_gene is None. Assuming self.counts does not include cis_gene. If it does, please abort and set self.cis_gene.")
-            y_obs = self.counts.values.T
-        T = y_obs.shape[1]
+                C = self.meta['technical_group_code'].nunique()
+                groups_tensor = torch.tensor(self.meta['technical_group_code'].values, dtype=torch.long, device=self.device)
+                print(f"[INFO] Using technical_group_code with {C} groups for correction")
+            else:
+                C = None
+                groups_tensor = None
+                if self.alpha_y_prefit is None:
+                    warnings.warn("no alpha_y_prefit and no technical_group_code, assuming no confounding effect.")
 
-        # Handle sum factors (only for distributions that need them)
-        if sum_factor_col is not None:
-            sum_factor_tensor = torch.tensor(self.meta[sum_factor_col].values, dtype=torch.float32, device=self.device)
-        else:
-            # Create dummy sum factors for distributions that don't need them
-            sum_factor_tensor = torch.ones(N, dtype=torch.float32, device=self.device)
+            N = self.meta.shape[0]
+            if self.cis_gene is not None:
+                y_obs = self.counts.drop([self.cis_gene]).values.T
+            else:
+                warnings.warn("self.cis_gene is None. Assuming self.counts does not include cis_gene. If it does, please abort and set self.cis_gene.")
+                y_obs = self.counts.values.T
+            T = y_obs.shape[1]
 
-        # Handle denominator (for binomial)
-        denominator_tensor = None
-        if denominator is not None:
-            denominator_tensor = torch.tensor(denominator, dtype=torch.float32, device=self.device)
+            # Handle sum factors (only for distributions that need them)
+            if sum_factor_col is not None:
+                sum_factor_tensor = torch.tensor(self.meta[sum_factor_col].values, dtype=torch.float32, device=self.device)
+            else:
+                # Create dummy sum factors for distributions that don't need them
+                sum_factor_tensor = torch.ones(N, dtype=torch.float32, device=self.device)
+
+            # Handle denominator (for binomial)
+            denominator_tensor = None
+            if denominator is not None:
+                denominator_tensor = torch.tensor(denominator, dtype=torch.float32, device=self.device)
 
         # Detect data dimensions (for multinomial and mvnormal)
         from .distributions import is_3d_distribution
@@ -2204,7 +2787,7 @@ class bayesDREAM:
                 epsilon_tensor,
                 x_true_sample = self.x_true.mean(dim=0) if self.x_true_type == "posterior" else self.x_true,
                 log2_x_true_sample = self.log2_x_true.mean(dim=0) if self.log2_x_true_type == "posterior" else self.log2_x_true,
-                alpha_y_sample = self.alpha_y_prefit.mean(dim=0) if self.alpha_y_type == "posterior" else self.alpha_y_prefit,
+                alpha_y_sample = alpha_y_prefit.mean(dim=0) if alpha_y_type == "posterior" else alpha_y_prefit,
                 C = C,
                 groups_tensor=groups_tensor,
                 predictive_mode=False,
@@ -2284,21 +2867,28 @@ class bayesDREAM:
             #    # Last 30% of training: exponentially cool down to 0.0005
             #    current_temp = 0.1 * (final_temp/0.1) ** ((step - 0.7 * niters) / (0.3 * niters))
 
-            
-            samp = torch.randint(high=self.x_true.shape[0], size=(1,)).item()
+
+            # Sample from posterior - use alpha_y_prefit shape if available, otherwise x_true
+            if alpha_y_prefit is not None and alpha_y_type == "posterior":
+                samp = torch.randint(high=alpha_y_prefit.shape[0], size=(1,)).item()
+            elif self.x_true_type == "posterior":
+                samp = torch.randint(high=self.x_true.shape[0], size=(1,)).item()
+            else:
+                samp = 0  # No sampling needed if both are point estimates
+
             # Sample from posterior
             x_true_sample = (
-                self.x_true[samp]
+                self.x_true[samp] if samp < self.x_true.shape[0] else self.x_true.mean(dim=0)
                 if self.x_true_type == "posterior" else self.x_true
             )
             log2_x_true_sample = (
-                self.log2_x_true[samp]
+                self.log2_x_true[samp] if samp < self.log2_x_true.shape[0] else self.log2_x_true.mean(dim=0)
                 if self.log2_x_true_type == "posterior" else self.log2_x_true
             )
             alpha_y_sample = (
-                self.alpha_y_prefit[samp]
-                if self.alpha_y_type == "posterior" else self.alpha_y_prefit
-            ) if self.alpha_y_prefit is not None else None
+                alpha_y_prefit[samp]
+                if alpha_y_type == "posterior" else alpha_y_prefit
+            ) if alpha_y_prefit is not None else None
 
             #use_straight_through = step >= int(0.7 * niters)
             use_straight_through = False
@@ -2384,7 +2974,7 @@ class bayesDREAM:
                 "epsilon_tensor": epsilon_tensor.cpu(),
                 "x_true_sample": self.x_true.mean(dim=0).cpu() if self.x_true_type == "posterior" else self.x_true.cpu(),
                 "log2_x_true_sample": self.log2_x_true.mean(dim=0).cpu() if self.log2_x_true_type == "posterior" else self.log2_x_true.cpu(),
-                "alpha_y_sample": self.alpha_y_prefit.mean(dim=0).cpu() if self.alpha_y_type == "posterior" else (self.alpha_y_prefit.cpu() if self.alpha_y_prefit is not None else None),
+                "alpha_y_sample": alpha_y_prefit.mean(dim=0).cpu() if alpha_y_type == "posterior" else (alpha_y_prefit.cpu() if alpha_y_prefit is not None else None),
                 "C": C,
                 "groups_tensor": groups_tensor.cpu(),
                 "predictive_mode": True,
@@ -2423,7 +3013,7 @@ class bayesDREAM:
                 "epsilon_tensor": epsilon_tensor,
                 "x_true_sample": self.x_true.mean(dim=0) if self.x_true_type == "posterior" else self.x_true,
                 "log2_x_true_sample": self.log2_x_true.mean(dim=0) if self.log2_x_true_type == "posterior" else self.log2_x_true,
-                "alpha_y_sample": self.alpha_y_prefit.mean(dim=0) if self.alpha_y_type == "posterior" else self.alpha_y_prefit,
+                "alpha_y_sample": alpha_y_prefit.mean(dim=0) if alpha_y_type == "posterior" else alpha_y_prefit,
                 "C": C,
                 "groups_tensor": groups_tensor,
                 "predictive_mode": True,
@@ -2490,9 +3080,29 @@ class bayesDREAM:
 
         for k, v in posterior_samples_y.items():
             posterior_samples_y[k] = v.cpu()
-        self.posterior_samples_trans = posterior_samples_y
-        if self.alpha_y_prefit is None and technical_covariates:
-            self.alpha_y_prefit = posterior_samples_y["alpha_y"].mean(dim=0)
+
+        # Store results
+        if is_multimodal:
+            # Store in modality
+            modality.posterior_samples_trans = posterior_samples_y
+
+            # Update alpha_y_prefit in modality if it was None
+            if modality.alpha_y_prefit is None and technical_covariates:
+                modality.alpha_y_prefit = posterior_samples_y["alpha_y"].mean(dim=0)
+
+            # If primary modality, also store at model level (backward compatibility)
+            if modality_name == self.primary_modality:
+                self.posterior_samples_trans = posterior_samples_y
+                if self.alpha_y_prefit is None and technical_covariates:
+                    self.alpha_y_prefit = posterior_samples_y["alpha_y"].mean(dim=0)
+                print(f"[INFO] Stored results in modality '{modality_name}' and at model level (primary modality)")
+            else:
+                print(f"[INFO] Stored results in modality '{modality_name}'")
+        else:
+            # Regular bayesDREAM - store at model level
+            self.posterior_samples_trans = posterior_samples_y
+            if self.alpha_y_prefit is None and technical_covariates:
+                self.alpha_y_prefit = posterior_samples_y["alpha_y"].mean(dim=0)
 
         if self.device.type == "cuda":
             torch.cuda.empty_cache()
