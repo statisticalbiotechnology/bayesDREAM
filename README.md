@@ -97,16 +97,15 @@ donor_mod = model.get_modality('splicing_donor')
 ## Documentation
 
 ### User Guides
-- **[QUICKSTART_MULTIMODAL.md](QUICKSTART_MULTIMODAL.md)** - Quick reference guide
-- **[API_REFERENCE.md](API_REFERENCE.md)** - Complete API reference with all functions
-- **[DATA_ACCESS.md](DATA_ACCESS.md)** - Guide to accessing and working with data
+- **[docs/QUICKSTART_MULTIMODAL.md](docs/QUICKSTART_MULTIMODAL.md)** - Quick reference guide
+- **[docs/API_REFERENCE.md](docs/API_REFERENCE.md)** - Complete API reference with all functions
+- **[docs/DATA_ACCESS.md](docs/DATA_ACCESS.md)** - Guide to accessing and working with data
 - **[examples/multimodal_example.py](examples/multimodal_example.py)** - Complete examples
 
 ### Technical Documentation
-- **[CLAUDE.md](CLAUDE.md)** - Complete architecture documentation
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Visual architecture diagrams
-- **[MULTIMODAL_IMPLEMENTATION.md](MULTIMODAL_IMPLEMENTATION.md)** - Implementation details
-- **[MULTIMODAL_FITTING_INFRASTRUCTURE.md](MULTIMODAL_FITTING_INFRASTRUCTURE.md)** - Distribution-specific fitting
+- **[CLAUDE.md](CLAUDE.md)** - Complete architecture documentation for Claude Code
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - System architecture and design patterns
+- **[docs/PER_MODALITY_FITTING_PLAN.md](docs/PER_MODALITY_FITTING_PLAN.md)** - Per-modality fitting implementation
 
 ## Data Requirements
 
@@ -119,27 +118,7 @@ donor_mod = model.get_modality('splicing_donor')
 - Splice junctions: rows = junctions, columns = cells
 - Transcripts: rows = transcripts, columns = cells
 
-See [QUICKSTART_MULTIMODAL.md](QUICKSTART_MULTIMODAL.md) for detailed format specifications.
-
-## Distribution-Flexible Fitting
-
-bayesDREAM supports multiple statistical distributions for different data types:
-
-```python
-# Fit with different distributions
-# For negbinom (gene counts)
-model.fit_technical(covariates=['cell_line'], sum_factor_col='sum_factor', distribution='negbinom')
-model.fit_trans(sum_factor_col='sum_factor', distribution='negbinom', function_type='additive_hill')
-
-# For normal (continuous measurements like SpliZ)
-model.fit_technical(covariates=['cell_line'], distribution='normal')
-model.fit_trans(distribution='normal', function_type='polynomial')
-
-# For binomial (exon skipping PSI)
-model.fit_trans(distribution='binomial', denominator=total_counts, function_type='single_hill')
-```
-
-See **[MULTIMODAL_FITTING_INFRASTRUCTURE.md](MULTIMODAL_FITTING_INFRASTRUCTURE.md)** for complete details on distribution-specific fitting.
+See [docs/QUICKSTART_MULTIMODAL.md](docs/QUICKSTART_MULTIMODAL.md) for detailed format specifications.
 
 ## Supported Distributions
 
@@ -165,27 +144,31 @@ If you use bayesDREAM in your research, please cite:
 
 ```bash
 # Test multi-modal infrastructure
-/opt/anaconda3/envs/pyroenv/bin/python test_multimodal_fitting.py
+/opt/anaconda3/envs/pyroenv/bin/python tests/test_multimodal_fitting.py
 
-# Test trans model backward compatibility
-/opt/anaconda3/envs/pyroenv/bin/python test_negbinom_compat.py
+# Test filtering
+/opt/anaconda3/envs/pyroenv/bin/python tests/test_filtering_simple.py
 
-# Test technical model backward compatibility
-/opt/anaconda3/envs/pyroenv/bin/python test_technical_compat.py
+# Test per-modality fitting
+/opt/anaconda3/envs/pyroenv/bin/python tests/test_per_modality_fitting.py
 ```
+
+See [tests/README.md](tests/README.md) for complete testing documentation.
 
 ### Project Structure
 
 ```
-bayesDREAM_forClaude/
+bayesDREAM/
 ├── bayesDREAM/           # Core package
-│   ├── model.py          # Base bayesDREAM class (~2500 lines)
+│   ├── model.py          # Base bayesDREAM class (~2250 lines)
 │   ├── multimodal.py     # Multi-modal wrapper
 │   ├── modality.py       # Modality data structure
-│   ├── distributions.py  # Distribution-specific observation samplers
+│   ├── distributions.py  # Distribution-specific samplers
 │   ├── splicing.py       # Splicing processing (pure Python)
-│   └── utils.py          # Helper functions (Hill, polynomial, etc.)
+│   └── __init__.py       # Package exports
 ├── examples/             # Usage examples
+├── tests/                # Test suite
+├── docs/                 # Documentation
 └── toydata/              # Test datasets
 ```
 
