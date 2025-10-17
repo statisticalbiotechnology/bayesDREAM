@@ -7,10 +7,10 @@ and store results correctly in both modality objects and at model level.
 import numpy as np
 import pandas as pd
 import torch
-from bayesDREAM import MultiModalBayesDREAM, Modality
+from bayesDREAM import bayesDREAM, Modality
 
 print("=" * 80)
-print("Test 1: Setup - Create MultiModalBayesDREAM with multiple modalities")
+print("Test 1: Setup - Create bayesDREAM with multiple modalities")
 print("=" * 80)
 
 # Create synthetic data
@@ -42,8 +42,8 @@ gene_counts = pd.DataFrame(
     columns=cell_names
 )
 
-# Initialize MultiModalBayesDREAM
-model = MultiModalBayesDREAM(
+# Initialize bayesDREAM
+model = bayesDREAM(
     meta=meta,
     counts=gene_counts,
     cis_gene='GFI1B',

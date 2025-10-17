@@ -6,7 +6,7 @@ This ensures the refactored code still works with the default negative binomial.
 
 import pandas as pd
 import numpy as np
-from bayesDREAM import MultiModalBayesDREAM
+from bayesDREAM import bayesDREAM
 
 print("Creating toy data...")
 
@@ -40,8 +40,8 @@ print(f"  - Cell lines: {meta['cell_line'].unique()}")
 print(f"  - NTC cells: {(meta['target'] == 'ntc').sum()}")
 
 # Create model
-print("\nCreating MultiModalBayesDREAM...")
-model = MultiModalBayesDREAM(
+print("\nCreating bayesDREAM...")
+model = bayesDREAM(
     meta=meta,
     counts=counts,
     cis_gene='GFI1B',

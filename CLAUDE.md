@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-bayesDREAM is a Bayesian framework for modeling CRISPR perturbation effects across multiple molecular modalities. The model consists of three sequential steps:
+bayesDREAM is a Bayesian framework for modeling perturbation effects across multiple molecular modalities. The model consists of three sequential steps:
 
 1. **Technical fit** (`fit_technical`): Models technical variation in non-targeting controls (NTC) to estimate gene-specific overdispersion parameters (`alpha_y`)
 2. **Cis fit** (`fit_cis`): Models direct effects on the targeted gene expression (`model_x`)
@@ -18,22 +18,20 @@ The codebase uses PyTorch and Pyro for probabilistic programming and variational
 bayesDREAM_forClaude/
 ├── bayesDREAM/
 │   ├── __init__.py          # Package exports
-│   ├── model.py             # Core bayesDREAM class (~2250 lines)
+│   ├── model.py             # Main bayesDREAM class (unified multi-modal)
 │   ├── modality.py          # Modality class for multi-modal data
-│   ├── multimodal.py        # MultiModalBayesDREAM wrapper class
 │   ├── distributions.py     # Distribution-specific observation samplers
 │   └── splicing.py          # Splicing data processing (pure Python)
-├── examples/
-│   └── multimodal_example.py # Multi-modal usage examples
+├── tests/                   # Test suite
 ├── toydata/                 # Test datasets (genes, splicing, metadata)
-└── test_multimodal_fitting.py # Infrastructure tests
+└── docs/                    # Documentation
 ```
 
 ## Core Architecture
 
 ### bayesDREAM Class
 
-The main class in `bayesDREAM/model.py` implements the three-step modeling pipeline:
+The main class in `bayesDREAM/model.py` implements multi-modal Bayesian modeling with the three-step pipeline:
 
 **Initialization:**
 - Takes cell metadata DataFrame (`meta`) with columns: `cell`, `guide`, `cell_line`, `target`, `sum_factor`, etc.
@@ -122,7 +120,7 @@ The `toydata/` directory contains small test datasets. Use these for quick valid
 
 ## Multi-Modal Architecture
 
-bayesDREAM now supports multiple molecular modalities beyond gene expression. This allows modeling of transcripts, splicing, and custom measurements within a unified framework.
+bayesDREAM supports multiple molecular modalities beyond gene expression, allowing modeling of transcripts, splicing, and custom measurements within a unified framework.
 
 ### Modality Class
 
@@ -147,15 +145,15 @@ The `Modality` class (`bayesDREAM/modality.py`) provides a standardized containe
 - Automatic validation of shapes and distribution requirements
 - Conversion to PyTorch tensors
 
-### MultiModalBayesDREAM Class
+### bayesDREAM Class (Multi-Modal)
 
-The `MultiModalBayesDREAM` class (`bayesDREAM/multimodal.py`) extends the base `bayesDREAM` class:
+The `bayesDREAM` class (`bayesDREAM/model.py`) provides full multi-modal support:
 
 **Initialization:**
 ```python
-from bayesDREAM import MultiModalBayesDREAM
+from bayesDREAM import bayesDREAM
 
-model = MultiModalBayesDREAM(
+model = bayesDREAM(
     meta=cell_metadata,
     counts=gene_counts,              # Primary modality (genes)
     gene_meta=gene_metadata,         # Optional: gene annotations
@@ -288,9 +286,9 @@ The `splicing.py` module provides pure Python implementations for splicing analy
 
 ### Example Workflows
 
-**Comprehensive example** (`examples/multimodal_example.py`):
+**Comprehensive example**:
 ```python
-from bayesDREAM import MultiModalBayesDREAM
+from bayesDREAM import bayesDREAM
 
 # Load data
 meta = pd.read_csv('meta.csv')
@@ -299,7 +297,7 @@ sj_counts = pd.read_csv('SJ_counts.csv', index_col=0)
 sj_meta = pd.read_csv('SJ_meta.csv')
 
 # Create multi-modal model
-model = MultiModalBayesDREAM(
+model = bayesDREAM(
     meta=meta,
     counts=gene_counts,
     gene_meta=gene_meta,  # Optional: provide gene annotations
@@ -332,4 +330,4 @@ donor_counts = donor_modality.counts        # 3D array
 donor_meta = donor_modality.feature_meta    # Donor site annotations
 ```
 
-See `examples/multimodal_example.py` for complete examples including transcripts, custom modalities, and advanced usage.
+See `tests/` directory for complete examples including transcripts, custom modalities, and advanced usage.

@@ -85,7 +85,7 @@ def fit_technical(
             "technical_group_code not set. Call set_technical_groups(covariates) before fit_technical()."
         )
     # Determine which modality to use
-    if hasattr(self, 'modalities'):  # MultiModalBayesDREAM
+    if hasattr(self, 'modalities'):  # bayesDREAM
         if modality_name is None:
             modality_name = self.primary_modality
         modality = self.get_modality(modality_name)
@@ -204,7 +204,7 @@ def fit_trans(
         self.posterior_samples_trans = posterior_samples_y
 ```
 
-### 4. MultiModalBayesDREAM Enhancements
+### 4. bayesDREAM Enhancements
 
 **No new methods needed!** The existing `fit_technical()` and `fit_trans()` methods work for all modalities.
 
@@ -285,9 +285,9 @@ This simplifies the workflow:
 **New multi-modal API:**
 
 ```python
-from bayesDREAM import MultiModalBayesDREAM
+from bayesDREAM import bayesDREAM
 
-model = MultiModalBayesDREAM(meta=meta, counts=counts, cis_gene='GFI1B')
+model = bayesDREAM(meta=meta, counts=counts, cis_gene='GFI1B')
 model.add_splicing_modality(sj_counts, sj_meta, ...)
 
 # Set technical groups ONCE (required before fit_technical)

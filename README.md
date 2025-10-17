@@ -1,16 +1,16 @@
 # bayesDREAM: Bayesian Dosage Response Effects Across Modalities
 
-A Bayesian framework for modeling CRISPR perturbation effects across multiple molecular modalities using PyTorch and Pyro.
+A Bayesian framework for modeling perturbation effects across multiple molecular modalities using PyTorch and Pyro.
 
 ## Overview
 
-bayesDREAM models how CRISPR perturbations propagate through molecular layers using a three-step Bayesian framework:
+bayesDREAM models how perturbations propagate through molecular layers using a three-step Bayesian framework:
 
 1. **Technical fit**: Model technical variation in non-targeting controls
 2. **Cis fit**: Model direct effects on targeted genes
 3. **Trans fit**: Model downstream effects as dose-response functions
 
-**New in v0.2.0**: Multi-modal support for transcripts, splicing, and custom measurements!
+Supports multiple molecular modalities including genes, transcripts, splicing, and custom measurements.
 
 ## Features
 
@@ -39,10 +39,10 @@ pip install -e .
 
 ## Quick Start
 
-### Single Modality (Gene Expression)
+### Basic Usage (Gene Expression)
 
 ```python
-from bayesDREAM import MultiModalBayesDREAM
+from bayesDREAM import bayesDREAM
 import pandas as pd
 
 # Load data
@@ -50,7 +50,7 @@ meta = pd.read_csv('meta.csv')
 gene_counts = pd.read_csv('gene_counts.csv', index_col=0)
 
 # Create model
-model = MultiModalBayesDREAM(
+model = bayesDREAM(
     meta=meta,
     counts=gene_counts,
     gene_meta=gene_meta,  # Optional: gene annotations (gene, gene_name, gene_id)
@@ -68,10 +68,10 @@ model.fit_trans(sum_factor_col='sum_factor_adj', function_type='additive_hill')
 ### Multi-Modal Analysis
 
 ```python
-from bayesDREAM import MultiModalBayesDREAM
+from bayesDREAM import bayesDREAM
 
 # Initialize with genes (gene_meta optional but recommended)
-model = MultiModalBayesDREAM(
+model = bayesDREAM(
     meta=meta,
     counts=gene_counts,
     gene_meta=gene_meta,  # Optional: gene, gene_name, gene_id
@@ -172,8 +172,7 @@ See [tests/README.md](tests/README.md) for complete testing documentation.
 ```
 bayesDREAM/
 ├── bayesDREAM/           # Core package
-│   ├── model.py          # Base bayesDREAM class (~2250 lines)
-│   ├── multimodal.py     # Multi-modal wrapper
+│   ├── model.py          # Main bayesDREAM class
 │   ├── modality.py       # Modality data structure
 │   ├── distributions.py  # Distribution-specific samplers
 │   ├── splicing.py       # Splicing processing (pure Python)

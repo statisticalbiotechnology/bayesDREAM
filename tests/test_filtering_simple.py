@@ -4,10 +4,10 @@ Simple test for distribution-specific filtering at modality creation.
 
 import numpy as np
 import pandas as pd
-from bayesDREAM import MultiModalBayesDREAM
+from bayesDREAM import bayesDREAM
 
 print("=" * 80)
-print("Setting up MultiModalBayesDREAM model")
+print("Setting up bayesDREAM model")
 print("=" * 80)
 
 # Create mock data
@@ -26,7 +26,7 @@ gene_counts = pd.DataFrame({
           'GENE6', 'GENE7', 'GENE8', 'GENE9', 'GENE10'])
 
 # Initialize model
-model = MultiModalBayesDREAM(
+model = bayesDREAM(
     meta=meta,
     counts=gene_counts,
     cis_gene='GFI1B',

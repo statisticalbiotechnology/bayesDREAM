@@ -3,7 +3,7 @@ Test gene metadata handling in bayesDREAM.
 """
 import numpy as np
 import pandas as pd
-from bayesDREAM import MultiModalBayesDREAM
+from bayesDREAM import bayesDREAM
 
 print("=" * 80)
 print("Test 1: Create model WITHOUT gene_meta (should create minimal metadata)")
@@ -27,7 +27,7 @@ gene_counts = pd.DataFrame(
 gene_counts.loc['GFI1B'] = np.random.randint(50, 150, 20)
 
 # Create model without gene_meta
-model1 = MultiModalBayesDREAM(
+model1 = bayesDREAM(
     meta=meta,
     counts=gene_counts,
     cis_gene='GFI1B',
@@ -55,7 +55,7 @@ gene_meta = pd.DataFrame({
 }, index=[f'GENE{i}' for i in range(10)] + ['GFI1B'])
 
 # Create model with gene_meta
-model2 = MultiModalBayesDREAM(
+model2 = bayesDREAM(
     meta=meta,
     counts=gene_counts,
     gene_meta=gene_meta,
@@ -79,7 +79,7 @@ gene_meta_simple = pd.DataFrame({
     'gene_name': [f'GENE{i}' for i in range(10)] + ['GFI1B']
 }, index=[f'GENE{i}' for i in range(10)] + ['GFI1B'])
 
-model3 = MultiModalBayesDREAM(
+model3 = bayesDREAM(
     meta=meta,
     counts=gene_counts,
     gene_meta=gene_meta_simple,
@@ -106,7 +106,7 @@ gene_meta_indexed = pd.DataFrame({
 gene_meta_indexed.index = [f'GENE{i}' for i in range(10)] + ['GFI1B']
 gene_meta_indexed.index.name = 'gene_symbol'
 
-model4 = MultiModalBayesDREAM(
+model4 = bayesDREAM(
     meta=meta,
     counts=gene_counts,
     gene_meta=gene_meta_indexed,

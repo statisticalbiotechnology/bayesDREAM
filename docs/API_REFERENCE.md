@@ -4,7 +4,7 @@ Complete reference for all classes, methods, and functions in bayesDREAM.
 
 ## Table of Contents
 
-- [MultiModalBayesDREAM Class](#multimodalbayesdream-class)
+- [bayesDREAM Class](#multimodalbayesdream-class)
 - [Modality Class](#modality-class)
 - [Distribution Functions](#distribution-functions)
 - [Splicing Functions](#splicing-functions)
@@ -12,14 +12,14 @@ Complete reference for all classes, methods, and functions in bayesDREAM.
 
 ---
 
-## MultiModalBayesDREAM Class
+## bayesDREAM Class
 
-The main class for multi-modal Bayesian modeling of CRISPR perturbation effects.
+The main class for multi-modal Bayesian modeling of perturbation effects.
 
 ### Initialization
 
 ```python
-MultiModalBayesDREAM(
+bayesDREAM(
     meta,
     counts,
     gene_meta=None,
@@ -50,7 +50,7 @@ MultiModalBayesDREAM(
 - `label` (str, optional): Label for this analysis run
 - `device` (str, optional): PyTorch device (`'cuda'` or `'cpu'`)
 
-**Returns:** MultiModalBayesDREAM instance
+**Returns:** bayesDREAM instance
 
 ---
 

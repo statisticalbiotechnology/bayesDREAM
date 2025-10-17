@@ -17,7 +17,7 @@ pip install -e .
 ### 1. Gene Expression Only (Original Workflow)
 
 ```python
-from bayesDREAM import MultiModalBayesDREAM
+from bayesDREAM import bayesDREAM
 import pandas as pd
 
 # Load data
@@ -26,7 +26,7 @@ gene_counts = pd.read_csv('gene_counts.csv', index_col=0)
 gene_meta = pd.read_csv('gene_meta.csv')  # Optional: gene annotations
 
 # Create model (exactly like original bayesDREAM)
-model = MultiModalBayesDREAM(
+model = bayesDREAM(
     meta=meta,
     counts=gene_counts,
     gene_meta=gene_meta,  # Optional: gene, gene_name, gene_id
@@ -44,7 +44,7 @@ model.fit_trans(sum_factor_col='sum_factor_adj', function_type='additive_hill')
 ### 2. Adding Splicing Data
 
 ```python
-from bayesDREAM import MultiModalBayesDREAM
+from bayesDREAM import bayesDREAM
 import pandas as pd
 
 # Load data
@@ -54,7 +54,7 @@ sj_counts = pd.read_csv('SJ_counts.csv', index_col=0)
 sj_meta = pd.read_csv('SJ_meta.csv')
 
 # Create model
-model = MultiModalBayesDREAM(
+model = bayesDREAM(
     meta=meta,
     counts=gene_counts,
     gene_meta=gene_meta,  # Optional: provide gene annotations
@@ -153,28 +153,28 @@ model.add_custom_modality(
 )
 ```
 
-### 5. Distribution-Flexible Fitting (NEW in v0.2.0+)
+### 5. Distribution-Flexible Fitting
 
 ```python
 # Fit with different distributions using the same model
-from bayesDREAM import MultiModalBayesDREAM
+from bayesDREAM import bayesDREAM
 
 # Example 1: Gene counts (negbinom) - DEFAULT
-model = MultiModalBayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B')
+model = bayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B')
 model.fit_technical(covariates=['cell_line'], sum_factor_col='sum_factor', distribution='negbinom')
 model.fit_trans(sum_factor_col='sum_factor_adj', distribution='negbinom', function_type='additive_hill')
 
 # Example 2: Continuous measurements (normal) - e.g., SpliZ scores
-model = MultiModalBayesDREAM(meta=meta, counts=spliz_scores, cis_gene='GFI1B')
+model = bayesDREAM(meta=meta, counts=spliz_scores, cis_gene='GFI1B')
 model.fit_technical(covariates=['cell_line'], distribution='normal')
 model.fit_trans(distribution='normal', function_type='polynomial')
 
 # Example 3: Exon skipping PSI (binomial)
-model = MultiModalBayesDREAM(meta=meta, counts=inclusion_counts, cis_gene='GFI1B')
+model = bayesDREAM(meta=meta, counts=inclusion_counts, cis_gene='GFI1B')
 model.fit_trans(distribution='binomial', denominator=total_counts, function_type='single_hill')
 
 # Example 4: Donor usage (multinomial)
-model = MultiModalBayesDREAM(meta=meta, counts=donor_usage_3d, cis_gene='GFI1B')
+model = bayesDREAM(meta=meta, counts=donor_usage_3d, cis_gene='GFI1B')
 model.fit_trans(distribution='multinomial', function_type='additive_hill')
 ```
 
@@ -291,7 +291,7 @@ subset = mod.get_cell_subset(['cell1', 'cell2', 'cell3'])
 ### Workflow 1: Genes + Splicing
 ```python
 # 1. Create model with genes
-model = MultiModalBayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B')
+model = bayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B')
 
 # 2. Add splicing (all types including raw SJ counts)
 model.add_splicing_modality(
@@ -314,7 +314,7 @@ donor_mod = model.get_modality('splicing_donor')  # Donor usage
 ### Workflow 2: Genes + Transcripts + Splicing
 ```python
 # 1. Create model
-model = MultiModalBayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B')
+model = bayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B')
 
 # 2. Add transcripts (both counts and usage)
 model.add_transcript_modality(
@@ -361,7 +361,7 @@ spliz_mod = Modality(
 )
 
 # Initialize with pre-built modalities
-model = MultiModalBayesDREAM(
+model = bayesDREAM(
     meta=meta,
     modalities={'gene': gene_mod, 'spliz': spliz_mod},
     cis_gene='GFI1B',
@@ -385,33 +385,22 @@ model = MultiModalBayesDREAM(
 
 ## Examples
 
-See `examples/multimodal_example.py` for complete working examples covering:
-1. Gene-only (backward compatible)
+See `tests/` directory for complete working examples covering:
+1. Gene expression modeling
 2. Genes + transcripts
 3. Genes + splicing
 4. Custom modalities (SpliZ, SpliZVD)
 5. Pre-constructed modalities
 6. Subsetting operations
 
-## What's New in v0.2.0+
+## Key Features
 
-✅ **Distribution-Flexible Fitting**: `fit_technical()` and `fit_trans()` now support all 5 distributions (negbinom, normal, binomial, multinomial, mvnormal)
+✅ **Distribution-Flexible Fitting**: `fit_technical()` and `fit_trans()` support all 5 distributions (negbinom, normal, binomial, multinomial, mvnormal)
 
 ✅ **Cell-Line Covariate Effects**: Distribution-specific handling (multiplicative for negbinom, additive for normal, logit-scale for binomial)
 
-✅ **Optional Sum Factors**: `sum_factor_col` parameter now defaults to `None` (only required for negbinom)
-
-✅ **Backward Compatible**: Existing code continues to work with default parameters
-
-## Next Steps
-
-- **Current**: Multi-modal data storage + distribution-flexible fitting for primary modality
-- **Future**: Modality-specific fitting via wrapper methods
-- **Future**: Cross-modality joint modeling
-- **Future**: Modality-specific normalization strategies
+✅ **Optional Sum Factors**: `sum_factor_col` parameter defaults to `None` (only required for negbinom)
 
 For more details, see:
-- `MULTIMODAL_IMPLEMENTATION.md`: Technical implementation details
-- `MULTIMODAL_FITTING_INFRASTRUCTURE.md`: Distribution-flexible fitting guide
 - `CLAUDE.md`: Full architecture documentation
-- `examples/multimodal_example.py`: Complete code examples
+- `docs/API_REFERENCE.md`: Complete API reference

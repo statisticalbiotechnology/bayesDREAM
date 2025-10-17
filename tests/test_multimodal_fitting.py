@@ -2,7 +2,7 @@
 Test multi-modal fitting infrastructure.
 
 This script tests:
-1. Backward compatibility: MultiModalBayesDREAM works exactly like bayesDREAM for gene expression
+1. Backward compatibility: bayesDREAM works exactly like bayesDREAM for gene expression
 2. fit_modality_technical() delegates correctly to fit_technical()
 3. fit_modality_trans() delegates correctly to fit_trans()
 4. Distribution registry is properly loaded
@@ -16,7 +16,7 @@ import numpy as np
 print("Testing imports...")
 try:
     from bayesDREAM import (
-        MultiModalBayesDREAM,
+        bayesDREAM,
         get_observation_sampler,
         requires_denominator,
         is_3d_distribution,
@@ -80,10 +80,10 @@ gene_counts = pd.DataFrame(
 print(f"  - Metadata: {meta.shape[0]} cells")
 print(f"  - Gene counts: {gene_counts.shape[0]} genes × {gene_counts.shape[1]} cells")
 
-# Test 1: Create MultiModalBayesDREAM
-print("\nTest 1: Create MultiModalBayesDREAM...")
+# Test 1: Create bayesDREAM
+print("\nTest 1: Create bayesDREAM...")
 try:
-    model = MultiModalBayesDREAM(
+    model = bayesDREAM(
         meta=meta,
         counts=gene_counts,
         cis_gene='GFI1B',
@@ -93,7 +93,7 @@ try:
         device='cpu',
         cores=1
     )
-    print("✓ MultiModalBayesDREAM created successfully")
+    print("✓ bayesDREAM created successfully")
     print(f"  - Primary modality: {model.primary_modality}")
     print(f"  - Number of modalities: {len(model.modalities)}")
 
@@ -102,7 +102,7 @@ try:
     print(f"\n  Modalities:\n{modalities_df}")
 
 except Exception as e:
-    print(f"✗ Failed to create MultiModalBayesDREAM: {e}")
+    print(f"✗ Failed to create bayesDREAM: {e}")
     import traceback
     traceback.print_exc()
     sys.exit(1)
@@ -177,7 +177,7 @@ print("="*60)
 print("\nSummary:")
 print("1. ✓ Imports successful")
 print("2. ✓ Distribution registry functional")
-print("3. ✓ MultiModalBayesDREAM created successfully")
+print("3. ✓ bayesDREAM created successfully")
 print("4. ✓ fit_modality_technical() method exists")
 print("5. ✓ fit_modality_trans() method exists")
 print("6. ✓ Gene modality excludes cis gene")

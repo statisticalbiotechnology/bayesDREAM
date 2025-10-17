@@ -6,7 +6,7 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │                      User Interface Layer                        │
 ├─────────────────────────────────────────────────────────────────┤
-│  MultiModalBayesDREAM                                           │
+│  bayesDREAM                                           │
 │  - add_transcript_modality()                                    │
 │  - add_splicing_modality()                                      │
 │  - add_custom_modality()                                        │
@@ -168,20 +168,20 @@ mvnormal                  3D: (F, C, D)          SpliZVD
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-## Data Flow in MultiModalBayesDREAM
+## Data Flow in bayesDREAM
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                          User Code                               │
 │                                                                  │
-│  model = MultiModalBayesDREAM(meta, counts, cis_gene='GFI1B')  │
+│  model = bayesDREAM(meta, counts, cis_gene='GFI1B')  │
 │  model.add_splicing_modality(sj_counts, sj_meta, [...])        │
 │  model.add_custom_modality('spliz', scores, meta, 'normal')     │
 └──────────────────────┬──────────────────────────────────────────┘
                        │
                        ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│                  MultiModalBayesDREAM.__init__                   │
+│                  bayesDREAM.__init__                   │
 │                                                                  │
 │  1. Create 'gene' Modality from counts DataFrame                │
 │  2. Store in self.modalities['gene']                            │
@@ -273,7 +273,7 @@ mvnormal                  3D: (F, C, D)          SpliZVD
                              │ inherits
                              ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│              MultiModalBayesDREAM (extension)                    │
+│              bayesDREAM (extension)                    │
 │  Adds multi-modal support while preserving base functionality   │
 ├─────────────────────────────────────────────────────────────────┤
 │  Additional Attributes:                                          │

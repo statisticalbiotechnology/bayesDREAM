@@ -90,7 +90,7 @@ print("=" * 80)
 print("Test 3: Custom binomial modality filtering")
 print("=" * 80)
 
-from bayesDREAM import MultiModalBayesDREAM, Modality
+from bayesDREAM import bayesDREAM, Modality
 
 # Create mock data
 meta = pd.DataFrame({
@@ -108,7 +108,7 @@ gene_counts = pd.DataFrame({
           'GENE6', 'GENE7', 'GENE8', 'GENE9', 'GENE10'])
 
 # Initialize model
-model = MultiModalBayesDREAM(
+model = bayesDREAM(
     meta=meta,
     counts=gene_counts,
     cis_gene='GFI1B',
