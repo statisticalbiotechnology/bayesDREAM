@@ -1579,11 +1579,64 @@ class _BayesDREAMCore:
         if modality_name == self.primary_modality:
             self.loss_technical = losses
             self.posterior_samples_technical = posterior_samples
-            # The modality already excludes the cis gene,
-            # so alpha_y_prefit is just the modality results (all trans genes)
-            self.alpha_y_prefit = posterior_samples["alpha_y"]
-            self.alpha_y_type = 'posterior'
-            # Note: alpha_x_prefit would be set during cis fitting, not here
+
+            # IMPORTANT: The primary modality may contain the cis_gene
+            # We need to extract it and store separately as alpha_x_prefit
+            if self.cis_gene is not None:
+                # Check if cis_gene is in the ORIGINAL counts (before modality creation)
+                # The modality already excludes it, but we need to find its alpha from fit results
+
+                # Get the full alpha_y (which now includes positions for all features)
+                full_alpha_y = posterior_samples["alpha_y"]  # Shape: (S, C, T_total)
+
+                # Check if cis_gene is in BOTH:
+                # 1) The original counts (self.counts) - for backward compatibility
+                # 2) The current modality's feature list - to get the correct index
+                #
+                # NOTE: In the new multi-modal architecture, cis_gene is excluded from
+                # the gene modality's features, so we need to check if it's in self.counts
+                # but NOT try to find it in the fitted alpha_y (which doesn't include it)
+
+                if hasattr(self, 'counts') and self.cis_gene in self.counts.index:
+                    # Check if cis_gene is actually in the modality's features
+                    # (In multi-modal, it's excluded from gene modality)
+                    modality_feature_ids = [str(fid) for fid in modality.feature_meta['gene'].values]
+
+                    if self.cis_gene in modality_feature_ids:
+                        # Find the index of cis_gene in the modality's features
+                        cis_idx_in_modality = modality_feature_ids.index(self.cis_gene)
+
+                        # Extract alpha for cis gene
+                        # Shape: (S, C, 1) -> squeeze to (S, C)
+                        self.alpha_x_prefit = full_alpha_y[:, :, cis_idx_in_modality]
+                        self.alpha_x_type = 'posterior'
+
+                        # Remove cis gene from alpha_y_prefit
+                        # Create mask for all indices except cis_gene
+                        all_indices = list(range(full_alpha_y.shape[2]))
+                        trans_indices = [i for i in all_indices if i != cis_idx_in_modality]
+                        self.alpha_y_prefit = full_alpha_y[:, :, trans_indices]
+                        self.alpha_y_type = 'posterior'
+
+                        print(f"[INFO] Extracted alpha_x_prefit for cis gene '{self.cis_gene}' from primary modality")
+                        print(f"[INFO] alpha_y_prefit excludes cis gene ({len(trans_indices)} trans genes)")
+                    else:
+                        # Cis gene in self.counts but not in this modality
+                        # This is the expected case for multi-modal architecture
+                        self.alpha_y_prefit = full_alpha_y
+                        self.alpha_y_type = 'posterior'
+                        # alpha_x_prefit will be set in fit_cis from self.counts
+                        print(f"[INFO] Cis gene '{self.cis_gene}' not in modality '{modality_name}' - alpha_x will be fitted in fit_cis")
+                else:
+                    # Cis gene not in original counts at all
+                    self.alpha_y_prefit = full_alpha_y
+                    self.alpha_y_type = 'posterior'
+                    print(f"[INFO] Cis gene '{self.cis_gene}' not in original counts - alpha_x will be fitted in fit_cis")
+            else:
+                # No cis gene specified
+                self.alpha_y_prefit = posterior_samples["alpha_y"]
+                self.alpha_y_type = 'posterior'
+
             print(f"[INFO] Stored results in modality '{modality_name}' and at model level (primary modality)")
         else:
             print(f"[INFO] Stored results in modality '{modality_name}'")
@@ -1735,6 +1788,10 @@ class _BayesDREAMCore:
         self,
         technical_covariates: list[str] = None,
         sum_factor_col: str = 'sum_factor',
+        modality_name: str = None,
+        cis_feature: str = None,
+        manual_guide_effects: pd.DataFrame = None,
+        prior_strength: float = 1.0,
         lr: float = 1e-3,
         niters: int = 50000,
         nsamples: int = 1000,
@@ -1752,10 +1809,29 @@ class _BayesDREAMCore:
         """
         Fits the cis effects (model_x) for your gene_of_interest.
         This step can be repeated multiple times with different priors
-        or hyperparameters. 
+        or hyperparameters.
 
         Parameters
         ----------
+        technical_covariates : list, optional
+            Technical covariates for correction
+        sum_factor_col : str
+            Column name for size factors
+        modality_name : str, optional
+            DEPRECATED: fit_cis always uses the primary modality.
+            This parameter is ignored.
+        cis_feature : str, optional
+            Feature ID to use as cis proxy from the primary modality.
+            If None, uses self.cis_gene (must exist in primary modality).
+            For ATAC: region ID (e.g., 'chr9:132283881-132284881')
+            For genes: gene name
+        manual_guide_effects : pd.DataFrame, optional
+            Manual guide effect estimates as priors. DataFrame with columns:
+            - guide: guide identifier (matches meta['guide'])
+            - log2FC: expected log2 fold-change vs NTC
+        prior_strength : float
+            Weight for manual guide effects (default: 1.0)
+            0 = ignore manual effects, higher = trust more
         lr : float
             Learning rate for Adam
         niters : int
@@ -1766,6 +1842,8 @@ class _BayesDREAMCore:
             Exponential weight for smoothing the ELBO
         tolerance : float
             Convergence tolerance
+        independent_mu_sigma : bool
+            Whether to use independent mu/sigma per target type
         kwargs :
             Additional arguments controlling priors, etc.
         """
@@ -1773,6 +1851,57 @@ class _BayesDREAMCore:
 
         if self.cis_gene is None:
             raise ValueError("self.cis_gene must be set.")
+
+        # IMPORTANT: fit_cis ALWAYS uses the PRIMARY modality
+        # This ensures cis_gene is always in the modality being modeled
+        if modality_name is not None:
+            warnings.warn(
+                "modality_name parameter is deprecated. fit_cis always uses the primary modality. "
+                f"Ignoring modality_name='{modality_name}' and using primary_modality='{self.primary_modality}'",
+                DeprecationWarning
+            )
+
+        # Get primary modality
+        modality = self.get_modality(self.primary_modality)
+
+        # Determine which feature to use as cis proxy
+        if cis_feature is None:
+            # Try to find cis feature from cis_feature_map (set by add_atac_modality)
+            if hasattr(self, 'cis_feature_map') and self.primary_modality in self.cis_feature_map:
+                cis_feature = self.cis_feature_map[self.primary_modality]
+                print(f"[INFO] Using stored cis feature: {cis_feature}")
+            else:
+                # Use self.cis_gene (must exist in primary modality)
+                cis_feature = self.cis_gene
+                if cis_feature not in modality.feature_meta.index:
+                    raise ValueError(
+                        f"cis_gene '{self.cis_gene}' not found in primary modality '{self.primary_modality}'.\n"
+                        f"The cis_gene must exist in the primary modality.\n"
+                        f"Available features: {modality.feature_meta.index[:10].tolist()}...\n"
+                        f"Either:\n"
+                        f"  1. Specify cis_feature parameter with a valid feature ID from the primary modality, OR\n"
+                        f"  2. Use add_atac_modality(..., cis_region='...') to set the cis feature automatically"
+                    )
+                print(f"[INFO] Using cis_gene '{self.cis_gene}' from primary modality '{self.primary_modality}'")
+        else:
+            # User provided explicit cis_feature - validate it exists in primary modality
+            if cis_feature not in modality.feature_meta.index:
+                raise ValueError(
+                    f"cis_feature '{cis_feature}' not found in primary modality '{self.primary_modality}'.\n"
+                    f"Available features: {modality.feature_meta.index[:10].tolist()}..."
+                )
+            print(f"[INFO] Using cis_feature '{cis_feature}' from primary modality '{self.primary_modality}'")
+
+        # Get counts for this feature from the primary modality
+        if isinstance(modality.counts, pd.DataFrame):
+            cis_counts = modality.counts.loc[cis_feature].values
+        else:
+            # numpy array - need to find index
+            feature_idx = modality.feature_meta.index.get_loc(cis_feature)
+            if modality.cells_axis == 1:
+                cis_counts = modality.counts[feature_idx, :]
+            else:
+                cis_counts = modality.counts[:, feature_idx]
 
         # convert to gpu for fitting
         if self.alpha_x_prefit is not None and self.alpha_x_prefit.device != self.device:
@@ -1784,23 +1913,104 @@ class _BayesDREAMCore:
                 if self.alpha_x_prefit is not None:
                     warnings.warn("Overwriting alpha_x prefit, and refitting.")
                     self.alpha_x_prefit = None
-                            
+
             self.meta["technical_group_code"] = self.meta.groupby(technical_covariates).ngroup()
             C = self.meta['technical_group_code'].nunique()
             groups_tensor = torch.tensor(self.meta['technical_group_code'].values, dtype=torch.long, device=self.device)
+
+            # Check if alpha_x_prefit should exist but doesn't
+            if self.alpha_x_prefit is None:
+                warnings.warn(
+                    f"Technical covariates provided but alpha_x_prefit not set. "
+                    f"You should run fit_technical() on the primary modality ('{self.primary_modality}') first "
+                    f"to estimate technical effects for the cis gene. "
+                    f"Proceeding without technical correction for cis gene (alpha_x will be fitted fresh)."
+                )
+
         elif self.alpha_x_prefit is None:
             C = None
             groups_tensor = None
             warnings.warn("no alpha_x_prefit and no technical_covariates provided, assuming no confounding effect.")
         else:
+            # alpha_x_prefit exists but no new technical_covariates specified
+            # Use existing technical groups
             C = self.meta['technical_group_code'].nunique()
             groups_tensor = torch.tensor(self.meta['technical_group_code'].values, dtype=torch.long, device=self.device)
         
         N = self.meta.shape[0]
         G = self.meta['guide_code'].nunique()
-        
-        x_obs_tensor = torch.tensor(self.counts.loc[self.cis_gene].values, dtype=torch.float32, device=self.device)
+
+        # Use cis_counts from modality-specific lookup (or traditional self.counts)
+        x_obs_tensor = torch.tensor(cis_counts, dtype=torch.float32, device=self.device)
         guides_tensor = torch.tensor(self.meta['guide_code'].values, dtype=torch.long, device=self.device)
+
+        # ========================================================================
+        # MANUAL GUIDE EFFECTS INFRASTRUCTURE
+        # ========================================================================
+        # If user provides manual guide effects (log2FC estimates), prepare them
+        # as tensors that can be used as priors in the Pyro model.
+        manual_guide_log2fc_tensor = None
+        manual_guide_mask_tensor = None
+
+        if manual_guide_effects is not None:
+            # Validate format
+            required_cols = ['guide', 'log2FC']
+            missing_cols = set(required_cols) - set(manual_guide_effects.columns)
+            if missing_cols:
+                raise ValueError(f"manual_guide_effects must have columns {required_cols}, missing: {missing_cols}")
+
+            # Create mapping from guide name → log2FC
+            manual_dict = dict(zip(manual_guide_effects['guide'], manual_guide_effects['log2FC']))
+
+            # Map to guide_code indices
+            # self.meta has 'guide' (name) and 'guide_code' (integer)
+            guide_code_to_name = self.meta[['guide_code', 'guide']].drop_duplicates().set_index('guide_code')['guide'].to_dict()
+
+            # Create tensor of shape (G,) with log2FC for each guide_code
+            # Use NaN for guides without manual effects
+            manual_log2fc_list = []
+            manual_mask_list = []
+            for g in range(G):
+                guide_name = guide_code_to_name.get(g, None)
+                if guide_name in manual_dict:
+                    manual_log2fc_list.append(manual_dict[guide_name])
+                    manual_mask_list.append(1.0)  # This guide has a manual prior
+                else:
+                    manual_log2fc_list.append(0.0)  # Placeholder
+                    manual_mask_list.append(0.0)  # No prior for this guide
+
+            manual_guide_log2fc_tensor = torch.tensor(manual_log2fc_list, dtype=torch.float32, device=self.device)
+            manual_guide_mask_tensor = torch.tensor(manual_mask_list, dtype=torch.float32, device=self.device)
+
+            print(f"[INFO] Manual guide effects provided for {int(manual_guide_mask_tensor.sum())} / {G} guides")
+            print(f"[INFO] Prior strength: {prior_strength}")
+
+            # PSEUDOCODE: How these tensors would be used in _model_x:
+            # ------------------------------------------------------------------
+            # In _model_x, when sampling mu_x (guide-level mean log2 expression):
+            #
+            # for g in range(G):
+            #     if manual_guide_mask_tensor[g] == 1.0:
+            #         # This guide has a manual prior
+            #         # Sample from a Gaussian centered on the manual log2FC
+            #         # with width controlled by prior_strength
+            #         prior_mean = manual_guide_log2fc_tensor[g]
+            #         prior_sd = 1.0 / prior_strength  # Higher strength → narrower prior
+            #         mu_x[g] = pyro.sample(f"mu_x_{g}",
+            #                               dist.Normal(prior_mean, prior_sd))
+            #     else:
+            #         # No manual prior - use standard hierarchical prior
+            #         mu_x[g] = pyro.sample(f"mu_x_{g}",
+            #                               dist.Normal(mu, sigma))
+            #
+            # DECISIONS TO MAKE:
+            # 1. Should prior_sd = 1.0 / prior_strength, or some other function?
+            # 2. Should manual effects override hierarchical priors completely,
+            #    or combine them (e.g., weighted average)?
+            # 3. Should NTC guide always have log2FC=0 enforced, or learned?
+            # 4. How to handle cell-line-specific effects with manual priors?
+            # ------------------------------------------------------------------
+        # ========================================================================
         if independent_mu_sigma:
             if ('target' not in self.meta.columns):
                 raise ValueError("independent_mu_sigma is True, self.meta['target'] column not found.")
@@ -2855,7 +3065,7 @@ class _BayesDREAMCore:
                 if self.log2_x_true_type == "posterior" else self.log2_x_true
             )
             alpha_y_sample = (
-                alpha_y_prefit[samp]
+                alpha_y_prefit[samp] if samp < alpha_y_prefit.shape[0] else alpha_y_prefit.mean(dim=0)
                 if alpha_y_type == "posterior" else alpha_y_prefit
             ) if alpha_y_prefit is not None else None
 
@@ -3206,32 +3416,52 @@ class bayesDREAM(_BayesDREAMCore):
                 cells_axis=1
             )
 
-        # Validate primary modality exists
+        # Validate primary modality exists (or will be added later)
         if primary_modality not in self.modalities:
-            raise ValueError(f"primary_modality '{primary_modality}' not found in modalities. "
-                           f"Available: {list(self.modalities.keys())}")
+            if counts_for_base is not None:
+                # counts provided but primary_modality missing - this is an error
+                raise ValueError(f"primary_modality '{primary_modality}' not found in modalities. "
+                               f"Available: {list(self.modalities.keys())}")
+            else:
+                # No counts and no primary modality yet - will be added via add_*_modality()
+                print(f"[INFO] Primary modality '{primary_modality}' not yet present. "
+                      f"Add it via add_*_modality() before fitting.")
+                primary_counts = None  # Will be set when modality is added
 
         self.primary_modality = primary_modality
 
         # Get counts for base class initialization
         # Use original counts (with cis gene) if provided, otherwise get from primary modality
         if counts_for_base is None:
-            primary_counts = self.modalities[primary_modality].count_df
-            if primary_counts is None:
-                # Convert array to DataFrame
-                mod = self.modalities[primary_modality]
-                if mod.cells_axis == 1:
-                    primary_counts = pd.DataFrame(
-                        mod.counts,
-                        index=mod.feature_meta.index,
-                        columns=mod.cell_names if mod.cell_names else range(mod.dims['n_cells'])
-                    )
-                else:
-                    primary_counts = pd.DataFrame(
-                        mod.counts.T,
-                        index=mod.feature_meta.index,
-                        columns=mod.cell_names if mod.cell_names else range(mod.dims['n_cells'])
-                    )
+            if primary_modality in self.modalities:
+                primary_counts = self.modalities[primary_modality].count_df
+                if primary_counts is None:
+                    # Convert array to DataFrame
+                    mod = self.modalities[primary_modality]
+                    if mod.cells_axis == 1:
+                        primary_counts = pd.DataFrame(
+                            mod.counts,
+                            index=mod.feature_meta.index,
+                            columns=mod.cell_names if mod.cell_names else range(mod.dims['n_cells'])
+                        )
+                    else:
+                        primary_counts = pd.DataFrame(
+                            mod.counts.T,
+                            index=mod.feature_meta.index,
+                            columns=mod.cell_names if mod.cell_names else range(mod.dims['n_cells'])
+                        )
+            else:
+                # No counts and no primary modality - create placeholder
+                # Will be replaced when modality is added
+                print("[INFO] Creating placeholder counts - will be replaced when modality is added")
+                # Use meta['cell'] as columns to pass validation
+                # Use cis_gene as index if provided, otherwise use placeholder
+                placeholder_index = [cis_gene] if cis_gene is not None else ['_placeholder_']
+                primary_counts = pd.DataFrame(
+                    np.ones((1, len(meta))),  # Use 1s instead of 0s to avoid zero-count error
+                    index=placeholder_index,
+                    columns=meta['cell'].values
+                )
         else:
             # Use original counts (includes cis gene for cis modeling)
             primary_counts = counts_for_base
@@ -3733,6 +3963,150 @@ class bayesDREAM(_BayesDREAMCore):
         )
         self.add_modality(name, modality)
 
+    def add_atac_modality(
+        self,
+        atac_counts: Union[np.ndarray, pd.DataFrame],
+        region_meta: pd.DataFrame,
+        name: str = 'atac',
+        cis_region: Optional[str] = None
+    ):
+        """
+        Add ATAC-seq modality with genomic region annotations.
+
+        ATAC fragment counts are treated as negative binomial data (like gene expression).
+        Regions can be promoters, gene bodies, or distal elements (enhancers).
+
+        Parameters
+        ----------
+        atac_counts : array or DataFrame
+            Fragment counts per region per cell. Shape: (n_regions, n_cells)
+        region_meta : pd.DataFrame
+            Region metadata with required columns:
+            - region_id : str, unique region identifier
+            - region_type : str, one of ['promoter', 'gene_body', 'distal']
+            - chrom : str, chromosome
+            - start : int, start coordinate (0-based)
+            - end : int, end coordinate
+            - gene : str, associated gene (NA for distal regions)
+            Optional columns: gene_name, gene_id, strand, tss_distance
+        name : str, optional
+            Name for this ATAC modality (default: 'atac')
+        cis_region : str, optional
+            Region ID to use as cis gene proxy (e.g., 'chr9:132283881-132284881')
+            If provided, this region will be used in fit_cis() instead of gene expression
+
+        Examples
+        --------
+        >>> # Load ATAC data
+        >>> atac_counts = pd.read_csv('atac_counts.csv', index_col=0)
+        >>> region_meta = pd.read_csv('region_meta.csv')
+        >>>
+        >>> # Add ATAC modality
+        >>> model.add_atac_modality(
+        ...     atac_counts=atac_counts,
+        ...     region_meta=region_meta,
+        ...     cis_region='chr9:132283881-132284881'  # GFI1B promoter
+        ... )
+        >>>
+        >>> # Fit using ATAC
+        >>> model.fit_technical(modality_name='atac')
+        >>> model.fit_cis(modality_name='atac', cis_feature='chr9:132283881-132284881')
+        """
+        # Validate required columns
+        required_cols = ['region_id', 'region_type', 'chrom', 'start', 'end', 'gene']
+        missing_cols = set(required_cols) - set(region_meta.columns)
+        if missing_cols:
+            raise ValueError(
+                f"region_meta missing required columns: {missing_cols}\n"
+                f"Required: {required_cols}"
+            )
+
+        # Validate region_type values
+        valid_types = {'promoter', 'gene_body', 'distal'}
+        invalid_types = set(region_meta['region_type'].unique()) - valid_types
+        if invalid_types:
+            raise ValueError(
+                f"Invalid region_type values: {invalid_types}\n"
+                f"Must be one of: {valid_types}"
+            )
+
+        # Validate gene column: should be non-null for promoter/gene_body
+        for region_type in ['promoter', 'gene_body']:
+            type_mask = region_meta['region_type'] == region_type
+            if type_mask.any():
+                null_genes = region_meta[type_mask]['gene'].isnull().sum()
+                if null_genes > 0:
+                    raise ValueError(
+                        f"Found {null_genes} {region_type} regions with null gene annotations.\n"
+                        f"All {region_type} regions must have an associated gene."
+                    )
+
+        # Set region_id as index if not already
+        if 'region_id' in region_meta.columns and region_meta.index.name != 'region_id':
+            region_meta = region_meta.set_index('region_id')
+
+        # Store cis_region if provided
+        if cis_region is not None:
+            if cis_region not in region_meta.index:
+                raise ValueError(
+                    f"cis_region '{cis_region}' not found in region_meta.index.\n"
+                    f"Available regions: {region_meta.index[:5].tolist()}..."
+                )
+            # Store for later use in fit_cis
+            if not hasattr(self, 'cis_feature_map'):
+                self.cis_feature_map = {}
+            self.cis_feature_map[name] = cis_region
+            print(f"[INFO] Set cis region for '{name}' modality: {cis_region}")
+
+        # Convert to array if DataFrame
+        if isinstance(atac_counts, pd.DataFrame):
+            counts_array = atac_counts.values
+            counts_index = atac_counts.index
+            is_dataframe = True
+        else:
+            counts_array = np.asarray(atac_counts)
+            counts_index = None
+            is_dataframe = False
+
+        # Apply negbinom filtering (zero std)
+        feature_stds = counts_array.std(axis=1)
+        valid_features = feature_stds != 0
+        num_filtered = (~valid_features).sum()
+
+        if num_filtered > 0:
+            print(f"[INFO] Filtering {num_filtered} ATAC region(s) with zero std in '{name}' modality")
+            counts_array = counts_array[valid_features, :]
+            region_meta = region_meta.iloc[valid_features].copy()
+
+        if counts_array.shape[0] == 0:
+            raise ValueError(f"No ATAC regions left after filtering in '{name}' modality!")
+
+        # Convert back to DataFrame if input was DataFrame
+        if is_dataframe:
+            counts_final = pd.DataFrame(
+                counts_array,
+                index=region_meta.index,
+                columns=atac_counts.columns
+            )
+        else:
+            counts_final = counts_array
+
+        # Create modality
+        modality = Modality(
+            name=name,
+            counts=counts_final,
+            feature_meta=region_meta,
+            distribution='negbinom',  # ATAC uses negbinom like gene expression
+            cells_axis=1
+        )
+
+        self.add_modality(name, modality)
+        print(f"[INFO] Added ATAC modality '{name}' with {modality.dims['n_features']} regions")
+
+        # Print region type summary
+        region_summary = region_meta['region_type'].value_counts()
+        print(f"[INFO] Region types: {region_summary.to_dict()}")
+
     def get_modality(self, name: str) -> Modality:
         """Get a modality by name."""
         if name not in self.modalities:
@@ -3758,6 +4132,403 @@ class bayesDREAM(_BayesDREAMCore):
             }
             rows.append(row)
         return pd.DataFrame(rows)
+
+    ########################################################
+    # Save/Load fitted parameters
+    ########################################################
+
+    def save_technical_fit(self, output_dir: str = None, modalities: list = None,
+                          save_model_level: bool = True):
+        """
+        Save fitted technical parameters from fit_technical().
+
+        Parameters
+        ----------
+        output_dir : str, optional
+            Directory to save to. If None, uses self.output_dir.
+        modalities : list of str, optional
+            List of modality names to save. If None, saves all modalities.
+            Example: ['gene', 'atac']
+        save_model_level : bool, optional
+            If True, saves model-level alpha_x_prefit, alpha_y_prefit, and
+            posterior_samples_technical (default: True).
+
+        Returns
+        -------
+        dict
+            Paths to saved files
+
+        Notes
+        -----
+        Saves per-modality:
+        - alpha_y_prefit_{modality}.pt: Overdispersion parameters for each modality
+
+        Saves model-level (if save_model_level=True):
+        - alpha_x_prefit.pt: Cis gene overdispersion (if set)
+        - alpha_y_prefit.pt: Trans gene overdispersion
+        - posterior_samples_technical.pt: Full posterior samples
+        """
+        if output_dir is None:
+            output_dir = self.output_dir
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        saved_files = {}
+
+        # Determine which modalities to save
+        if modalities is None:
+            modalities_to_save = list(self.modalities.keys())
+        else:
+            # Validate requested modalities
+            invalid = set(modalities) - set(self.modalities.keys())
+            if invalid:
+                raise ValueError(f"Unknown modalities: {invalid}. Available: {list(self.modalities.keys())}")
+            modalities_to_save = modalities
+
+        # Save model-level parameters (backward compatibility)
+        if save_model_level:
+            if hasattr(self, 'alpha_x_prefit') and self.alpha_x_prefit is not None:
+                path = os.path.join(output_dir, 'alpha_x_prefit.pt')
+                torch.save(self.alpha_x_prefit, path)
+                saved_files['alpha_x_prefit'] = path
+                saved_files['alpha_x_type'] = self.alpha_x_type
+                print(f"[SAVE] alpha_x_prefit ({self.alpha_x_type}) → {path}")
+
+            if hasattr(self, 'alpha_y_prefit') and self.alpha_y_prefit is not None:
+                path = os.path.join(output_dir, 'alpha_y_prefit.pt')
+                torch.save(self.alpha_y_prefit, path)
+                saved_files['alpha_y_prefit'] = path
+                saved_files['alpha_y_type'] = self.alpha_y_type
+                print(f"[SAVE] alpha_y_prefit ({self.alpha_y_type}) → {path}")
+
+            if hasattr(self, 'posterior_samples_technical') and self.posterior_samples_technical is not None:
+                # Remove large observation arrays before saving
+                posterior_clean = {k: v for k, v in self.posterior_samples_technical.items()
+                                 if k not in ['y_obs_ntc', 'y_obs']}
+                path = os.path.join(output_dir, 'posterior_samples_technical.pt')
+                torch.save(posterior_clean, path)
+                saved_files['posterior_samples_technical'] = path
+                print(f"[SAVE] posterior_samples_technical → {path}")
+
+        # Save per-modality alpha_y_prefit
+        for mod_name in modalities_to_save:
+            mod = self.modalities[mod_name]
+            if hasattr(mod, 'alpha_y_prefit') and mod.alpha_y_prefit is not None:
+                path = os.path.join(output_dir, f'alpha_y_prefit_{mod_name}.pt')
+                torch.save(mod.alpha_y_prefit, path)
+                saved_files[f'alpha_y_prefit_{mod_name}'] = path
+                print(f"[SAVE] {mod_name}.alpha_y_prefit → {path}")
+
+        print(f"[SAVE] Technical fit saved to {output_dir}")
+        print(f"[SAVE] Modalities saved: {modalities_to_save}")
+        return saved_files
+
+    def load_technical_fit(self, input_dir: str = None, use_posterior: bool = True,
+                          modalities: list = None, load_model_level: bool = True):
+        """
+        Load fitted technical parameters.
+
+        Parameters
+        ----------
+        input_dir : str, optional
+            Directory to load from. If None, uses self.output_dir.
+        use_posterior : bool
+            If True, loads full posterior samples. If False, uses posterior mean as point estimates.
+        modalities : list of str, optional
+            List of modality names to load. If None, attempts to load all existing modalities.
+            Example: ['gene', 'atac']
+        load_model_level : bool, optional
+            If True, loads model-level alpha_x_prefit, alpha_y_prefit, and
+            posterior_samples_technical (default: True).
+
+        Returns
+        -------
+        dict
+            Loaded parameters
+        """
+        if input_dir is None:
+            input_dir = self.output_dir
+
+        loaded = {}
+
+        # Determine which modalities to load
+        if modalities is None:
+            modalities_to_load = list(self.modalities.keys())
+        else:
+            # Validate requested modalities
+            invalid = set(modalities) - set(self.modalities.keys())
+            if invalid:
+                raise ValueError(f"Unknown modalities: {invalid}. Available: {list(self.modalities.keys())}")
+            modalities_to_load = modalities
+
+        # Load model-level parameters
+        if load_model_level:
+            # Load alpha_x_prefit
+            alpha_x_path = os.path.join(input_dir, 'alpha_x_prefit.pt')
+            if os.path.exists(alpha_x_path):
+                alpha_x = torch.load(alpha_x_path)
+                if use_posterior:
+                    self.alpha_x_prefit = alpha_x
+                    self.alpha_x_type = 'posterior'
+                else:
+                    self.alpha_x_prefit = alpha_x.mean(dim=0)
+                    self.alpha_x_type = 'point'
+                loaded['alpha_x_prefit'] = self.alpha_x_prefit
+                print(f"[LOAD] alpha_x_prefit ({self.alpha_x_type}) ← {alpha_x_path}")
+
+            # Load alpha_y_prefit
+            alpha_y_path = os.path.join(input_dir, 'alpha_y_prefit.pt')
+            if os.path.exists(alpha_y_path):
+                alpha_y = torch.load(alpha_y_path)
+                if use_posterior:
+                    self.alpha_y_prefit = alpha_y
+                    self.alpha_y_type = 'posterior'
+                else:
+                    self.alpha_y_prefit = alpha_y.mean(dim=0)
+                    self.alpha_y_type = 'point'
+                loaded['alpha_y_prefit'] = self.alpha_y_prefit
+                print(f"[LOAD] alpha_y_prefit ({self.alpha_y_type}) ← {alpha_y_path}")
+
+            # Load posterior samples
+            posterior_path = os.path.join(input_dir, 'posterior_samples_technical.pt')
+            if os.path.exists(posterior_path):
+                self.posterior_samples_technical = torch.load(posterior_path)
+                loaded['posterior_samples_technical'] = self.posterior_samples_technical
+                print(f"[LOAD] posterior_samples_technical ← {posterior_path}")
+
+        # Load per-modality alpha_y_prefit
+        for mod_name in modalities_to_load:
+            mod_path = os.path.join(input_dir, f'alpha_y_prefit_{mod_name}.pt')
+            if os.path.exists(mod_path):
+                alpha_y_mod = torch.load(mod_path)
+                if use_posterior:
+                    self.modalities[mod_name].alpha_y_prefit = alpha_y_mod
+                else:
+                    self.modalities[mod_name].alpha_y_prefit = alpha_y_mod.mean(dim=0)
+                loaded[f'alpha_y_prefit_{mod_name}'] = self.modalities[mod_name].alpha_y_prefit
+                print(f"[LOAD] {mod_name}.alpha_y_prefit ← {mod_path}")
+
+        print(f"[LOAD] Technical fit loaded from {input_dir}")
+        print(f"[LOAD] Modalities loaded: {modalities_to_load}")
+        return loaded
+
+    def save_cis_fit(self, output_dir: str = None):
+        """
+        Save fitted cis parameters from fit_cis().
+
+        Saves:
+        - x_true: True cis gene expression (posterior samples or point estimate)
+        - x_true_type: Type ('posterior' or 'point')
+        - posterior_samples_cis: Full posterior samples
+
+        Parameters
+        ----------
+        output_dir : str, optional
+            Directory to save to. If None, uses self.output_dir.
+
+        Returns
+        -------
+        dict
+            Paths to saved files
+        """
+        if output_dir is None:
+            output_dir = self.output_dir
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        saved_files = {}
+
+        # Save x_true
+        if hasattr(self, 'x_true') and self.x_true is not None:
+            path = os.path.join(output_dir, 'x_true.pt')
+            torch.save(self.x_true, path)
+            saved_files['x_true'] = path
+            x_type = getattr(self, 'x_true_type', 'posterior')
+            saved_files['x_true_type'] = x_type
+            print(f"[SAVE] x_true ({x_type}) → {path}")
+
+        # Save posterior samples
+        if hasattr(self, 'posterior_samples_cis') and self.posterior_samples_cis is not None:
+            # Remove large observation arrays
+            posterior_clean = {k: v for k, v in self.posterior_samples_cis.items()
+                             if k not in ['x_obs', 'y_obs']}
+            path = os.path.join(output_dir, 'posterior_samples_cis.pt')
+            torch.save(posterior_clean, path)
+            saved_files['posterior_samples_cis'] = path
+            print(f"[SAVE] posterior_samples_cis → {path}")
+
+        print(f"[SAVE] Cis fit saved to {output_dir}")
+        return saved_files
+
+    def load_cis_fit(self, input_dir: str = None, use_posterior: bool = True):
+        """
+        Load fitted cis parameters.
+
+        Parameters
+        ----------
+        input_dir : str, optional
+            Directory to load from. If None, uses self.output_dir.
+        use_posterior : bool
+            If True, loads full posterior samples. If False, uses posterior mean as point estimate.
+
+        Returns
+        -------
+        dict
+            Loaded parameters
+        """
+        if input_dir is None:
+            input_dir = self.output_dir
+
+        loaded = {}
+
+        # Load x_true
+        x_true_path = os.path.join(input_dir, 'x_true.pt')
+        if os.path.exists(x_true_path):
+            x_true = torch.load(x_true_path)
+            if use_posterior:
+                self.x_true = x_true
+                self.x_true_type = 'posterior'
+            else:
+                self.x_true = x_true.mean(dim=0)
+                self.x_true_type = 'point'
+            loaded['x_true'] = self.x_true
+            print(f"[LOAD] x_true ({self.x_true_type}) ← {x_true_path}")
+
+        # Load posterior samples
+        posterior_path = os.path.join(input_dir, 'posterior_samples_cis.pt')
+        if os.path.exists(posterior_path):
+            self.posterior_samples_cis = torch.load(posterior_path)
+            loaded['posterior_samples_cis'] = self.posterior_samples_cis
+            print(f"[LOAD] posterior_samples_cis ← {posterior_path}")
+
+        print(f"[LOAD] Cis fit loaded from {input_dir}")
+        return loaded
+
+    def save_trans_fit(self, output_dir: str = None, modalities: list = None,
+                      save_model_level: bool = True):
+        """
+        Save fitted trans parameters from fit_trans().
+
+        Parameters
+        ----------
+        output_dir : str, optional
+            Directory to save to. If None, uses self.output_dir.
+        modalities : list of str, optional
+            List of modality names to save. If None, saves all modalities.
+            Example: ['gene', 'atac']
+        save_model_level : bool, optional
+            If True, saves model-level posterior_samples_trans (default: True).
+
+        Returns
+        -------
+        dict
+            Paths to saved files
+
+        Notes
+        -----
+        Saves per-modality:
+        - posterior_samples_trans_{modality}.pt: Full posterior samples for each modality
+
+        Saves model-level (if save_model_level=True):
+        - posterior_samples_trans.pt: Model-level posterior samples
+        """
+        if output_dir is None:
+            output_dir = self.output_dir
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        saved_files = {}
+
+        # Determine which modalities to save
+        if modalities is None:
+            modalities_to_save = list(self.modalities.keys())
+        else:
+            # Validate requested modalities
+            invalid = set(modalities) - set(self.modalities.keys())
+            if invalid:
+                raise ValueError(f"Unknown modalities: {invalid}. Available: {list(self.modalities.keys())}")
+            modalities_to_save = modalities
+
+        # Save model-level posterior samples
+        if save_model_level:
+            if hasattr(self, 'posterior_samples_trans') and self.posterior_samples_trans is not None:
+                # Remove large observation arrays
+                posterior_clean = {k: v for k, v in self.posterior_samples_trans.items()
+                                 if k not in ['y_obs', 'x_obs']}
+                path = os.path.join(output_dir, 'posterior_samples_trans.pt')
+                torch.save(posterior_clean, path)
+                saved_files['posterior_samples_trans'] = path
+                print(f"[SAVE] posterior_samples_trans → {path}")
+
+        # Save per-modality posterior samples
+        for mod_name in modalities_to_save:
+            mod = self.modalities[mod_name]
+            if hasattr(mod, 'posterior_samples_trans') and mod.posterior_samples_trans is not None:
+                posterior_clean = {k: v for k, v in mod.posterior_samples_trans.items()
+                                 if k not in ['y_obs', 'x_obs']}
+                path = os.path.join(output_dir, f'posterior_samples_trans_{mod_name}.pt')
+                torch.save(posterior_clean, path)
+                saved_files[f'posterior_samples_trans_{mod_name}'] = path
+                print(f"[SAVE] {mod_name}.posterior_samples_trans → {path}")
+
+        print(f"[SAVE] Trans fit saved to {output_dir}")
+        print(f"[SAVE] Modalities saved: {modalities_to_save}")
+        return saved_files
+
+    def load_trans_fit(self, input_dir: str = None, modalities: list = None,
+                      load_model_level: bool = True):
+        """
+        Load fitted trans parameters.
+
+        Parameters
+        ----------
+        input_dir : str, optional
+            Directory to load from. If None, uses self.output_dir.
+        modalities : list of str, optional
+            List of modality names to load. If None, attempts to load all existing modalities.
+            Example: ['gene', 'atac']
+        load_model_level : bool, optional
+            If True, loads model-level posterior_samples_trans (default: True).
+
+        Returns
+        -------
+        dict
+            Loaded parameters
+        """
+        if input_dir is None:
+            input_dir = self.output_dir
+
+        loaded = {}
+
+        # Determine which modalities to load
+        if modalities is None:
+            modalities_to_load = list(self.modalities.keys())
+        else:
+            # Validate requested modalities
+            invalid = set(modalities) - set(self.modalities.keys())
+            if invalid:
+                raise ValueError(f"Unknown modalities: {invalid}. Available: {list(self.modalities.keys())}")
+            modalities_to_load = modalities
+
+        # Load model-level posterior samples
+        if load_model_level:
+            posterior_path = os.path.join(input_dir, 'posterior_samples_trans.pt')
+            if os.path.exists(posterior_path):
+                self.posterior_samples_trans = torch.load(posterior_path)
+                loaded['posterior_samples_trans'] = self.posterior_samples_trans
+                print(f"[LOAD] posterior_samples_trans ← {posterior_path}")
+
+        # Load per-modality posterior samples
+        for mod_name in modalities_to_load:
+            mod_path = os.path.join(input_dir, f'posterior_samples_trans_{mod_name}.pt')
+            if os.path.exists(mod_path):
+                self.modalities[mod_name].posterior_samples_trans = torch.load(mod_path)
+                loaded[f'posterior_samples_trans_{mod_name}'] = self.modalities[mod_name].posterior_samples_trans
+                print(f"[LOAD] {mod_name}.posterior_samples_trans ← {mod_path}")
+
+        print(f"[LOAD] Trans fit loaded from {input_dir}")
+        print(f"[LOAD] Modalities loaded: {modalities_to_load}")
+        return loaded
 
     def __repr__(self) -> str:
         mod_list = ', '.join(self.modalities.keys())

@@ -21,6 +21,7 @@ Supports multiple molecular modalities including genes, transcripts, splicing, a
 - 🔄 **Multiple dose-response functions** (Hill equations, polynomials)
 - 🎯 **Guide-level inference** with technical variation modeling
 - 🔀 **Permutation testing** for statistical significance
+- 💾 **Save/load pipeline stages** with modality-specific control
 - 🚀 **GPU support** via PyTorch
 
 ## Installation
@@ -60,9 +61,15 @@ model = bayesDREAM(
 )
 
 # Run 3-step pipeline
-model.fit_technical(covariates=['cell_line'], sum_factor_col='sum_factor')
+model.set_technical_groups(['cell_line'])
+model.fit_technical(sum_factor_col='sum_factor')
 model.fit_cis(sum_factor_col='sum_factor')
 model.fit_trans(sum_factor_col='sum_factor_adj', function_type='additive_hill')
+
+# Save results
+model.save_technical_fit()
+model.save_cis_fit()
+model.save_trans_fit()
 ```
 
 ### Multi-Modal Analysis
@@ -100,13 +107,43 @@ model.fit_trans(sum_factor_col='sum_factor_adj', function_type='additive_hill')
 donor_mod = model.get_modality('splicing_donor')
 ```
 
+### Staged Pipeline with Save/Load
+
+```python
+# Stage 1: Technical fit
+model.set_technical_groups(['cell_line'])
+model.fit_technical(sum_factor_col='sum_factor')
+model.save_technical_fit()
+
+# Stage 2: Cis fit (in new session)
+model2 = bayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B')
+model2.load_technical_fit()
+model2.fit_cis(sum_factor_col='sum_factor')
+model2.save_cis_fit()
+
+# Stage 3: Trans fit (in new session)
+model3 = bayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B')
+model3.load_technical_fit()
+model3.load_cis_fit()
+model3.fit_trans(sum_factor_col='sum_factor_adj')
+model3.save_trans_fit()
+
+# Selective modality saving
+model.save_technical_fit(modalities=['gene', 'atac'], save_model_level=True)
+model.load_technical_fit(modalities=['gene'])
+```
+
+See **[docs/SAVE_LOAD_GUIDE.md](docs/SAVE_LOAD_GUIDE.md)** for complete save/load documentation.
+
+
 ## Documentation
 
 ### User Guides
 - **[docs/QUICKSTART_MULTIMODAL.md](docs/QUICKSTART_MULTIMODAL.md)** - Quick reference guide
+- **[docs/SAVE_LOAD_GUIDE.md](docs/SAVE_LOAD_GUIDE.md)** - Save/load pipeline stages with modality-specific control
 - **[docs/API_REFERENCE.md](docs/API_REFERENCE.md)** - Complete API reference with all functions
 - **[docs/DATA_ACCESS.md](docs/DATA_ACCESS.md)** - Guide to accessing and working with data
-- **[examples/multimodal_example.py](examples/multimodal_example.py)** - Complete examples
+- **[examples/](examples/)** - Example scripts for staged pipeline execution
 
 ### Technical Documentation
 - **[CLAUDE.md](CLAUDE.md)** - Complete architecture documentation for Claude Code
