@@ -122,11 +122,9 @@ To do:
 
 ### Technical Debt
 
-1. The base `bayesDREAM` class in `model.py` is large (~2250 lines). Consider refactoring into smaller modules.
+1. The `bayesDREAM` class in `model.py` is large (~3100 lines). Consider refactoring into smaller modules.
 
 2. Some parameter names are inconsistent (e.g., `sum_factor_col` vs `sum_factor`). A breaking change to standardize would be beneficial.
-
-3. The relationship between `MultiModalBayesDREAM` and base `bayesDREAM` could be cleaner - currently uses inheritance which creates some complexity.
 
 ## Getting Help
 

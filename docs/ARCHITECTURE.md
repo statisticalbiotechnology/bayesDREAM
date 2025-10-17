@@ -297,8 +297,7 @@ mvnormal                  3D: (F, C, D)          SpliZVD
 ## Distribution-Flexible Fitting (Implemented)
 
 ```
-Current (v0.2.0+):
-  Both fit_technical() and fit_trans() support all distributions:
+Both fit_technical() and fit_trans() support all distributions:
 
 ┌─────────────────────────────────────────────────────────────────┐
 │  # Gene counts (negbinom)                                        │
