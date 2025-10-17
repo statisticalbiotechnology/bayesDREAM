@@ -36,8 +36,12 @@ bayesDREAM_forClaude/
 The main class in `bayesDREAM/model.py` implements the three-step modeling pipeline:
 
 **Initialization:**
-- Takes metadata DataFrame (`meta`) with columns: `L_cell_barcode`, `guide`, `cell_line`, `target`, etc.
+- Takes cell metadata DataFrame (`meta`) with columns: `cell`, `guide`, `cell_line`, `target`, `sum_factor`, etc.
 - Takes counts DataFrame (`counts`) with genes as rows, cell barcodes as columns
+- Optionally takes gene metadata DataFrame (`gene_meta`) with gene annotations
+  - Recommended columns: `gene`, `gene_name`, `gene_id`
+  - If not provided, minimal metadata is created from counts.index
+  - Flexible identifier support: uses 'gene', 'gene_name', 'gene_id', or index
 - Creates guide-level metadata by grouping cells by guide and specified covariates
 - Supports both CPU and CUDA devices
 
@@ -154,6 +158,7 @@ from bayesDREAM import MultiModalBayesDREAM
 model = MultiModalBayesDREAM(
     meta=cell_metadata,
     counts=gene_counts,              # Primary modality (genes)
+    gene_meta=gene_metadata,         # Optional: gene annotations
     cis_gene='GFI1B',
     primary_modality='gene',         # Which modality drives cis/trans effects
     output_dir='./output',
@@ -297,6 +302,7 @@ sj_meta = pd.read_csv('SJ_meta.csv')
 model = MultiModalBayesDREAM(
     meta=meta,
     counts=gene_counts,
+    gene_meta=gene_meta,  # Optional: provide gene annotations
     cis_gene='GFI1B',
     output_dir='./output',
     label='multimodal_run'

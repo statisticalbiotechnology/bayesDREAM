@@ -53,6 +53,7 @@ gene_counts = pd.read_csv('gene_counts.csv', index_col=0)
 model = MultiModalBayesDREAM(
     meta=meta,
     counts=gene_counts,
+    gene_meta=gene_meta,  # Optional: gene annotations (gene, gene_name, gene_id)
     cis_gene='GFI1B',
     output_dir='./output',
     label='my_run'
@@ -69,8 +70,13 @@ model.fit_trans(sum_factor_col='sum_factor_adj', function_type='additive_hill')
 ```python
 from bayesDREAM import MultiModalBayesDREAM
 
-# Initialize with genes
-model = MultiModalBayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B')
+# Initialize with genes (gene_meta optional but recommended)
+model = MultiModalBayesDREAM(
+    meta=meta,
+    counts=gene_counts,
+    gene_meta=gene_meta,  # Optional: gene, gene_name, gene_id
+    cis_gene='GFI1B'
+)
 
 # Add splicing modalities
 model.add_splicing_modality(
@@ -117,6 +123,12 @@ donor_mod = model.get_modality('splicing_donor')
 - Genes: rows = genes, columns = cells
 - Splice junctions: rows = junctions, columns = cells
 - Transcripts: rows = transcripts, columns = cells
+
+### Gene Metadata (Optional but Recommended)
+- Rows correspond to genes in counts matrix
+- Recommended columns: `gene`, `gene_name`, `gene_id`
+- Can use index as gene identifier if named
+- Enables gene-level annotations for downstream analysis
 
 See [docs/QUICKSTART_MULTIMODAL.md](docs/QUICKSTART_MULTIMODAL.md) for detailed format specifications.
 

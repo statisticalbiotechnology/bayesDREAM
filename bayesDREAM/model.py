@@ -62,6 +62,7 @@ class bayesDREAM:
         self,
         meta: pd.DataFrame,
         counts: pd.DataFrame,
+        gene_meta: pd.DataFrame = None,
         cis_gene: str = None,
         guide_covariates: list[str] = ["cell_line"],
         guide_covariates_ntc: list[str] = None,
@@ -73,19 +74,23 @@ class bayesDREAM:
     ):
         """
         Initialize the model with the metadata and count matrices.
-        
+
         Parameters
         ----------
         meta : pd.DataFrame
-            Metadata DataFrame (includes columns: L_cell_barcode, guide, cell_line, etc.)
+            Cell metadata DataFrame (includes columns: cell, guide, target, cell_line, sum_factor, etc.)
         counts : pd.DataFrame
             Counts DataFrame (genes as rows, cell barcodes as columns)
+        gene_meta : pd.DataFrame, optional
+            Gene metadata DataFrame with genes as rows. Required to have at least one identifier column.
+            Recommended columns: 'gene' (or use index), 'gene_name', 'gene_id'
+            If not provided, will create minimal metadata from counts.index
+        cis_gene : str
+            The 'X' gene for cis modeling
         guide_covariates : list of str
             List of columns used to construct guide_used for non-NTC guides.
         guide_covariates_ntc : list of str or None
             List of columns used to construct guide_used for NTC guides.
-        cis_gene : str
-            The 'X' gene for cis modeling
         output_dir : str
             Where to save results
         label : str
@@ -111,10 +116,84 @@ class bayesDREAM:
         os.makedirs(self.output_dir, exist_ok=True)
         self.label = label
 
+        # Handle gene metadata
+        if gene_meta is None:
+            # Create minimal gene metadata from counts index
+            print("[INFO] No gene_meta provided - creating minimal metadata from counts.index")
+            self.gene_meta = pd.DataFrame({
+                'gene': counts.index.tolist()
+            }, index=counts.index)
+        else:
+            # Validate and process provided gene_meta
+            gene_meta = gene_meta.copy()
+
+            # Check that gene_meta index or has a gene identifier column
+            has_gene_col = 'gene' in gene_meta.columns
+            has_gene_name = 'gene_name' in gene_meta.columns
+            has_gene_id = 'gene_id' in gene_meta.columns
+
+            if not has_gene_col and gene_meta.index.name is None and not has_gene_name and not has_gene_id:
+                raise ValueError(
+                    "gene_meta must have at least one gene identifier: "
+                    "'gene' column, named index, 'gene_name' column, or 'gene_id' column"
+                )
+
+            # Ensure we have a 'gene' column for internal use
+            if not has_gene_col:
+                if gene_meta.index.name is not None:
+                    gene_meta['gene'] = gene_meta.index
+                    print(f"[INFO] Using gene_meta index ('{gene_meta.index.name}') as 'gene' column")
+                elif has_gene_name:
+                    gene_meta['gene'] = gene_meta['gene_name']
+                    print("[INFO] Using 'gene_name' column as 'gene' identifier")
+                elif has_gene_id:
+                    gene_meta['gene'] = gene_meta['gene_id']
+                    print("[INFO] Using 'gene_id' column as 'gene' identifier")
+
+            # Set index to match counts if needed
+            if not gene_meta.index.equals(counts.index):
+                # Try to match by gene identifiers
+                matched_genes = []
+                unmatched_counts = []
+
+                for gene in counts.index:
+                    # Try to find this gene in gene_meta by any identifier
+                    found = False
+                    for col in ['gene', 'gene_name', 'gene_id']:
+                        if col in gene_meta.columns:
+                            if gene in gene_meta[col].values:
+                                matched_genes.append(gene_meta[gene_meta[col] == gene].index[0])
+                                found = True
+                                break
+
+                    if not found:
+                        unmatched_counts.append(gene)
+
+                if unmatched_counts:
+                    warnings.warn(
+                        f"[WARNING] {len(unmatched_counts)} gene(s) in counts not found in gene_meta. "
+                        f"These genes will have minimal metadata. First few: {unmatched_counts[:5]}",
+                        UserWarning
+                    )
+                    # Add missing genes with minimal metadata
+                    missing_meta = pd.DataFrame({
+                        'gene': unmatched_counts
+                    }, index=unmatched_counts)
+                    gene_meta = pd.concat([gene_meta, missing_meta])
+
+                # Reindex to match counts
+                gene_meta = gene_meta.loc[counts.index] if set(counts.index).issubset(gene_meta.index) else gene_meta
+
+            self.gene_meta = gene_meta
+
+            # Print summary
+            meta_cols = [c for c in ['gene', 'gene_name', 'gene_id'] if c in self.gene_meta.columns]
+            print(f"[INFO] Gene metadata loaded with {len(self.gene_meta)} genes and columns: {meta_cols}")
+
         # Ensure guide_covariates and guide_covariates_ntc are always lists
         if guide_covariates is None:
             guide_covariates = []
-        
+
         if guide_covariates_ntc is None:
             guide_covariates_ntc = []
 
@@ -148,18 +227,21 @@ class bayesDREAM:
         gene_sums = pd.Series(self.counts.values.sum(axis=1), index=self.counts.index)
         detected_mask = gene_sums > 0
         num_removed = (~detected_mask).sum()
-        
+
         # Raise error if cis gene is undetected
         if self.cis_gene is not None:
             if not detected_mask.get(self.cis_gene, False):
                 raise ValueError(f"[ERROR] The cis gene '{self.cis_gene}' has zero counts after subsetting!")
-        
+
         # Subset counts to detected genes only
         self.counts = self.counts.loc[detected_mask]
-        
+
+        # Subset gene_meta to match counts (keep only detected genes)
+        self.gene_meta = self.gene_meta.loc[self.counts.index]
+
         # Set trans genes to all detected genes except cis
         self.trans_genes = [g for g in self.counts.index if g != self.cis_gene]
-        
+
         if num_removed > 0:
             warnings.warn(
                 f"[WARNING] {num_removed} gene(s) had zero counts after subsetting and were removed from the counts matrix.",

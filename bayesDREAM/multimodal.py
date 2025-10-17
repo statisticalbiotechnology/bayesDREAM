@@ -39,6 +39,7 @@ class MultiModalBayesDREAM(bayesDREAM):
         self,
         meta: pd.DataFrame,
         counts: pd.DataFrame = None,
+        gene_meta: pd.DataFrame = None,
         modalities: Dict[str, Modality] = None,
         cis_gene: str = None,
         primary_modality: str = 'gene',
@@ -60,6 +61,9 @@ class MultiModalBayesDREAM(bayesDREAM):
         counts : pd.DataFrame, optional
             Gene counts (genes × cells). If provided, becomes 'gene' modality.
             Either counts or modalities (with 'gene' key) must be provided.
+        gene_meta : pd.DataFrame, optional
+            Gene metadata DataFrame. Recommended columns: 'gene', 'gene_name', 'gene_id'.
+            If not provided, minimal metadata will be created from counts.index.
         modalities : Dict[str, Modality], optional
             Pre-constructed modalities. If 'gene' not present and counts is provided,
             a gene modality will be created from counts.
@@ -169,6 +173,7 @@ class MultiModalBayesDREAM(bayesDREAM):
         super().__init__(
             meta=meta,
             counts=primary_counts,
+            gene_meta=gene_meta,
             cis_gene=cis_gene,
             guide_covariates=guide_covariates,
             guide_covariates_ntc=guide_covariates_ntc,

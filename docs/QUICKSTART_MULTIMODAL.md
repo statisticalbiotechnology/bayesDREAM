@@ -23,11 +23,13 @@ import pandas as pd
 # Load data
 meta = pd.read_csv('meta.csv')
 gene_counts = pd.read_csv('gene_counts.csv', index_col=0)
+gene_meta = pd.read_csv('gene_meta.csv')  # Optional: gene annotations
 
 # Create model (exactly like original bayesDREAM)
 model = MultiModalBayesDREAM(
     meta=meta,
     counts=gene_counts,
+    gene_meta=gene_meta,  # Optional: gene, gene_name, gene_id
     cis_gene='GFI1B',
     output_dir='./output',
     label='my_run'
@@ -55,6 +57,7 @@ sj_meta = pd.read_csv('SJ_meta.csv')
 model = MultiModalBayesDREAM(
     meta=meta,
     counts=gene_counts,
+    gene_meta=gene_meta,  # Optional: provide gene annotations
     cis_gene='GFI1B',
     output_dir='./output',
     label='with_splicing'
@@ -193,6 +196,16 @@ Optional columns:
 - Rows: Genes
 - Columns: Cell barcodes (matching `meta.cell`)
 - Values: Raw counts (integers)
+
+### Gene Metadata (`gene_meta.csv`) - Optional but Recommended
+- Rows: Genes (matching `gene_counts` rows)
+- Recommended columns:
+  - `gene`: Primary gene identifier
+  - `gene_name`: Gene symbol (e.g., "GFI1B")
+  - `gene_id`: Ensembl gene ID (e.g., "ENSG00000168243")
+- Can use index as gene identifier if named
+- If not provided, minimal metadata will be created from counts.index
+- Enables gene-level annotations for downstream analysis
 
 ### Splice Junction Metadata (`SJ_meta.csv`)
 Required columns:

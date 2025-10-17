@@ -22,7 +22,8 @@ The main class for multi-modal Bayesian modeling of CRISPR perturbation effects.
 MultiModalBayesDREAM(
     meta,
     counts,
-    cis_gene,
+    gene_meta=None,
+    cis_gene=None,
     primary_modality='gene',
     output_dir=None,
     label=None,
@@ -38,6 +39,11 @@ MultiModalBayesDREAM(
   - `sum_factor`: Normalization factor per cell
   - `cell_line`: Cell line identifier
 - `counts` (pd.DataFrame): Count matrix with features as rows, cells as columns
+- `gene_meta` (pd.DataFrame, optional): Gene metadata DataFrame
+  - Recommended columns: `gene`, `gene_name`, `gene_id`
+  - Can use index as gene identifier if named
+  - If not provided, minimal metadata will be created from counts.index
+  - Enables gene-level annotations for downstream analysis
 - `cis_gene` (str): Name of the gene to model cis effects for
 - `primary_modality` (str, optional): Name for primary modality. Default: `'gene'`
 - `output_dir` (str, optional): Directory for saving results
