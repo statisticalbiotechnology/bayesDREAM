@@ -87,7 +87,7 @@ def test_atac_with_gene_expression():
 
     # Verify modality was created
     modalities_df = model.list_modalities()
-    assert 'atac' in modalities_df['modality'].values
+    assert 'atac' in modalities_df['name'].values
     atac_mod = model.get_modality('atac')
     assert atac_mod.distribution == 'negbinom'
     assert atac_mod.dims['n_features'] == n_regions
@@ -212,10 +212,10 @@ def test_atac_only_initialization():
 
     # Verify setup
     modalities_df = model.list_modalities()
-    assert 'atac' in modalities_df['modality'].values
+    assert 'atac' in modalities_df['name'].values
     assert model.primary_modality == 'atac'
 
-    print(f"✓ Modalities: {list(modalities_df['modality'].values)}")
+    print(f"✓ Modalities: {list(modalities_df['name'].values)}")
     print(f"✓ Primary modality: {model.primary_modality}")
 
     print("\n✓ TEST 3 PASSED\n")
