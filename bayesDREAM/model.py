@@ -239,28 +239,24 @@ class bayesDREAM(
         )
 
         # Subset all modalities to match filtered cells from base class
-        # Use cells from cis modality if it exists, otherwise use meta cells
-        if 'cis' in self.modalities:
-            valid_cells = self.modalities['cis'].cell_names
-            if valid_cells is None:
-                # Cis modality doesn't have cell names stored, use meta
-                valid_cells = self.meta['cell'].tolist()
-            print(f"[INFO] Subsetting modalities to {len(valid_cells)} cells from 'cis' modality")
-        else:
-            valid_cells = self.meta['cell'].tolist()
-            print(f"[INFO] Subsetting modalities to {len(valid_cells)} cells from meta")
+        # Base class (super().__init__) has filtered self.meta to valid cells
+        valid_cells = self.meta['cell'].tolist()
+        print(f"[INFO] Subsetting modalities to {len(valid_cells)} cells from filtered meta")
 
         for mod_name in list(self.modalities.keys()):
-            if mod_name == 'cis':
-                # Skip cis modality - it defines the cells
-                continue
-            if self.modalities[mod_name].cell_names is not None:
-                # Find indices of valid cells
-                cell_indices = [i for i, c in enumerate(self.modalities[mod_name].cell_names)
+            mod = self.modalities[mod_name]
+            if mod.cell_names is not None:
+                # Find indices of valid cells in this modality
+                cell_indices = [i for i, c in enumerate(mod.cell_names)
                               if c in valid_cells]
-                if len(cell_indices) < len(self.modalities[mod_name].cell_names):
-                    print(f"[INFO] Subsetting modality '{mod_name}' from {len(self.modalities[mod_name].cell_names)} to {len(cell_indices)} cells")
-                self.modalities[mod_name] = self.modalities[mod_name].get_cell_subset(cell_indices)
+                if len(cell_indices) < len(mod.cell_names):
+                    print(f"[INFO] Subsetting modality '{mod_name}' from {len(mod.cell_names)} to {len(cell_indices)} cells")
+                    self.modalities[mod_name] = mod.get_cell_subset(cell_indices)
+                elif len(cell_indices) == len(mod.cell_names):
+                    print(f"[INFO] Modality '{mod_name}' already has {len(cell_indices)} cells - no subsetting needed")
+                else:
+                    # This shouldn't happen - means we have fewer cells in modality than in meta
+                    print(f"[WARNING] Modality '{mod_name}' has {len(mod.cell_names)} cells but filtered meta has {len(valid_cells)}")
 
         print(f"[INIT] bayesDREAM: {len(self.modalities)} modalities loaded")
         for name, mod in self.modalities.items():
