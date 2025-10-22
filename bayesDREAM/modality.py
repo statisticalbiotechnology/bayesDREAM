@@ -427,6 +427,9 @@ class Modality:
             self.denominator = self.counts + self.skip
             self.exon_aggregate_method = method
 
+            # Update dims to reflect new number of features
+            self.dims = self._compute_dims()
+
             # Report recovery stats
             n_before = inc1_unfilt.shape[0]
             n_after = len(valid_events)
@@ -451,6 +454,9 @@ class Modality:
             self.counts = inclusion
             self.denominator = total
             self.exon_aggregate_method = method
+
+            # Update dims (though feature count shouldn't change in this branch)
+            self.dims = self._compute_dims()
 
             print(f"[INFO] Recomputed exon skipping inclusion with method='{method}' (no feature recovery)")
 
