@@ -7,10 +7,35 @@ A Bayesian framework for modeling perturbation effects across multiple molecular
 bayesDREAM models how perturbations propagate through molecular layers using a three-step Bayesian framework:
 
 1. **Technical fit**: Model technical variation in non-targeting controls
-2. **Cis fit**: Model direct effects on targeted genes
+2. **Cis fit**: Model direct effects on targeted features (genes, ATAC regions, etc.)
 3. **Trans fit**: Model downstream effects as dose-response functions
 
-Supports multiple molecular modalities including genes, transcripts, splicing, and custom measurements.
+Supports multiple molecular modalities including genes, transcripts, splicing, ATAC-seq, and custom measurements.
+
+### Key Design: Separate 'cis' Modality
+
+bayesDREAM uses a dedicated **'cis' modality** for modeling direct perturbation effects:
+
+**Initialization Behavior:**
+- The 'cis' modality is extracted during `bayesDREAM()` initialization from your primary modality
+- The primary modality contains only **trans** features (cis feature excluded)
+- When you add additional modalities later (e.g., `add_atac_modality()`), NO cis extraction occurs
+- All modalities are automatically subset to cells present in the 'cis' modality
+
+**Fitting Behavior:**
+- `fit_technical()` on primary modality: Includes BOTH cis and trans features for cell-line effect estimation
+- `fit_cis()`: Always uses the 'cis' modality - consistent interface regardless of data type
+- `fit_trans()`: Uses the primary modality (trans features only)
+
+**Example**: If you specify `cis_gene='GFI1B'`, you get:
+- **'cis' modality**: Just GFI1B (for cis modeling)
+- **'gene' modality**: All other genes (for trans modeling)
+- **fit_technical**: Fits all 92 genes (including GFI1B), extracts alpha_x for GFI1B, stores alpha_y for remaining 91 genes
+
+**Parameters for Specifying Cis Feature:**
+- `cis_gene`: For gene modality (e.g., `cis_gene='GFI1B'`)
+- `cis_feature`: Generic parameter for any modality type (e.g., `cis_feature='chr9:132283881-132284881'` for ATAC)
+- Note: `cis_gene` is an alias for `cis_feature` when `primary_modality='gene'`
 
 ## Features
 

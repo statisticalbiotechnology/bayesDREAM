@@ -6,9 +6,10 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │                      User Interface Layer                        │
 ├─────────────────────────────────────────────────────────────────┤
-│  bayesDREAM                                           │
+│  bayesDREAM (model.py)                                           │
 │  - add_transcript_modality()                                    │
 │  - add_splicing_modality()                                      │
+│  - add_atac_modality()                                          │
 │  - add_custom_modality()                                        │
 │  - get_modality() / list_modalities()                          │
 └────────────┬────────────────────────────────────┬───────────────┘
@@ -16,15 +17,116 @@
              │ inherits                           │ contains
              ↓                                    ↓
 ┌────────────────────────┐          ┌────────────────────────────┐
-│  bayesDREAM (base)     │          │  modalities: Dict[str,     │
-│                        │          │                 Modality]  │
-│  - fit_technical()     │          │                            │
-│  - fit_cis()           │          │  Primary: 'gene'           │
-│  - fit_trans()         │          │  Others: 'transcript',     │
-│  - permute_genes()     │          │          'splicing_*',     │
-│  - refit_sumfactor()   │          │          custom, etc.      │
-└────────────────────────┘          └────────────────────────────┘
+│  _BayesDREAMCore       │          │  modalities: Dict[str,     │
+│  (core.py)             │          │                 Modality]  │
+│                        │          │                            │
+│  - set_technical_      │          │  Required: 'cis'           │
+│    groups()            │          │  Primary: 'gene' (default) │
+│  - fit_technical()     │          │  Others: 'transcript',     │
+│  - fit_cis()           │          │          'splicing_*',     │
+│  - fit_trans()         │          │          'atac',           │
+│  - save/load methods   │          │          custom, etc.      │
+│                        │          │                            │
+│  Delegates to:         │          │  All modalities subset to  │
+│  - TechnicalFitter     │          │  cells in 'cis' modality   │
+│  - CisFitter           │          │                            │
+│  - TransFitter         │          └────────────────────────────┘
+│  - ModelSaver          │
+│  - ModelLoader         │
+└────────────────────────┘
 ```
+
+## Cis Modality Architecture
+
+bayesDREAM uses a **separate 'cis' modality** for modeling direct perturbation effects:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              bayesDREAM Initialization (with cis_gene)           │
+│                                                                  │
+│  Input: gene_counts (92 genes including GFI1B)                  │
+│         meta (20,001 cells)                                      │
+│         cis_gene='GFI1B'                                        │
+└────────────┬────────────────────────────────────────────────────┘
+             │
+             ↓
+┌─────────────────────────────────────────────────────────────────┐
+│           Modality Extraction (during __init__)                  │
+│                                                                  │
+│  1. Extract 'cis' modality                                      │
+│     ├─ Contains: Just GFI1B (1 feature)                        │
+│     ├─ Distribution: negbinom                                   │
+│     └─ Cells: All 20,001 cells (before filtering)              │
+│                                                                  │
+│  2. Create 'gene' modality                                      │
+│     ├─ Contains: 91 genes (all EXCEPT GFI1B)                   │
+│     ├─ Distribution: negbinom                                   │
+│     ├─ Filtered: Remove zero-std genes                         │
+│     └─ Cells: Subset to match filtered meta                    │
+│                                                                  │
+│  3. Base class initialization                                   │
+│     ├─ self.counts: ORIGINAL 92 genes (for fit_technical)     │
+│     ├─ self.meta: Filtered to ntc + GFI1B cells               │
+│     └─ self.cis_gene: 'GFI1B'                                 │
+│                                                                  │
+│  4. Cell subsetting                                             │
+│     └─ All modalities subset to cells present in 'cis'        │
+└────────────┬────────────────────────────────────────────────────┘
+             │
+             ↓
+┌─────────────────────────────────────────────────────────────────┐
+│                  Final Modality Structure                        │
+│                                                                  │
+│  self.modalities = {                                            │
+│    'cis':  Modality(1 feature: GFI1B, 4,281 cells),           │
+│    'gene': Modality(91 trans genes, 4,281 cells),              │
+│    ...other modalities added by user...                        │
+│  }                                                               │
+│                                                                  │
+│  self.counts:  DataFrame(92 genes × 4,281 cells)               │
+│                includes GFI1B for fit_technical                 │
+│                                                                  │
+│  self.primary_modality: 'gene'                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Key Design Decisions
+
+**Why Separate Cis Modality?**
+1. **Consistency**: Same interface (`fit_cis()`) works for any modality type (gene, ATAC, etc.)
+2. **Clarity**: Explicit separation of cis vs. trans features
+3. **Extensibility**: Easy to support new modality types without changing fit_cis logic
+4. **Cell Subsetting**: All modalities automatically aligned to cells in 'cis' modality
+
+**Fitting Behavior:**
+```
+fit_technical(primary modality):
+  ├─ Uses: self.counts (92 genes, includes GFI1B)
+  ├─ Fits: All features including cis
+  ├─ Extracts: alpha_x_prefit for GFI1B [nsamples, n_groups]
+  └─ Stores: alpha_y_prefit for 91 trans genes [nsamples, n_groups, 91]
+
+fit_cis():
+  ├─ Uses: 'cis' modality (just GFI1B)
+  ├─ Fits: Cis gene expression per guide
+  └─ Stores: x_true [nsamples, n_guides]
+
+fit_trans():
+  ├─ Uses: 'gene' modality (91 trans genes)
+  ├─ Fits: Dose-response f(x_true)
+  └─ Stores: posterior_samples_trans
+```
+
+**Parameters:**
+- `cis_gene`: For gene modality (alias for `cis_feature`)
+- `cis_feature`: Generic parameter for any modality type
+- Example: `cis_gene='GFI1B'` or `cis_feature='chr9:132283881-132284881'`
+
+**Important Notes:**
+- Cis extraction happens **ONLY** during `bayesDREAM()` initialization
+- Calling `add_*_modality()` later does **NOT** extract cis (except special ATAC case)
+- All modalities are automatically subset to cells in 'cis' modality
+- The base class `self.counts` includes the cis feature for technical fitting
 
 ## Modality Class Hierarchy
 
@@ -181,13 +283,14 @@ mvnormal                  3D: (F, C, D)          SpliZVD
                        │
                        ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│                  bayesDREAM.__init__                   │
+│                     bayesDREAM.__init__                          │
 │                                                                  │
-│  1. Create 'gene' Modality from counts DataFrame                │
-│  2. Store in self.modalities['gene']                            │
-│  3. Pass gene counts to super().__init__() → bayesDREAM         │
-│  4. Filter cells based on meta (ntc + cis_gene)                 │
-│  5. Subset all modalities to match filtered cells               │
+│  1. Extract 'cis' modality from counts (if cis_gene specified)  │
+│  2. Create 'gene' modality from counts (excluding cis gene)     │
+│  3. Store both in self.modalities                               │
+│  4. Pass ORIGINAL counts (with cis) to super().__init__()       │
+│  5. Filter cells based on meta (ntc + cis_gene)                 │
+│  6. Subset all modalities to match cells in 'cis' modality      │
 └──────────────────────┬──────────────────────────────────────────┘
                        │
                        ↓
@@ -195,7 +298,8 @@ mvnormal                  3D: (F, C, D)          SpliZVD
 │              self.modalities (runtime state)                     │
 │                                                                  │
 │  {                                                               │
-│    'gene': Modality(negbinom, 1000 features, 500 cells),       │
+│    'cis': Modality(negbinom, 1 feature, 500 cells),            │
+│    'gene': Modality(negbinom, 999 trans genes, 500 cells),     │
 │    'splicing_donor': Modality(multinomial, 50 features, ...),  │
 │    'splicing_acceptor': Modality(multinomial, 45 features,...),│
 │    'splicing_exon_skip': Modality(binomial, 20 features, ...), │
@@ -204,24 +308,33 @@ mvnormal                  3D: (F, C, D)          SpliZVD
 │  }                                                               │
 │                                                                  │
 │  self.primary_modality = 'gene'                                 │
+│  self.counts = DataFrame(1000 genes × 500 cells)  # Includes cis│
 └──────────────────────┬──────────────────────────────────────────┘
                        │
                        ↓
 ┌─────────────────────────────────────────────────────────────────┐
 │                    Modeling Pipeline                             │
 │                                                                  │
-│  model.fit_technical(covariates=['cell_line'], distribution=...) │
-│    → Uses self.counts from primary modality                     │
+│  model.set_technical_groups(['cell_line'])                      │
+│    → Required before fit_technical                              │
+│    → Sets technical_group_code for NTC cells                    │
+│                                                                  │
+│  model.fit_technical(sum_factor_col='sum_factor',               │
+│                      modality_name='gene')                      │
+│    → For primary modality: Uses self.counts (includes cis gene) │
 │    → Fits _model_technical (distribution-flexible)              │
-│    → Saves self.alpha_y_prefit                                  │
+│    → Extracts alpha_x_prefit for cis gene [nsamples, n_groups]  │
+│    → Stores alpha_y_prefit for trans genes [nsamples, ..., 91]  │
 │                                                                  │
 │  model.fit_cis(sum_factor_col='sum_factor')                     │
-│    → Uses self.counts from primary modality                     │
+│    → Uses 'cis' modality (just cis gene)                        │
 │    → Fits _model_x (cis effects)                                │
 │    → Saves self.x_true, self.posterior_samples_cis              │
 │                                                                  │
-│  model.fit_trans(function_type='...', distribution=...)         │
-│    → Uses self.counts from primary modality                     │
+│  model.fit_trans(sum_factor_col='sum_factor_adj',               │
+│                  function_type='additive_hill',                 │
+│                  modality_name='gene')                          │
+│    → Uses 'gene' modality (trans genes only)                    │
 │    → Fits _model_y (trans effects as f(x_true))                 │
 │    → Distribution-flexible (negbinom, normal, binomial, etc.)   │
 │    → Saves self.posterior_samples_trans                         │
@@ -249,8 +362,8 @@ mvnormal                  3D: (F, C, D)          SpliZVD
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                       bayesDREAM (base)                          │
-│  Unchanged from original implementation                          │
+│                    _BayesDREAMCore (base class)                  │
+│  Located in: bayesDREAM/core.py                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │  Attributes:                                                     │
 │    - meta: pd.DataFrame (cell metadata)                         │
@@ -260,37 +373,51 @@ mvnormal                  3D: (F, C, D)          SpliZVD
 │    - alpha_y_prefit, alpha_x_prefit: tensors                    │
 │    - x_true: posterior cis expression                           │
 │    - posterior_samples_cis, posterior_samples_trans: dicts      │
+│    - _technical_fitter, _cis_fitter, _trans_fitter: delegates   │
+│    - _saver, _loader: save/load delegates                       │
 │                                                                  │
 │  Methods:                                                        │
-│    - fit_technical(covariates, ...)                             │
+│    - set_technical_groups(covariates)                           │
+│    - fit_technical(sum_factor_col, modality_name, ...)          │
 │    - fit_cis(sum_factor_col, ...)                               │
-│    - fit_trans(function_type, ...)                              │
+│    - fit_trans(sum_factor_col, function_type, ...)              │
 │    - set_alpha_x(), set_alpha_y(), set_x_true()                 │
 │    - adjust_ntc_sum_factor(), refit_sumfactor()                 │
 │    - permute_genes()                                             │
+│    - save_technical_fit(), load_technical_fit()                 │
+│    - save_cis_fit(), load_cis_fit()                             │
+│    - save_trans_fit(), load_trans_fit()                         │
+│                                                                  │
+│  Internal Models (used by fitters):                             │
 │    - _model_technical(), _model_x(), _model_y()                 │
 └────────────────────────────┬────────────────────────────────────┘
                              │ inherits
                              ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│              bayesDREAM (extension)                    │
-│  Adds multi-modal support while preserving base functionality   │
+│              bayesDREAM (main user-facing class)                 │
+│  Located in: bayesDREAM/model.py                                │
+│  Adds multi-modal support via mixins                            │
 ├─────────────────────────────────────────────────────────────────┤
 │  Additional Attributes:                                          │
-│    - modalities: Dict[str, Modality]                            │
+│    - modalities: Dict[str, Modality] (includes 'cis', 'gene')   │
 │    - primary_modality: str (default: 'gene')                    │
+│    - counts_meta: pd.DataFrame (metadata for technical fit)     │
 │                                                                  │
-│  Additional Methods:                                             │
+│  Additional Methods (from mixins):                               │
 │    - add_modality(name, modality, overwrite)                    │
 │    - add_transcript_modality(counts, meta, modality_types)      │
 │    - add_splicing_modality(sj_counts, sj_meta, types, ...)     │
+│    - add_atac_modality(atac_counts, atac_meta, ...)             │
 │    - add_custom_modality(name, counts, feature_meta, dist)      │
 │    - get_modality(name) → Modality                              │
 │    - list_modalities() → pd.DataFrame                           │
 │                                                                  │
-│  Inherited Methods (work on primary modality):                  │
-│    - fit_technical(), fit_cis(), fit_trans() [from bayesDREAM] │
-│    - All methods accept distribution parameter for flexibility  │
+│  Inherited Methods (delegated to fitters):                       │
+│    - fit_technical(), fit_cis(), fit_trans() [from Core]        │
+│    - All fitting methods accept modality_name parameter         │
+│    - fit_cis() always uses 'cis' modality                       │
+│    - fit_technical() on primary uses self.counts (incl. cis)    │
+│    - fit_trans() uses primary modality (trans genes only)       │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -332,11 +459,27 @@ Future:
 ## Module Dependencies
 
 ```
-model.py (~2500 lines)
+model.py (~311 lines)
   ├── pandas, numpy
-  ├── torch, pyro
+  ├── core.py (_BayesDREAMCore)
+  ├── modality.py (Modality class)
+  └── modalities/ (mixin classes)
+      ├── transcript.py
+      ├── splicing_modality.py
+      ├── atac.py
+      └── custom.py
+
+core.py (~909 lines)
+  ├── pandas, numpy, torch, pyro
   ├── scipy, sklearn
-  └── distributions.py (observation samplers)
+  ├── distributions.py (observation samplers)
+  ├── fitting/ (delegated fitters)
+  │   ├── technical.py (TechnicalFitter)
+  │   ├── cis.py (CisFitter)
+  │   └── trans.py (TransFitter)
+  └── io/ (save/load)
+      ├── save.py (ModelSaver)
+      └── load.py (ModelLoader)
 
 modality.py
   ├── pandas, numpy
@@ -346,28 +489,31 @@ distributions.py (observation samplers)
   ├── torch
   └── pyro
 
-utils.py (helper functions)
-  ├── numpy
-  ├── torch
-  └── scipy
-
 splicing.py (Pure Python - no R dependencies)
   ├── pandas, numpy
   └── modality.py
 
-multimodal.py
-  ├── pandas, numpy
-  ├── torch
-  ├── model.py
-  ├── modality.py
-  ├── splicing.py
-  └── distributions.py
+fitting/
+  ├── helpers.py (helper functions)
+  ├── technical.py (TechnicalFitter)
+  ├── cis.py (CisFitter)
+  └── trans.py (TransFitter)
+
+io/
+  ├── save.py (ModelSaver)
+  └── load.py (ModelLoader)
+
+modalities/
+  ├── transcript.py (TranscriptModalityMixin)
+  ├── splicing_modality.py (SplicingModalityMixin)
+  ├── atac.py (ATACModalityMixin)
+  └── custom.py (CustomModalityMixin)
 
 __init__.py
-  ├── model.py
-  ├── modality.py
-  ├── multimodal.py
+  ├── model.py (bayesDREAM)
+  ├── core.py (_BayesDREAMCore)
+  ├── modality.py (Modality)
   ├── splicing.py
   ├── distributions.py
-  └── utils.py
+  └── modalities/
 ```

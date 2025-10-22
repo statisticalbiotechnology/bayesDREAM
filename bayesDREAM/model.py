@@ -239,12 +239,27 @@ class bayesDREAM(
         )
 
         # Subset all modalities to match filtered cells from base class
-        valid_cells = self.meta['cell'].tolist()
+        # Use cells from cis modality if it exists, otherwise use meta cells
+        if 'cis' in self.modalities:
+            valid_cells = self.modalities['cis'].cell_names
+            if valid_cells is None:
+                # Cis modality doesn't have cell names stored, use meta
+                valid_cells = self.meta['cell'].tolist()
+            print(f"[INFO] Subsetting modalities to {len(valid_cells)} cells from 'cis' modality")
+        else:
+            valid_cells = self.meta['cell'].tolist()
+            print(f"[INFO] Subsetting modalities to {len(valid_cells)} cells from meta")
+
         for mod_name in list(self.modalities.keys()):
+            if mod_name == 'cis':
+                # Skip cis modality - it defines the cells
+                continue
             if self.modalities[mod_name].cell_names is not None:
                 # Find indices of valid cells
                 cell_indices = [i for i, c in enumerate(self.modalities[mod_name].cell_names)
                               if c in valid_cells]
+                if len(cell_indices) < len(self.modalities[mod_name].cell_names):
+                    print(f"[INFO] Subsetting modality '{mod_name}' from {len(self.modalities[mod_name].cell_names)} to {len(cell_indices)} cells")
                 self.modalities[mod_name] = self.modalities[mod_name].get_cell_subset(cell_indices)
 
         print(f"[INIT] bayesDREAM: {len(self.modalities)} modalities loaded")

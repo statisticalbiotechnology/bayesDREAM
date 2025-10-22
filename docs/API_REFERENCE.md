@@ -21,13 +21,19 @@ The main class for multi-modal Bayesian modeling of perturbation effects.
 ```python
 bayesDREAM(
     meta,
-    counts,
+    counts=None,
     gene_meta=None,
+    modalities=None,
     cis_gene=None,
+    cis_feature=None,
     primary_modality='gene',
-    output_dir=None,
+    guide_covariates=['cell_line'],
+    guide_covariates_ntc=None,
+    output_dir='./model_out',
     label=None,
-    device='cuda' if torch.cuda.is_available() else 'cpu'
+    device=None,
+    random_seed=2402,
+    cores=1
 )
 ```
 
@@ -38,19 +44,59 @@ bayesDREAM(
   - `target`: Target gene (use `'ntc'` for non-targeting controls)
   - `sum_factor`: Normalization factor per cell
   - `cell_line`: Cell line identifier
-- `counts` (pd.DataFrame): Count matrix with features as rows, cells as columns
+- `counts` (pd.DataFrame, optional): Count matrix for primary modality (features × cells)
+  - For `'gene'`: gene counts
+  - For `'atac'`: region counts (not yet implemented as primary)
 - `gene_meta` (pd.DataFrame, optional): Gene metadata DataFrame
   - Recommended columns: `gene`, `gene_name`, `gene_id`
   - Can use index as gene identifier if named
   - If not provided, minimal metadata will be created from counts.index
-  - Enables gene-level annotations for downstream analysis
-- `cis_gene` (str): Name of the gene to model cis effects for
-- `primary_modality` (str, optional): Name for primary modality. Default: `'gene'`
-- `output_dir` (str, optional): Directory for saving results
-- `label` (str, optional): Label for this analysis run
-- `device` (str, optional): PyTorch device (`'cuda'` or `'cpu'`)
+- `modalities` (Dict[str, Modality], optional): Pre-constructed modalities (advanced usage)
+- `cis_gene` (str, optional): Gene name to extract as 'cis' modality (for gene modality)
+  - Alias for `cis_feature` when `primary_modality='gene'`
+  - Example: `cis_gene='GFI1B'`
+- `cis_feature` (str, optional): Generic parameter for cis feature extraction (any modality)
+  - For `'gene'`: gene name (same as `cis_gene`)
+  - For `'atac'`: region ID (e.g., `'chr9:132283881-132284881'`)
+  - Note: Cannot specify both `cis_gene` and `cis_feature`
+- `primary_modality` (str): Which modality to use for trans effects. Default: `'gene'`
+  - The 'cis' modality will be extracted from this modality during initialization
+- `guide_covariates` (list): Covariates for guide grouping. Default: `['cell_line']`
+- `guide_covariates_ntc` (list, optional): Covariates for NTC guide grouping
+- `output_dir` (str): Output directory. Default: `'./model_out'`
+- `label` (str, optional): Run label
+- `device` (str, optional): PyTorch device (`'cpu'` or `'cuda'`). Auto-detects if None
+- `random_seed` (int): Random seed for reproducibility. Default: 2402
+- `cores` (int): Number of CPU cores for parallelization. Default: 1
 
 **Returns:** bayesDREAM instance
+
+**Cis Modality Extraction:**
+- The 'cis' modality is **ONLY** extracted during `bayesDREAM()` initialization
+- The primary modality will contain **trans features only** (cis feature excluded)
+- All modalities are automatically subset to cells present in the 'cis' modality
+- When calling `add_*_modality()` later, **NO** cis extraction occurs (except special case for ATAC if no cis exists)
+
+**Example:**
+```python
+# Basic usage with gene expression
+model = bayesDREAM(
+    meta=meta,
+    counts=gene_counts,
+    gene_meta=gene_meta,
+    cis_gene='GFI1B',
+    output_dir='./output'
+)
+# Creates: 'cis' modality (GFI1B) + 'gene' modality (all other genes)
+
+# Using cis_feature for consistency
+model = bayesDREAM(
+    meta=meta,
+    counts=gene_counts,
+    cis_feature='GFI1B',  # Equivalent to cis_gene
+    primary_modality='gene'
+)
+```
 
 ---
 
@@ -276,47 +322,104 @@ print(model.list_modalities())
 
 ### Modeling Pipeline
 
+#### set_technical_groups()
+
+```python
+model.set_technical_groups(covariates)
+```
+
+Set technical group codes based on covariates. **Must be called before `fit_technical()`**.
+
+**Parameters:**
+- `covariates` (list of str): Column names in meta to group by (e.g., `['cell_line']`)
+
+**Side Effects:**
+- Adds `technical_group_code` column to `self.meta`
+
+**Example:**
+```python
+model.set_technical_groups(['cell_line'])
+```
+
+---
+
 #### fit_technical()
 
 ```python
 model.fit_technical(
-    covariates,
-    sum_factor_col=None,
-    distribution='negbinom',
+    sum_factor_col='sum_factor',
+    lr=1e-3,
+    niters=50000,
+    nsamples=1000,
+    alpha_ewma=0.05,
+    tolerance=1e-4,
+    beta_o_beta=3,
+    beta_o_alpha=9,
+    epsilon=1e-6,
+    minibatch_size=None,
+    distribution=None,
     denominator=None,
-    n_steps=5000,
-    lr=0.01,
-    device=None
+    modality_name=None
 )
 ```
 
-Fit technical model to estimate baseline overdispersion from non-targeting controls.
+Fit technical model to estimate baseline overdispersion and cell-line effects from non-targeting controls.
+
+**Important:** Call `set_technical_groups()` first to define technical groups.
+
+**Primary Modality Behavior:**
+- When fitting the **primary modality**, uses original counts that **include the cis feature**
+- Automatically extracts `alpha_x_prefit` for the cis feature after fitting
+- Stores `alpha_y_prefit` for all trans features (excluding cis)
+- Feature metadata stored in `self.counts_meta` (for all features including cis)
 
 **Parameters:**
-- `covariates` (list of str): Covariates to model (e.g., `['cell_line']`)
-- `sum_factor_col` (str, optional): Column in `meta` with normalization factors. Not required for `normal`/`mvnormal`
-- `distribution` (str): Distribution type. Default: `'negbinom'`
-  - `'negbinom'`: Negative binomial (requires `sum_factor_col`)
-  - `'normal'`: Normal (no sum factors needed)
-  - `'binomial'`: Binomial (requires `denominator`)
-  - `'multinomial'`: Multinomial (3D data)
-  - `'mvnormal'`: Multivariate normal (3D data)
-- `denominator` (np.ndarray, optional): Required for `binomial`
-- `n_steps` (int): Number of optimization steps. Default: 5000
-- `lr` (float): Learning rate. Default: 0.01
-- `device` (str, optional): PyTorch device. Defaults to `self.device`
+- `sum_factor_col` (str): Column in `meta` with normalization factors. Default: `'sum_factor'`
+  - Required for `negbinom` distribution
+  - Not used for `normal`/`mvnormal`
+- `lr` (float): Learning rate. Default: 1e-3
+- `niters` (int): Number of optimization steps. Default: 50,000
+- `nsamples` (int): Number of posterior samples. Default: 1,000
+- `alpha_ewma` (float): EWMA smoothing parameter for convergence. Default: 0.05
+- `tolerance` (float): Convergence tolerance. Default: 1e-4
+- `beta_o_beta` (float): Beta prior for overdispersion. Default: 3
+- `beta_o_alpha` (float): Alpha prior for overdispersion. Default: 9
+- `epsilon` (float): Small constant for numerical stability. Default: 1e-6
+- `minibatch_size` (int, optional): Minibatch size for predictive sampling
+- `distribution` (str, optional): Distribution type. Defaults to modality's distribution
+  - `'negbinom'`: Negative binomial (count data)
+  - `'normal'`: Normal (continuous measurements)
+  - `'binomial'`: Binomial (proportions)
+  - `'multinomial'`: Multinomial (categorical)
+  - `'mvnormal'`: Multivariate normal (multi-dimensional)
+- `denominator` (np.ndarray, optional): Required for `binomial` distribution
+- `modality_name` (str, optional): Modality to fit. Defaults to primary modality
 
 **Side Effects:**
-- Sets `self.alpha_y_prefit` (overdispersion parameters)
-- For `normal`/`mvnormal`, sets `self.sigma_y_prefit` or `self.cov_y_prefit`
+- Sets `self.alpha_y_prefit` (overdispersion parameters for trans features)
+- Sets `self.alpha_x_prefit` (overdispersion for cis feature, if primary modality)
+- Sets `self.alpha_y_type` and `self.alpha_x_type` to `'posterior'`
+- Sets `self.posterior_samples_technical` (full posterior samples)
+- Sets `self.loss_technical` (optimization loss history)
+- For modalities: sets `modality.alpha_y_prefit_mult` and `modality.alpha_y_prefit_add`
+- For primary modality with original counts: creates `self.counts_meta` DataFrame with filtering flags
 
 **Example:**
 ```python
-# Gene counts (negbinom)
-model.fit_technical(covariates=['cell_line'], sum_factor_col='sum_factor')
+# Standard usage with gene counts
+model.set_technical_groups(['cell_line'])
+model.fit_technical(sum_factor_col='sum_factor')
+# For 92 genes (including GFI1B cis gene):
+# - Fits all 92 features
+# - Extracts alpha_x_prefit for GFI1B (shape: [nsamples, 2])
+# - Stores alpha_y_prefit for 91 trans genes (shape: [nsamples, 2, 91])
 
-# Continuous scores (normal)
-model.fit_technical(covariates=['cell_line'], distribution='normal')
+# Continuous scores (normal distribution)
+model.set_technical_groups(['cell_line'])
+model.fit_technical(distribution='normal')
+
+# Specific modality
+model.fit_technical(modality_name='splicing_donor', distribution='multinomial')
 ```
 
 ---
@@ -326,27 +429,45 @@ model.fit_technical(covariates=['cell_line'], distribution='normal')
 ```python
 model.fit_cis(
     sum_factor_col='sum_factor',
-    n_steps=5000,
+    cis_feature=None,
     lr=0.01,
+    niters=25000,
+    nsamples=1000,
+    tolerance=0,
+    alpha_ewma=0.05,
     device=None
 )
 ```
 
-Fit cis model to estimate direct effects on targeted gene.
+Fit cis model to estimate direct effects on the targeted feature.
+
+**Modality Used:**
+- Always uses the **'cis' modality** (extracted during initialization)
+- Consistent interface regardless of primary modality type (gene, ATAC, etc.)
 
 **Parameters:**
-- `sum_factor_col` (str): Column with normalization factors
-- `n_steps` (int): Number of optimization steps. Default: 5000
+- `sum_factor_col` (str): Column with normalization factors. Default: `'sum_factor'`
+- `cis_feature` (str, optional): Specific feature in 'cis' modality to use
+  - If None, uses the first (and typically only) feature in 'cis' modality
+  - Rarely needed since 'cis' modality usually contains exactly one feature
 - `lr` (float): Learning rate. Default: 0.01
-- `device` (str, optional): PyTorch device
+- `niters` (int): Number of optimization steps. Default: 25,000
+- `nsamples` (int): Number of posterior samples. Default: 1,000
+- `tolerance` (float): Convergence tolerance. Default: 0 (disabled)
+- `alpha_ewma` (float): EWMA smoothing parameter. Default: 0.05
+- `device` (str, optional): PyTorch device. Defaults to `self.device`
 
 **Side Effects:**
 - Sets `self.x_true` (posterior cis expression per guide)
+- Sets `self.x_true_type` to `'posterior'`
 - Sets `self.posterior_samples_cis` (full posterior samples)
+- Sets `self.loss_cis` (optimization loss history)
 
 **Example:**
 ```python
 model.fit_cis(sum_factor_col='sum_factor')
+# Uses 'cis' modality (e.g., just GFI1B for gene modality)
+# Sets self.x_true with shape: [nsamples, n_guides]
 ```
 
 ---

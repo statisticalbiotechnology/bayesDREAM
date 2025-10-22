@@ -323,6 +323,10 @@ def sample_mvnormal_trans(
     -----
     mu_final = mu_y + alpha_y[group]
     """
+    # If additive alpha is [C, T], expand to [C, T, D] so it can add to mu
+    if alpha_y_full is not None and alpha_y_full.dim() == 2:
+        alpha_y_full = alpha_y_full.unsqueeze(-1).expand(-1, -1, D)  # [C, T, D]
+    
     # Apply cell-line effects if present (additive)
     if alpha_y_full is not None and groups_tensor is not None:
         alpha_y_used = alpha_y_full[groups_tensor, :, :]  # [N, T, D]

@@ -5,16 +5,52 @@ Guide to accessing and working with data in bayesDREAM.
 ## Table of Contents
 
 - [Accessing Modalities](#accessing-modalities)
+  - [Understanding the Cis Modality](#understanding-the-cis-modality)
+  - [Accessing Cis vs Trans Features](#accessing-cis-vs-trans-features)
 - [Working with Count Data](#working-with-count-data)
 - [Accessing Metadata](#accessing-metadata)
 - [Subsetting Data](#subsetting-data)
+  - [Understanding Cell Subsetting](#understanding-cell-subsetting)
 - [Converting Data Formats](#converting-data-formats)
 - [Accessing Model Results](#accessing-model-results)
 - [Working with Posterior Samples](#working-with-posterior-samples)
+- [Working with Cis Modality Data](#working-with-cis-modality-data)
 
 ---
 
 ## Accessing Modalities
+
+### Understanding the Cis Modality
+
+bayesDREAM uses a **separate 'cis' modality** for the targeted feature:
+
+```python
+# The 'cis' modality is automatically created during initialization
+model = bayesDREAM(
+    meta=meta,
+    counts=gene_counts,      # 1000 genes including GFI1B
+    cis_gene='GFI1B',
+    output_dir='./output'
+)
+
+# Check what was created:
+print(model.list_modalities())
+```
+
+Output:
+```
+                  name distribution  n_features  n_cells  n_categories
+0                  cis     negbinom           1      500           NaN
+1                 gene     negbinom         999      500           NaN
+2   splicing_donor  multinomial          50      500          10.0
+3               spliz       normal        1000      500           NaN
+```
+
+**Key Points:**
+- The **'cis' modality** contains just the targeted feature (e.g., GFI1B)
+- The **primary modality** (e.g., 'gene') contains all OTHER features (trans features only)
+- `model.counts` still contains ALL features (for technical fitting)
+- All modalities are automatically subset to cells present in the 'cis' modality
 
 ### List All Modalities
 
@@ -22,14 +58,6 @@ Guide to accessing and working with data in bayesDREAM.
 # Get summary of all modalities
 summary = model.list_modalities()
 print(summary)
-```
-
-Output:
-```
-                  name distribution  n_features  n_cells  n_categories
-0                 gene     negbinom        1000      500           NaN
-1   splicing_donor  multinomial          50      500          10.0
-2               spliz       normal        1000      500           NaN
 ```
 
 ### Get Specific Modality
@@ -53,6 +81,35 @@ else:
     print("Modality not found")
 ```
 
+### Accessing Cis vs Trans Features
+
+```python
+# Access cis feature data (targeted gene)
+cis_mod = model.get_modality('cis')
+cis_counts = cis_mod.counts  # shape: (1, n_cells)
+cis_gene_name = cis_mod.feature_meta.index[0]  # e.g., 'GFI1B'
+
+print(f"Cis gene: {cis_gene_name}")
+print(f"Cis counts shape: {cis_counts.shape}")
+
+# Access trans feature data (all other genes)
+gene_mod = model.get_modality('gene')
+trans_counts = gene_mod.counts  # shape: (n_trans_genes, n_cells)
+trans_gene_names = gene_mod.feature_meta.index
+
+print(f"Number of trans genes: {len(trans_gene_names)}")
+print(f"Trans counts shape: {trans_counts.shape}")
+
+# Access ALL features (cis + trans) for technical fitting
+all_counts = model.counts  # shape: (n_all_genes, n_cells) - includes cis gene
+print(f"All genes (for technical fit): {all_counts.shape}")
+```
+
+**When to use each:**
+- **`cis_mod`**: For `fit_cis()` - modeling direct perturbation effects
+- **`gene_mod`**: For `fit_trans()` - modeling downstream effects
+- **`model.counts`**: For `fit_technical()` - includes cis gene for cell-line effect estimation
+
 ---
 
 ## Working with Count Data
@@ -60,16 +117,28 @@ else:
 ### Access Raw Counts
 
 ```python
-# Get counts from primary modality (genes)
-gene_counts = model.counts  # pandas DataFrame (genes × cells)
+# IMPORTANT DISTINCTION:
+# model.counts vs modality counts
 
-# Get counts from specific modality
+# 1. model.counts: ALL features (includes cis gene)
+#    Used for fit_technical() on primary modality
+all_gene_counts = model.counts  # pandas DataFrame (all genes × cells)
+print(all_gene_counts.shape)    # (1000, 500) - includes GFI1B
+
+# 2. Cis modality: ONLY cis feature
+cis_mod = model.get_modality('cis')
+cis_counts = cis_mod.counts  # numpy array (1 × cells)
+print(cis_counts.shape)      # (1, 500)
+
+# 3. Primary modality: ONLY trans features (excludes cis)
+gene_mod = model.get_modality('gene')
+trans_counts = gene_mod.counts  # numpy array (trans genes × cells)
+print(trans_counts.shape)       # (999, 500) - excludes GFI1B
+
+# 4. Other modalities
 donor_mod = model.get_modality('splicing_donor')
 donor_counts = donor_mod.counts  # numpy array (donors × cells × acceptors)
-
-# Check shape
-print(gene_counts.shape)    # (1000, 500)
-print(donor_counts.shape)   # (50, 500, 10)
+print(donor_counts.shape)        # (50, 500, 10)
 ```
 
 ### 2D Count Data (negbinom, normal, binomial)
@@ -189,6 +258,37 @@ print(guide_meta['target'])  # Target for each guide
 
 ## Subsetting Data
 
+### Understanding Cell Subsetting
+
+**All modalities are automatically subset to cells in the 'cis' modality:**
+
+```python
+# During initialization, bayesDREAM:
+# 1. Creates 'cis' modality from cis_gene
+# 2. Filters cells (e.g., removes cells with zero counts)
+# 3. Subsets ALL other modalities to match these cells
+
+# Check cell alignment
+cis_mod = model.get_modality('cis')
+gene_mod = model.get_modality('gene')
+donor_mod = model.get_modality('splicing_donor')
+
+print(f"Cis cells: {cis_mod.dims['n_cells']}")
+print(f"Gene cells: {gene_mod.dims['n_cells']}")
+print(f"Donor cells: {donor_mod.dims['n_cells']}")
+# All should be the same!
+
+# Verify cell names match
+if cis_mod.cell_names is not None and gene_mod.cell_names is not None:
+    assert cis_mod.cell_names == gene_mod.cell_names
+    print("✓ Cell names match across modalities")
+```
+
+**Why this matters:**
+- Ensures all modalities have the same cells
+- Prevents dimension mismatches during fitting
+- The 'cis' modality defines the reference cell set
+
 ### Subset by Features
 
 ```python
@@ -243,10 +343,23 @@ ntc_indices = ntc_cells.index
 cis_cells = model.meta[model.meta['target'] == model.cis_gene]
 cis_indices = cis_cells.index
 
-# Get gene counts for each
-gene_mod = model.get_modality('gene')
-ntc_counts = gene_mod.get_cell_subset(ntc_indices).counts
-cis_counts = gene_mod.get_cell_subset(cis_indices).counts
+# Get trans gene counts for each
+gene_mod = model.get_modality('gene')  # Trans genes only
+ntc_trans = gene_mod.get_cell_subset(ntc_indices).counts
+cis_trans = gene_mod.get_cell_subset(cis_indices).counts
+
+# Get cis gene counts for each
+cis_mod = model.get_modality('cis')  # Cis gene only
+ntc_cis = cis_mod.get_cell_subset(ntc_indices).counts
+cis_cis = cis_mod.get_cell_subset(cis_indices).counts
+
+print(f"Trans genes - NTC: {ntc_trans.shape}, Perturbed: {cis_trans.shape}")
+print(f"Cis gene - NTC: {ntc_cis.shape}, Perturbed: {cis_cis.shape}")
+
+# Compare cis gene expression between NTC and perturbed
+cis_gene_mean_ntc = ntc_cis.mean()
+cis_gene_mean_perturbed = cis_cis.mean()
+print(f"Cis gene fold change: {cis_gene_mean_perturbed / cis_gene_mean_ntc:.2f}")
 ```
 
 ---
@@ -310,18 +423,41 @@ adata.layers['spliz'] = spliz_mod.counts.T
 ### Technical Model Results
 
 ```python
-# After running fit_technical()
+# After running fit_technical() on primary modality
+# Technical fit uses model.counts (includes cis gene)
+# It extracts SEPARATE parameters for cis vs trans
+
+# 1. Alpha for cis gene (extracted during fit_technical)
+if hasattr(model, 'alpha_x_prefit'):
+    alpha_x = model.alpha_x_prefit  # Cis gene overdispersion
+    print(f"Alpha_x shape: {alpha_x.shape}")  # (n_samples, n_groups)
+    print(f"Cis gene: {model.cis_gene}")
+
+# 2. Alpha for trans genes (rest of genes)
 if hasattr(model, 'alpha_y_prefit'):
-    alpha_y = model.alpha_y_prefit  # Overdispersion parameters
-    print(f"Shape: {alpha_y.shape}")  # (n_trans_genes, n_cell_lines)
+    alpha_y = model.alpha_y_prefit  # Trans gene overdispersion
+    print(f"Alpha_y shape: {alpha_y.shape}")  # (n_samples, n_groups, n_trans_genes)
 
     # Convert to pandas for easier viewing
+    # Take mean across samples if multiple samples
+    if alpha_y.ndim == 3:
+        alpha_mean = alpha_y.mean(dim=0)  # (n_groups, n_trans_genes)
+    else:
+        alpha_mean = alpha_y
+
     alpha_df = pd.DataFrame(
-        alpha_y.cpu().numpy(),
+        alpha_mean.cpu().numpy().T,  # Transpose to (n_trans_genes, n_groups)
         index=model.trans_genes,
-        columns=model.meta['cell_line'].unique()
+        columns=[f"group_{i}" for i in range(alpha_mean.shape[0])]
     )
     print(alpha_df.head())
+
+# 3. Technical fit metadata (which features were excluded)
+if hasattr(model, 'counts_meta'):
+    print("\nTechnical fit metadata:")
+    print(model.counts_meta.head())
+    # Columns: ntc_zero_count, ntc_zero_std, ntc_single_category,
+    #          ntc_excluded_from_fit, technical_correction_applied
 ```
 
 ### Cis Model Results
@@ -447,22 +583,58 @@ plt.title(f'Dose-response: {model.trans_genes[gene_idx]}')
 ### Compare NTC vs Perturbed Expression
 
 ```python
-# Get gene expression for NTC and perturbed cells
-gene_mod = model.get_modality('gene')
-gene_counts = gene_mod.counts
+import numpy as np
+import pandas as pd
 
+# Get cell masks
 ntc_mask = model.meta['target'] == 'ntc'
-cis_mask = model.meta['target'] == model.cis_gene
+perturbed_mask = model.meta['target'] == model.cis_gene
 
-ntc_expr = gene_counts.loc[:, ntc_mask].mean(axis=1)
-cis_expr = gene_counts.loc[:, cis_mask].mean(axis=1)
+# 1. Compare TRANS genes (from 'gene' modality)
+gene_mod = model.get_modality('gene')
+trans_counts = gene_mod.counts  # numpy array
+
+# Calculate mean expression
+ntc_trans_expr = trans_counts[:, ntc_mask].mean(axis=1)
+pert_trans_expr = trans_counts[:, perturbed_mask].mean(axis=1)
 
 # Calculate log fold change
-log2fc = np.log2((cis_expr + 1) / (ntc_expr + 1))
+trans_log2fc = np.log2((pert_trans_expr + 1) / (ntc_trans_expr + 1))
 
-# Find top changed genes
-top_genes = log2fc.abs().nlargest(20)
-print(top_genes)
+# Create DataFrame
+trans_df = pd.DataFrame({
+    'gene': gene_mod.feature_meta.index,
+    'ntc_mean': ntc_trans_expr,
+    'perturbed_mean': pert_trans_expr,
+    'log2fc': trans_log2fc
+})
+
+# Find top changed trans genes
+top_trans = trans_df.nlargest(20, 'log2fc', key=abs)
+print("Top changed trans genes:")
+print(top_trans)
+
+# 2. Compare CIS gene (from 'cis' modality)
+cis_mod = model.get_modality('cis')
+cis_counts = cis_mod.counts[0, :]  # 1D array
+
+ntc_cis_expr = cis_counts[ntc_mask].mean()
+pert_cis_expr = cis_counts[perturbed_mask].mean()
+cis_log2fc = np.log2((pert_cis_expr + 1) / (ntc_cis_expr + 1))
+
+print(f"\nCis gene ({model.cis_gene}):")
+print(f"  NTC mean: {ntc_cis_expr:.2f}")
+print(f"  Perturbed mean: {pert_cis_expr:.2f}")
+print(f"  Log2 FC: {cis_log2fc:.2f}")
+
+# 3. For ALL genes together (from model.counts)
+all_counts = model.counts  # pandas DataFrame
+ntc_all = all_counts.loc[:, model.meta[ntc_mask]['cell']].mean(axis=1)
+pert_all = all_counts.loc[:, model.meta[perturbed_mask]['cell']].mean(axis=1)
+all_log2fc = np.log2((pert_all + 1) / (ntc_all + 1))
+
+print(f"\nAll genes (including cis):")
+print(all_log2fc.nlargest(20))
 ```
 
 ### Extract Guide-Level Summaries
@@ -539,6 +711,125 @@ exon_mod.set_exon_aggregate_method('min', allow_after_technical_fit=True)
 **Why lock after technical fit?**
 
 The technical model estimates overdispersion parameters (`alpha_y`) based on the current aggregation method. Changing the aggregation method changes the inclusion counts, which would make the prefit parameters incorrect. The lock prevents accidental invalidation of these parameters.
+
+---
+
+## Working with Cis Modality Data
+
+### Why the Cis Modality is Special
+
+The 'cis' modality serves as the **reference for direct perturbation effects**:
+
+```python
+# The cis modality defines:
+# 1. Which feature is being directly perturbed
+# 2. The reference cell set (all other modalities subset to match)
+# 3. The x_true values used in trans modeling
+
+cis_mod = model.get_modality('cis')
+print(f"Cis feature: {cis_mod.feature_meta.index[0]}")
+print(f"Number of cells: {cis_mod.dims['n_cells']}")
+print(f"Distribution: {cis_mod.distribution}")
+```
+
+### Accessing Cis Expression
+
+```python
+# Raw counts from cis modality
+cis_mod = model.get_modality('cis')
+cis_raw_counts = cis_mod.counts[0, :]  # 1D array (n_cells,)
+
+# After fit_cis(), get posterior cis expression
+if hasattr(model, 'x_true'):
+    # x_true: guide-level cis expression
+    x_true = model.x_true  # shape: (n_guides,)
+
+    # Map to cells
+    guide_to_x = dict(zip(
+        model.meta.groupby('guide').first().index,
+        x_true.cpu().numpy()
+    ))
+
+    # Add to metadata
+    model.meta['x_true'] = model.meta['guide'].map(guide_to_x)
+    print(model.meta[['cell', 'guide', 'x_true']].head())
+```
+
+### Verifying Cis Modality Extraction
+
+```python
+# Check that cis gene was correctly extracted
+print(f"Cis gene specified: {model.cis_gene}")
+
+cis_mod = model.get_modality('cis')
+print(f"Cis modality feature: {cis_mod.feature_meta.index[0]}")
+assert cis_mod.feature_meta.index[0] == model.cis_gene, "Cis gene mismatch!"
+
+# Check that gene modality excludes cis gene
+gene_mod = model.get_modality('gene')
+assert model.cis_gene not in gene_mod.feature_meta.index, "Cis gene should not be in trans genes!"
+
+# Check that model.counts includes cis gene
+assert model.cis_gene in model.counts.index, "Cis gene should be in model.counts!"
+
+print("✓ Cis modality correctly extracted")
+```
+
+### Using Cis Data in Analysis
+
+```python
+# Example: Plot cis gene expression vs posterior x_true
+import matplotlib.pyplot as plt
+
+cis_mod = model.get_modality('cis')
+cis_counts = cis_mod.counts[0, :]
+
+# Get guide-level means
+guide_means = {}
+for guide in model.meta['guide'].unique():
+    guide_cells = model.meta[model.meta['guide'] == guide].index
+    guide_means[guide] = cis_counts[guide_cells].mean()
+
+# Compare to x_true
+if hasattr(model, 'x_true'):
+    guides = model.meta.groupby('guide').first().index
+    x_true_vals = model.x_true.cpu().numpy()
+
+    raw_means = [guide_means[g] for g in guides]
+
+    plt.figure(figsize=(8, 6))
+    plt.scatter(raw_means, x_true_vals, alpha=0.6)
+    plt.xlabel('Raw count mean')
+    plt.ylabel('Posterior x_true')
+    plt.title(f'Cis gene ({model.cis_gene}): Raw vs Posterior')
+    plt.plot([min(raw_means), max(raw_means)],
+             [min(raw_means), max(raw_means)],
+             'r--', alpha=0.5)
+    plt.show()
+```
+
+### When Cis is Not a Gene
+
+For ATAC or other modalities:
+
+```python
+# Initialize with ATAC as primary and cis feature
+model = bayesDREAM(
+    meta=meta,
+    counts=atac_counts,
+    cis_feature='chr9:132283881-132284881',  # Use cis_feature instead of cis_gene
+    primary_modality='atac'
+)
+
+# Access cis ATAC region
+cis_mod = model.get_modality('cis')
+cis_region = cis_mod.feature_meta.index[0]
+print(f"Cis region: {cis_region}")
+
+# Same workflow as with genes
+cis_counts = cis_mod.counts[0, :]
+# ... rest of analysis ...
+```
 
 ---
 
