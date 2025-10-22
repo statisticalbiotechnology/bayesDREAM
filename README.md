@@ -148,6 +148,7 @@ See **[docs/SAVE_LOAD_GUIDE.md](docs/SAVE_LOAD_GUIDE.md)** for complete save/loa
 ### Technical Documentation
 - **[CLAUDE.md](CLAUDE.md)** - Complete architecture documentation for Claude Code
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - System architecture and design patterns
+- **[docs/REFACTORING_SUMMARY.md](docs/REFACTORING_SUMMARY.md)** - Modular refactoring details
 - **[docs/PER_MODALITY_FITTING_PLAN.md](docs/PER_MODALITY_FITTING_PLAN.md)** - Per-modality fitting implementation
 
 ## Data Requirements
@@ -209,16 +210,32 @@ See [tests/README.md](tests/README.md) for complete testing documentation.
 ```
 bayesDREAM/
 ├── bayesDREAM/           # Core package
-│   ├── model.py          # Main bayesDREAM class
+│   ├── model.py          # Main bayesDREAM class (~311 lines)
+│   ├── core.py           # _BayesDREAMCore base class (~909 lines)
 │   ├── modality.py       # Modality data structure
 │   ├── distributions.py  # Distribution-specific samplers
 │   ├── splicing.py       # Splicing processing (pure Python)
+│   ├── fitting/          # Modular fitting methods
+│   │   ├── helpers.py    # Helper functions
+│   │   ├── technical.py  # TechnicalFitter
+│   │   ├── cis.py        # CisFitter
+│   │   └── trans.py      # TransFitter
+│   ├── io/               # Save/load functionality
+│   │   ├── save.py       # ModelSaver
+│   │   └── load.py       # ModelLoader
+│   ├── modalities/       # Modality-specific methods
+│   │   ├── transcript.py
+│   │   ├── splicing_modality.py
+│   │   ├── atac.py
+│   │   └── custom.py
 │   └── __init__.py       # Package exports
 ├── examples/             # Usage examples
 ├── tests/                # Test suite
 ├── docs/                 # Documentation
 └── toydata/              # Test datasets
 ```
+
+**Note**: The codebase was refactored from a single 4,537-line file into a modular structure (93% reduction in model.py). This improves maintainability while preserving complete backward compatibility. See [docs/REFACTORING_SUMMARY.md](docs/REFACTORING_SUMMARY.md) for details.
 
 ## Contributing
 

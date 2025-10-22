@@ -15,166 +15,166 @@ from ..splicing import create_splicing_modality
 
 class CustomModalityMixin:
     """Mixin for custom modality support."""
-
-def add_custom_modality(
+    
+    def add_custom_modality(
         self,
         name: str,
         counts: Union[np.ndarray, pd.DataFrame],
         feature_meta: pd.DataFrame,
         distribution: str,
         denominator: Optional[np.ndarray] = None
-):
-    """
-    Add a custom user-defined modality with distribution-specific filtering.
+    ):
+        """
+        Add a custom user-defined modality with distribution-specific filtering.
 
-    Parameters
-    ----------
-    name : str
-        Modality name
-    counts : array or DataFrame
-        Measurement data
-    feature_meta : pd.DataFrame
-        Feature metadata
-    distribution : str
-        'negbinom', 'multinomial', 'binomial', 'normal', or 'mvnormal'
-    denominator : array, optional
-        For binomial: denominator counts
-    """
-    # Convert counts to ndarray for consistent filtering
-    if isinstance(counts, pd.DataFrame):
-        counts_array = counts.values
-        is_dataframe = True
-        counts_index = counts.index
-    else:
-        counts_array = np.asarray(counts)
-        is_dataframe = False
-        counts_index = None
-
-    # Apply distribution-specific filtering
-    valid_features = None
-
-    if distribution in ['negbinom', 'normal']:
-        # Filter features with zero standard deviation
-        if counts_array.ndim == 2:
-            feature_stds = counts_array.std(axis=1)
-            valid_features = feature_stds != 0
-            num_filtered = (~valid_features).sum()
-            if num_filtered > 0:
-                print(f"[INFO] Filtering {num_filtered} feature(s) with zero std in '{name}' modality ({distribution})")
-
-    elif distribution == 'binomial':
-        # Filter features with zero variance in numerator/denominator ratio
-        if denominator is None:
-            raise ValueError(f"denominator required for binomial distribution in '{name}' modality")
-
-        if isinstance(denominator, pd.DataFrame):
-            denom_array = denominator.values
+        Parameters
+        ----------
+        name : str
+            Modality name
+        counts : array or DataFrame
+            Measurement data
+        feature_meta : pd.DataFrame
+            Feature metadata
+        distribution : str
+            'negbinom', 'multinomial', 'binomial', 'normal', or 'mvnormal'
+        denominator : array, optional
+            For binomial: denominator counts
+        """
+        # Convert counts to ndarray for consistent filtering
+        if isinstance(counts, pd.DataFrame):
+            counts_array = counts.values
+            is_dataframe = True
+            counts_index = counts.index
         else:
-            denom_array = np.asarray(denominator)
+            counts_array = np.asarray(counts)
+            is_dataframe = False
+            counts_index = None
 
-        if counts_array.shape != denom_array.shape:
-            raise ValueError(f"counts and denominator must have same shape for binomial in '{name}' modality")
+        # Apply distribution-specific filtering
+        valid_features = None
 
-        if counts_array.ndim == 2:
+        if distribution in ['negbinom', 'normal']:
+            # Filter features with zero standard deviation
+            if counts_array.ndim == 2:
+                feature_stds = counts_array.std(axis=1)
+                valid_features = feature_stds != 0
+                num_filtered = (~valid_features).sum()
+                if num_filtered > 0:
+                    print(f"[INFO] Filtering {num_filtered} feature(s) with zero std in '{name}' modality ({distribution})")
+
+        elif distribution == 'binomial':
+            # Filter features with zero variance in numerator/denominator ratio
+            if denominator is None:
+                raise ValueError(f"denominator required for binomial distribution in '{name}' modality")
+
+            if isinstance(denominator, pd.DataFrame):
+                denom_array = denominator.values
+            else:
+                denom_array = np.asarray(denominator)
+
+            if counts_array.shape != denom_array.shape:
+                raise ValueError(f"counts and denominator must have same shape for binomial in '{name}' modality")
+
+            if counts_array.ndim == 2:
+                n_features = counts_array.shape[0]
+                valid_features = np.ones(n_features, dtype=bool)
+
+                for i in range(n_features):
+                    numer = counts_array[i, :]
+                    denom = denom_array[i, :]
+
+                    # Compute ratios, excluding cells where denominator is 0
+                    valid_mask = denom > 0
+                    if valid_mask.sum() == 0:
+                        valid_features[i] = False
+                        continue
+
+                    ratios = numer[valid_mask] / denom[valid_mask]
+                    if ratios.std() == 0:
+                        valid_features[i] = False
+
+                num_filtered = (~valid_features).sum()
+                if num_filtered > 0:
+                    print(f"[INFO] Filtering {num_filtered} feature(s) with zero ratio variance in '{name}' modality (binomial)")
+
+        elif distribution == 'multinomial':
+            # Filter features where ALL category ratios have zero variance
+            if counts_array.ndim != 3:
+                raise ValueError(f"multinomial requires 3D counts (features, cells, categories) in '{name}' modality")
+
             n_features = counts_array.shape[0]
             valid_features = np.ones(n_features, dtype=bool)
 
             for i in range(n_features):
-                numer = counts_array[i, :]
-                denom = denom_array[i, :]
+                feature_counts = counts_array[i, :, :]  # (cells, categories)
+                totals = feature_counts.sum(axis=1, keepdims=True)  # (cells, 1)
 
-                # Compute ratios, excluding cells where denominator is 0
-                valid_mask = denom > 0
-                if valid_mask.sum() == 0:
-                    valid_features[i] = False
-                    continue
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    ratios = np.where(totals > 0, feature_counts / totals, 0)  # (cells, categories)
 
-                ratios = numer[valid_mask] / denom[valid_mask]
-                if ratios.std() == 0:
+                # Check if ALL ratios have zero std across cells
+                ratio_stds = ratios.std(axis=0)  # std for each category across cells
+                if np.all(ratio_stds == 0):
                     valid_features[i] = False
 
             num_filtered = (~valid_features).sum()
             if num_filtered > 0:
-                print(f"[INFO] Filtering {num_filtered} feature(s) with zero ratio variance in '{name}' modality (binomial)")
+                print(f"[INFO] Filtering {num_filtered} feature(s) with zero variance in ALL category ratios in '{name}' modality (multinomial)")
 
-    elif distribution == 'multinomial':
-        # Filter features where ALL category ratios have zero variance
-        if counts_array.ndim != 3:
-            raise ValueError(f"multinomial requires 3D counts (features, cells, categories) in '{name}' modality")
+        elif distribution == 'mvnormal':
+            # Filter features where ALL dimensions have zero variance
+            if counts_array.ndim != 3:
+                raise ValueError(f"mvnormal requires 3D counts (features, cells, dimensions) in '{name}' modality")
 
-        n_features = counts_array.shape[0]
-        valid_features = np.ones(n_features, dtype=bool)
+            n_features = counts_array.shape[0]
+            valid_features = np.ones(n_features, dtype=bool)
 
-        for i in range(n_features):
-            feature_counts = counts_array[i, :, :]  # (cells, categories)
-            totals = feature_counts.sum(axis=1, keepdims=True)  # (cells, 1)
+            for i in range(n_features):
+                feature_data = counts_array[i, :, :]  # (cells, dimensions)
+                dim_stds = feature_data.std(axis=0)  # std for each dimension
+                if np.all(dim_stds == 0):
+                    valid_features[i] = False
 
-            with np.errstate(divide='ignore', invalid='ignore'):
-                ratios = np.where(totals > 0, feature_counts / totals, 0)  # (cells, categories)
+            num_filtered = (~valid_features).sum()
+            if num_filtered > 0:
+                print(f"[INFO] Filtering {num_filtered} feature(s) with zero variance in ALL dimensions in '{name}' modality (mvnormal)")
 
-            # Check if ALL ratios have zero std across cells
-            ratio_stds = ratios.std(axis=0)  # std for each category across cells
-            if np.all(ratio_stds == 0):
-                valid_features[i] = False
+        # Apply filtering if necessary
+        if valid_features is not None:
+            if not np.any(valid_features):
+                raise ValueError(f"No features left after filtering zero-variance features in '{name}' modality!")
 
-        num_filtered = (~valid_features).sum()
-        if num_filtered > 0:
-            print(f"[INFO] Filtering {num_filtered} feature(s) with zero variance in ALL category ratios in '{name}' modality (multinomial)")
+            if not np.all(valid_features):
+                # Apply mask
+                counts_array = counts_array[valid_features]
+                feature_meta = feature_meta.iloc[valid_features].copy()
+                if denominator is not None:
+                    if isinstance(denominator, pd.DataFrame):
+                        denominator = denominator.iloc[valid_features]
+                    else:
+                        denominator = denom_array[valid_features]
 
-    elif distribution == 'mvnormal':
-        # Filter features where ALL dimensions have zero variance
-        if counts_array.ndim != 3:
-            raise ValueError(f"mvnormal requires 3D counts (features, cells, dimensions) in '{name}' modality")
-
-        n_features = counts_array.shape[0]
-        valid_features = np.ones(n_features, dtype=bool)
-
-        for i in range(n_features):
-            feature_data = counts_array[i, :, :]  # (cells, dimensions)
-            dim_stds = feature_data.std(axis=0)  # std for each dimension
-            if np.all(dim_stds == 0):
-                valid_features[i] = False
-
-        num_filtered = (~valid_features).sum()
-        if num_filtered > 0:
-            print(f"[INFO] Filtering {num_filtered} feature(s) with zero variance in ALL dimensions in '{name}' modality (mvnormal)")
-
-    # Apply filtering if necessary
-    if valid_features is not None:
-        if not np.any(valid_features):
-            raise ValueError(f"No features left after filtering zero-variance features in '{name}' modality!")
-
-        if not np.all(valid_features):
-            # Apply mask
-            counts_array = counts_array[valid_features]
-            feature_meta = feature_meta.iloc[valid_features].copy()
-            if denominator is not None:
-                if isinstance(denominator, pd.DataFrame):
-                    denominator = denominator.iloc[valid_features]
-                else:
-                    denominator = denom_array[valid_features]
-
-    # Convert back to DataFrame if original was DataFrame
-    if is_dataframe:
-        if counts_array.ndim == 2:
-            counts_final = pd.DataFrame(
-                counts_array,
-                index=feature_meta.index,
-                columns=counts_index if counts_index is not None else range(counts_array.shape[1])
-            )
+        # Convert back to DataFrame if original was DataFrame
+        if is_dataframe:
+            if counts_array.ndim == 2:
+                counts_final = pd.DataFrame(
+                    counts_array,
+                    index=feature_meta.index,
+                    columns=counts_index if counts_index is not None else range(counts_array.shape[1])
+                )
+            else:
+                # For 3D data, keep as ndarray
+                counts_final = counts_array
         else:
-            # For 3D data, keep as ndarray
             counts_final = counts_array
-    else:
-        counts_final = counts_array
 
-    modality = Modality(
-        name=name,
-        counts=counts_final,
-        feature_meta=feature_meta,
-        distribution=distribution,
-        denominator=denominator,
-        cells_axis=1
-    )
-    self.add_modality(name, modality)
+        modality = Modality(
+            name=name,
+            counts=counts_final,
+            feature_meta=feature_meta,
+            distribution=distribution,
+            denominator=denominator,
+            cells_axis=1
+        )
+        self.add_modality(name, modality)
 

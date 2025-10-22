@@ -18,14 +18,33 @@ The codebase uses PyTorch and Pyro for probabilistic programming and variational
 bayesDREAM_forClaude/
 ├── bayesDREAM/
 │   ├── __init__.py          # Package exports
-│   ├── model.py             # Main bayesDREAM class (unified multi-modal)
+│   ├── model.py             # Main bayesDREAM class (~311 lines)
+│   ├── core.py              # _BayesDREAMCore base class (~909 lines)
 │   ├── modality.py          # Modality class for multi-modal data
 │   ├── distributions.py     # Distribution-specific observation samplers
-│   └── splicing.py          # Splicing data processing (pure Python)
+│   ├── splicing.py          # Splicing data processing (pure Python)
+│   ├── fitting/             # Fitting methods (modular)
+│   │   ├── __init__.py
+│   │   ├── helpers.py       # Shared helper functions
+│   │   ├── technical.py     # TechnicalFitter class
+│   │   ├── cis.py           # CisFitter class
+│   │   └── trans.py         # TransFitter class
+│   ├── io/                  # Save/load functionality
+│   │   ├── __init__.py
+│   │   ├── save.py          # ModelSaver class
+│   │   └── load.py          # ModelLoader class
+│   └── modalities/          # Modality-specific methods
+│       ├── __init__.py
+│       ├── transcript.py    # TranscriptModalityMixin
+│       ├── splicing_modality.py  # SplicingModalityMixin
+│       ├── atac.py          # ATACModalityMixin
+│       └── custom.py        # CustomModalityMixin
 ├── tests/                   # Test suite
 ├── toydata/                 # Test datasets (genes, splicing, metadata)
 └── docs/                    # Documentation
 ```
+
+**Note**: The codebase was recently refactored from a single 4,537-line `model.py` file into a modular structure. This improves maintainability while preserving backward compatibility. See `docs/REFACTORING_SUMMARY.md` for details.
 
 ## Core Architecture
 
@@ -94,13 +113,40 @@ Run infrastructure tests (requires pyroenv conda environment):
 
 ### Modifying the Model
 
-When adding new functionality to `bayesDREAM/model.py`:
+The codebase uses a modular structure with delegation:
 
-1. Helper functions go at the top of the file (before the class definition)
-2. New Pyro models should follow the naming convention `_model_<name>`
-3. Public methods should include docstrings explaining parameters
-4. Use `self.device` for tensor placement
-5. Save important intermediate results with `torch.save()`
+1. **Core fitting logic**: Pyro models and fitting methods are in `fitting/` directory
+   - `fitting/technical.py`: TechnicalFitter class with `_model_technical` and `fit_technical`
+   - `fitting/cis.py`: CisFitter class with `_model_x` and `fit_cis`
+   - `fitting/trans.py`: TransFitter class with `_model_y` and `fit_trans`
+   - `fitting/helpers.py`: Shared helper functions (Hill functions, etc.)
+
+2. **Base class**: `core.py` contains `_BayesDREAMCore` which:
+   - Initializes fitter objects (`_technical_fitter`, `_cis_fitter`, `_trans_fitter`)
+   - Delegates method calls to appropriate fitters
+   - Contains utility methods (parameter setters, permutation, etc.)
+
+3. **Main class**: `model.py` contains `bayesDREAM` which:
+   - Inherits from `_BayesDREAMCore` and modality mixins
+   - Handles multi-modal initialization
+   - Provides modality management methods
+
+4. **Modality mixins**: `modalities/` directory contains methods for adding different data types:
+   - `transcript.py`: `add_transcript_modality`
+   - `splicing_modality.py`: `add_splicing_modality`
+   - `atac.py`: `add_atac_modality`
+   - `custom.py`: `add_custom_modality`
+
+5. **I/O operations**: `io/` directory contains save/load functionality
+   - `save.py`: ModelSaver class
+   - `load.py`: ModelLoader class
+
+**When adding new functionality**:
+- Helper functions → `fitting/helpers.py`
+- New Pyro models → appropriate fitter in `fitting/` (follow `_model_<name>` convention)
+- Modality-specific code → appropriate mixin in `modalities/`
+- Save/load methods → `io/save.py` or `io/load.py`
+- All fitters access model attributes via `self.model.*` (not `self.*`)
 
 ### Adding New Function Types
 
@@ -331,3 +377,53 @@ donor_meta = donor_modality.feature_meta    # Donor site annotations
 ```
 
 See `tests/` directory for complete examples including transcripts, custom modalities, and advanced usage.
+
+---
+
+## Development Workflow
+
+### Running Tests
+
+All tests are in the `tests/` directory. Run them with:
+
+```bash
+cd "/Users/lrosen/Library/Mobile Documents/com~apple~CloudDocs/Documents/Postdoc/bayesDREAM code/bayesDREAM_forClaude"
+export PYTHONPATH="."
+/opt/anaconda3/envs/pyroenv/bin/python tests/test_multimodal_fitting.py
+/opt/anaconda3/envs/pyroenv/bin/python tests/test_negbinom_compat.py
+/opt/anaconda3/envs/pyroenv/bin/python tests/test_technical_compat.py
+/opt/anaconda3/envs/pyroenv/bin/python tests/test_per_modality_fitting.py
+/opt/anaconda3/envs/pyroenv/bin/python tests/test_gene_meta.py
+/opt/anaconda3/envs/pyroenv/bin/python tests/test_modality_save_load.py
+```
+
+### Documentation
+
+All documentation is in the `docs/` directory:
+
+- `API_REFERENCE.md`: Public API documentation
+- `ARCHITECTURE.md`: System architecture and design decisions
+- `OUTSTANDING_TASKS.md`: **Current outstanding tasks and known issues**
+- `REFACTORING_PLAN.md`: Details of the modular refactoring
+- `SAVE_LOAD_GUIDE.md`: Guide to save/load functionality
+- `QUICKSTART_MULTIMODAL.md`: Quick start for multi-modal analysis
+- `PER_MODALITY_FITTING_PLAN.md`: Plan for per-modality fitting
+- Various specialized guides (ATAC, splicing, etc.)
+
+**Important**: Check `docs/OUTSTANDING_TASKS.md` for current development priorities, including the guide-prior infrastructure that needs to be integrated into `fit_cis()`.
+
+### Code Organization
+
+- **Python source**: `bayesDREAM/` directory
+- **Tests**: `tests/` directory
+- **Documentation**: `docs/` directory
+- **Examples**: `examples/` directory
+- **Test data**: `toydata/` directory
+
+### Making Changes
+
+1. Read `docs/OUTSTANDING_TASKS.md` to understand current priorities
+2. Make changes in appropriate module (see "Modifying the Model" section above)
+3. Run relevant tests to ensure nothing breaks
+4. Update documentation if public API changes
+5. Add tests for new functionality

@@ -107,41 +107,28 @@ except Exception as e:
     traceback.print_exc()
     sys.exit(1)
 
-# Test 2: Test fit_modality_technical() delegation
-print("\nTest 2: Test fit_modality_technical() delegation...")
+# Test 2: Test fitting methods exist
+print("\nTest 2: Test fitting methods exist...")
 try:
-    # This should work (delegates to fit_technical)
-    print("  - Testing delegation to fit_technical()...")
-    # Note: Not actually running the fit (takes too long), just testing the method exists
-    assert hasattr(model, 'fit_modality_technical')
-    print("✓ fit_modality_technical() method exists")
-
-    # Test that it raises NotImplementedError for non-negbinom distributions
-    # (We don't have any yet, so we'll skip this test)
+    print("  - Testing core fitting methods...")
+    assert hasattr(model, 'fit_technical')
+    assert hasattr(model, 'fit_cis')
+    assert hasattr(model, 'fit_trans')
+    assert hasattr(model, 'set_technical_groups')
+    print("✓ All core fitting methods exist")
+    print("  - fit_technical()")
+    print("  - fit_cis()")
+    print("  - fit_trans()")
+    print("  - set_technical_groups()")
 
 except Exception as e:
-    print(f"✗ fit_modality_technical() test failed: {e}")
+    print(f"✗ Fitting methods test failed: {e}")
     import traceback
     traceback.print_exc()
     sys.exit(1)
 
-# Test 3: Test fit_modality_trans() delegation
-print("\nTest 3: Test fit_modality_trans() delegation...")
-try:
-    # This should work (delegates to fit_trans)
-    print("  - Testing delegation to fit_trans()...")
-    # Note: Not actually running the fit (takes too long), just testing the method exists
-    assert hasattr(model, 'fit_modality_trans')
-    print("✓ fit_modality_trans() method exists")
-
-except Exception as e:
-    print(f"✗ fit_modality_trans() test failed: {e}")
-    import traceback
-    traceback.print_exc()
-    sys.exit(1)
-
-# Test 4: Test that gene modality excludes cis gene
-print("\nTest 4: Test that gene modality excludes cis gene...")
+# Test 3: Test that gene modality excludes cis gene
+print("\nTest 3: Test that gene modality excludes cis gene...")
 try:
     gene_modality = model.get_modality('gene')
     gene_names = gene_modality.feature_meta['gene'].tolist()
@@ -157,8 +144,8 @@ except Exception as e:
     traceback.print_exc()
     sys.exit(1)
 
-# Test 5: Test that base class still has cis gene
-print("\nTest 5: Test that base class still has cis gene for cis modeling...")
+# Test 4: Test that base class still has cis gene
+print("\nTest 4: Test that base class still has cis gene for cis modeling...")
 try:
     assert 'GFI1B' in model.counts.index, "Cis gene should be in base class counts!"
     assert model.cis_gene == 'GFI1B'
@@ -178,9 +165,7 @@ print("\nSummary:")
 print("1. ✓ Imports successful")
 print("2. ✓ Distribution registry functional")
 print("3. ✓ bayesDREAM created successfully")
-print("4. ✓ fit_modality_technical() method exists")
-print("5. ✓ fit_modality_trans() method exists")
-print("6. ✓ Gene modality excludes cis gene")
-print("7. ✓ Base class retains cis gene for cis modeling")
-print("\nInfrastructure is ready for multi-modal fitting!")
-print("Next step: Implement distribution-specific models for fit_technical and fit_trans.")
+print("4. ✓ Core fitting methods exist (fit_technical, fit_cis, fit_trans)")
+print("5. ✓ Gene modality excludes cis gene")
+print("6. ✓ Base class retains cis gene for cis modeling")
+print("\nMulti-modal infrastructure is ready!")

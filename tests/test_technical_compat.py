@@ -50,37 +50,30 @@ model = bayesDREAM(
 )
 print(f"✓ Model created successfully")
 
-print("\nTesting fit_technical signature compatibility...")
+print("\nTesting fit_technical functionality...")
 try:
     import torch
-    import inspect
 
-    # Check that fit_technical accepts the new parameters
-    sig = inspect.signature(model.fit_technical)
-    params = list(sig.parameters.keys())
-    print(f"  fit_technical parameters: {params}")
+    # Set up technical groups first (required)
+    print("  Setting up technical groups...")
+    model.set_technical_groups(['cell_line'])
+    print("  ✓ Technical groups set")
 
-    assert 'distribution' in params, "Missing 'distribution' parameter"
-    assert 'denominator' in params, "Missing 'denominator' parameter"
-    assert sig.parameters['distribution'].default == 'negbinom', "Wrong default for distribution"
-    assert sig.parameters['sum_factor_col'].default is None, "sum_factor_col should default to None"
-
-    print("✓ Signature is correct")
-
-    print("\nTesting fit_technical with negbinom (short run)...")
+    print("\n  Testing fit_technical with negbinom (short run)...")
     model.fit_technical(
-        covariates=['cell_line'],
         sum_factor_col='sum_factor',  # Required for negbinom
         distribution='negbinom',  # Explicit
         niters=50,  # Very short for testing
+        nsamples=10,  # Few samples for testing
         lr=1e-2
     )
-    print("✓ fit_technical completed successfully with negbinom")
+    print("  ✓ fit_technical completed successfully with negbinom")
 
-    # Verify alpha_y_prefit was set
-    assert hasattr(model, 'alpha_y_prefit'), "alpha_y_prefit not set"
-    assert model.alpha_y_prefit is not None, "alpha_y_prefit is None"
-    print(f"✓ alpha_y_prefit shape: {model.alpha_y_prefit.shape}")
+    # Verify alpha_y_prefit was set in the modality
+    gene_modality = model.get_modality('gene')
+    assert hasattr(gene_modality, 'alpha_y_prefit'), "alpha_y_prefit not set in modality"
+    assert gene_modality.alpha_y_prefit is not None, "alpha_y_prefit is None"
+    print(f"  ✓ alpha_y_prefit shape: {gene_modality.alpha_y_prefit.shape}")
 
 except Exception as e:
     print(f"✗ Test failed: {e}")

@@ -51,9 +51,11 @@ warnings.simplefilter(action="ignore", category=FutureWarning)
 
 class _BayesDREAMCore:
     """
-    Internal core class for the three-step Bayesian Dosage Response Effects Across Modalities framework.
-
-    This class provides the foundational infrastructure and delegates to specialized fitters.
+    Internal core class for the three-step Bayesian Dosage Response Effects Across Modalities framework:
+    
+    1) Optional cell-line prefit (modeling alpha_y for NTC),
+    2) Fitting cis effects (model_x),
+    3) Fitting trans effects (model_y).
     """
 
     def __init__(
@@ -278,15 +280,14 @@ class _BayesDREAMCore:
         self.trace_x = None          # from step2
         self.trace_y = None          # from step3
 
-        print(f"[INIT] bayesDREAM core: label={self.label}, device={self.device}")
-
-
-    # Initialize fitters
+        # Initialize fitter objects and helpers
         self._technical_fitter = TechnicalFitter(self)
         self._cis_fitter = CisFitter(self)
         self._trans_fitter = TransFitter(self)
         self._saver = ModelSaver(self)
         self._loader = ModelLoader(self)
+
+        print(f"[INIT] bayesDREAM core: label={self.label}, device={self.device}")
 
     def cis_init_loc_fn(
         self,
@@ -647,6 +648,121 @@ class _BayesDREAMCore:
         self.meta = meta_out
         print(f"[INFO] Created '{sum_factor_col_adj}' in meta with NTC-based guide-level adjustment.")
 
+    def refit_sumfactor(
+        self,
+        sum_factor_col_old: str = "sum_factor",
+        sum_factor_col_refit: str = "sum_factor_new",
+        covariates: list[str] = None, # ["lane", "cell_line"] or could be empty
+        n_knots: int = 5,
+        degree: int = 3,
+        alpha: float = 0.1
+    ):
+        """
+        Step 2 of sum factor adjustment: Remove cis gene contribution.
+
+        Use AFTER fit_cis() and BEFORE fit_trans().
+        Fits a spline regression: (sum_factor - baseline_ntc) ~ f(x_true)
+        Then removes the predicted x_true contribution from sum factors.
+
+        This ensures trans modeling isn't confounded by cis expression levels.
+
+        Typical workflow:
+            1. adjust_ntc_sum_factor() -> creates 'sum_factor_adj'
+            2. fit_cis(sum_factor_col='sum_factor_adj')
+            3. refit_sumfactor() -> creates 'sum_factor_refit'  <-- This step
+            4. fit_trans(sum_factor_col='sum_factor_refit')
+
+        Parameters
+        ----------
+        sum_factor_col_old : str
+            Name of existing sum factor column (typically from adjust_ntc_sum_factor)
+        sum_factor_col_refit : str
+            Name for refitted sum factor column to create (default: 'sum_factor_new')
+        covariates : list of str, optional
+            Columns to group by for baseline NTC calculation (e.g., ['cell_line', 'lane'])
+        n_knots : int
+            Number of spline knots for regression (default: 5)
+        degree : int
+            Polynomial degree of spline pieces (default: 3)
+        alpha : float
+            Ridge regression regularization parameter (default: 0.1)
+
+        Returns
+        -------
+        None
+            Creates new column sum_factor_col_refit in self.meta
+
+        Notes
+        -----
+        Algorithm:
+        1. Compute baseline NTC sum factor for each covariate group
+        2. Compute leftover = sum_factor - baseline_ntc
+        3. Fit spline model: leftover ~ f(x_true)
+        4. Predict x_true contribution: y_pred = model(x_true)
+        5. Adjusted sum factor = max(0, leftover - y_pred + baseline_ntc)
+
+        Requires:
+        - self.x_true must be set (from fit_cis())
+        - self.x_true_type must be 'posterior' or 'point'
+        """
+        sum_factor_data = self.meta[sum_factor_col_old].values  # shape (N,)
+        
+        if covariates is None:
+            covariates = []
+
+        if covariates:
+            # Create a single group identifier by concatenating covariate values
+            tech_group = self.meta[covariates].astype(str).agg('_'.join, axis=1)
+            groups, group_id = np.unique(tech_group, return_inverse=True)
+            n_groups = len(groups)
+        else:
+            # No grouping, treat all samples as a single group
+            groups, group_id = np.array(["all"]), np.zeros(len(self.meta), dtype=int)
+            n_groups = 1
+        
+        baseline_ntc_of_group = np.zeros(n_groups)
+        for grp, grp_name in enumerate(groups):
+            mask_grp = (tech_group == grp_name)
+            # Among that group, pick rows with gene == 'ntc'
+            mask_ntc = (self.meta['target'] == 'ntc') & mask_grp
+        
+            # If a group has no NTC, you must decide on a fallback
+            # For example, use the overall mean or 1.0, or skip that group
+            if not np.any(mask_ntc):
+                baseline_ntc_of_group[grp] = 1.0  # fallback
+            else:
+                # The mean of sum_factor_data among the NTC rows
+                baseline_ntc_of_group[grp] = np.mean(sum_factor_data[mask_ntc])
+        
+        # leftover_data[i] = sum_factor[i] - baseline_ntc_of_group[group_id[i]]
+        leftover_data = sum_factor_data - baseline_ntc_of_group[group_id]
+    
+        # ------------------------------------------------------------------------------
+        # Build a pipeline with a Spline transformer + Linear regression
+        # ------------------------------------------------------------------------------
+        # 'n_knots' is how many spline knots to use;
+        # 'degree' is the polynomial degree of each spline piece.
+        model_spline_ridge = make_pipeline(
+            SplineTransformer(n_knots=n_knots, degree=degree),
+            Ridge(alpha=alpha)  # alpha > 0 adds penalty
+        )
+        
+        # ------------------------------------------------------------------------------
+        # Fit the model on training data
+        # ------------------------------------------------------------------------------
+        if self.x_true_type == 'posterior':
+            X_true = self.x_true.mean(dim=0)
+        else:
+            X_true = self.x_true
+        model_spline_ridge.fit(X_true.reshape(-1, 1), leftover_data)
+        
+        # ------------------------------------------------------------------------------
+        # Predict on train & test
+        # ------------------------------------------------------------------------------
+        y_pred = model_spline_ridge.predict(X_true.reshape(-1, 1))
+        self.meta[sum_factor_col_refit] = np.max(np.vstack((leftover_data - y_pred + baseline_ntc_of_group[group_id], np.zeros_like(leftover_data))), axis=0)
+        print(f"[INFO] Created '{sum_factor_col_refit}' in meta with xtrue-based adjustment.")
+
     def permute_genes(
         self,
         genes2permute: list[str] = None,
@@ -759,10 +875,6 @@ class _BayesDREAMCore:
     def fit_cis(self, *args, **kwargs):
         """Delegate to CisFitter."""
         return self._cis_fitter.fit_cis(*args, **kwargs)
-
-    def refit_sumfactor(self, *args, **kwargs):
-        """Delegate to CisFitter."""
-        return self._cis_fitter.refit_sumfactor(*args, **kwargs)
 
     def _model_y(self, *args, **kwargs):
         """Delegate to TransFitter."""

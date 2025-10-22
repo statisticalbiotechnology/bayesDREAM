@@ -7,6 +7,21 @@ molecular modalities using PyTorch and Pyro.
 
 from .model import bayesDREAM
 from .modality import Modality
+from .distributions import (
+    get_observation_sampler,
+    requires_denominator,
+    requires_sum_factor,
+    is_3d_distribution,
+    DISTRIBUTION_REGISTRY
+)
 
 __version__ = "1.0.0"
-__all__ = ["bayesDREAM", "Modality"]
+__all__ = [
+    "bayesDREAM",
+    "Modality",
+    "get_observation_sampler",
+    "requires_denominator",
+    "requires_sum_factor",
+    "is_3d_distribution",
+    "DISTRIBUTION_REGISTRY"
+]
