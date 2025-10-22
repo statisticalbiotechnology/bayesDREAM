@@ -154,7 +154,7 @@ class bayesDREAM(
             # Create gene modality (trans genes only, without cis gene)
             gene_feature_meta = pd.DataFrame({
                 'gene': counts_trans.index.tolist()
-            })
+            }, index=counts_trans.index)  # Preserve gene names as index
             self.modalities['gene'] = Modality(
                 name='gene',
                 counts=counts_trans,
