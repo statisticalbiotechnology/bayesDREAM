@@ -66,6 +66,7 @@ class bayesDREAM(
         gene_meta: pd.DataFrame = None,
         modalities: Dict[str, Modality] = None,
         cis_gene: str = None,
+        cis_feature: str = None,
         primary_modality: str = 'gene',
         guide_covariates: list = ["cell_line"],
         guide_covariates_ntc: list = None,
@@ -83,18 +84,27 @@ class bayesDREAM(
         meta : pd.DataFrame
             Cell-level metadata with columns: cell, guide, target, sum_factor, etc.
         counts : pd.DataFrame, optional
-            Gene counts (genes × cells). If provided, becomes 'gene' modality.
-            Either counts or modalities (with 'gene' key) must be provided.
+            Count matrix for primary modality. Shape and interpretation depend on primary_modality:
+            - For 'gene': genes × cells (negbinom)
+            - For 'atac': regions × cells (negbinom)
+            - For other modalities: see add_*_modality() methods
         gene_meta : pd.DataFrame, optional
-            Gene metadata DataFrame. Recommended columns: 'gene', 'gene_name', 'gene_id'.
+            Gene metadata DataFrame (only used if primary_modality='gene').
+            Recommended columns: 'gene', 'gene_name', 'gene_id'.
             If not provided, minimal metadata will be created from counts.index.
         modalities : Dict[str, Modality], optional
-            Pre-constructed modalities. If 'gene' not present and counts is provided,
-            a gene modality will be created from counts.
-        cis_gene : str
-            Gene targeted in cis
+            Pre-constructed modalities. Not commonly used.
+        cis_gene : str, optional
+            For gene modality: gene name to extract as 'cis' modality (e.g., 'GFI1B')
+            Alias for cis_feature when primary_modality='gene'
+        cis_feature : str, optional
+            Feature identifier to extract as 'cis' modality from primary modality.
+            - For 'gene': gene name (same as cis_gene)
+            - For 'atac': region ID (e.g., 'chr9:132283881-132284881')
+            - For other modalities: feature identifier from that modality
         primary_modality : str
-            Which modality to use for cis effects (default: 'gene')
+            Which modality to use for trans effects (default: 'gene')
+            The 'cis' modality will be extracted from this modality during initialization.
         guide_covariates : list
             Covariates for guide grouping
         guide_covariates_ntc : list, optional
@@ -109,59 +119,59 @@ class bayesDREAM(
             Random seed
         cores : int
             Number of CPU cores
+
+        Notes
+        -----
+        The 'cis' modality is ONLY extracted during initialization from the primary modality.
+        When you call add_*_modality() methods later, NO cis extraction occurs.
         """
         # Initialize modalities dict
         self.modalities = modalities if modalities is not None else {}
 
+        # Resolve cis_feature: cis_gene is an alias for cis_feature when primary_modality='gene'
+        if cis_gene is not None and cis_feature is not None:
+            raise ValueError("Provide either cis_gene or cis_feature, not both")
+        if cis_gene is not None:
+            if primary_modality != 'gene':
+                warnings.warn(
+                    f"cis_gene parameter is intended for primary_modality='gene'. "
+                    f"You have primary_modality='{primary_modality}'. Use cis_feature instead.",
+                    UserWarning
+                )
+            cis_feature = cis_gene
+
         # Store original counts for base class initialization
         counts_for_base = counts
 
-        # Handle gene counts
-        if counts is not None:
-            if 'gene' in self.modalities:
-                warnings.warn("Both counts and modalities['gene'] provided. Using counts.")
-
-            # Check if cis gene has zero variance (critical for cis modeling)
-            if cis_gene is not None and cis_gene in counts.index:
-                cis_gene_std = counts.loc[cis_gene].std()
-                if cis_gene_std == 0:
-                    raise ValueError(
-                        f"Cis gene '{cis_gene}' has zero standard deviation across all cells. "
-                        f"Cannot model cis effects for a gene with constant expression."
-                    )
-
-            # Exclude cis gene from gene count modality features
-            # (The base class still gets the full counts with cis gene for cis modeling)
-            if cis_gene is not None and cis_gene in counts.index:
-                print(f"[INFO] Excluding cis gene '{cis_gene}' from gene count modality features")
-                counts_trans = counts.drop(index=cis_gene)
+        # Extract 'cis' modality from primary modality (if provided)
+        if counts is not None and cis_feature is not None:
+            if primary_modality == 'gene':
+                self._extract_cis_from_gene(counts, cis_feature)
+            elif primary_modality == 'atac':
+                raise NotImplementedError(
+                    "ATAC as primary modality during initialization is not yet implemented.\n"
+                    "Use primary_modality='gene' and then call model.add_atac_modality(..., cis_region='...')"
+                )
             else:
-                counts_trans = counts
+                raise NotImplementedError(
+                    f"Cis extraction from primary_modality='{primary_modality}' is not yet implemented.\n"
+                    f"Currently supported: 'gene'"
+                )
 
-            # Filter genes with zero standard deviation across ALL cells
-            # (genes that are constant across all cells can't be modeled)
-            gene_stds = counts_trans.std(axis=1)
-            zero_std_mask = gene_stds == 0
-            num_zero_std = zero_std_mask.sum()
-
-            if num_zero_std > 0:
-                print(f"[INFO] Filtering {num_zero_std} gene(s) with zero standard deviation across all cells")
-                counts_trans = counts_trans.loc[~zero_std_mask]
-
-            if len(counts_trans) == 0:
-                raise ValueError("No genes left after filtering genes with zero standard deviation!")
-
-            # Create gene modality (trans genes only, without cis gene)
-            gene_feature_meta = pd.DataFrame({
-                'gene': counts_trans.index.tolist()
-            }, index=counts_trans.index)  # Preserve gene names as index
-            self.modalities['gene'] = Modality(
-                name='gene',
-                counts=counts_trans,
-                feature_meta=gene_feature_meta,
-                distribution='negbinom',
-                cells_axis=1
-            )
+        # Create primary modality
+        if counts is not None:
+            if primary_modality == 'gene':
+                self._create_gene_modality(counts, cis_feature)
+            elif primary_modality == 'atac':
+                raise NotImplementedError(
+                    "ATAC as primary modality during initialization is not yet implemented.\n"
+                    "Use primary_modality='gene' and then call model.add_atac_modality()"
+                )
+            else:
+                raise NotImplementedError(
+                    f"Primary modality '{primary_modality}' is not yet implemented.\n"
+                    f"Currently supported: 'gene'"
+                )
 
         # Validate primary modality exists (or will be added later)
         if primary_modality not in self.modalities:
@@ -240,6 +250,88 @@ class bayesDREAM(
         print(f"[INIT] bayesDREAM: {len(self.modalities)} modalities loaded")
         for name, mod in self.modalities.items():
             print(f"  - {name}: {mod}")
+
+    def _extract_cis_from_gene(self, counts: pd.DataFrame, cis_gene: str):
+        """
+        Extract 'cis' modality from gene counts.
+
+        Parameters
+        ----------
+        counts : pd.DataFrame
+            Gene counts (genes × cells)
+        cis_gene : str
+            Gene name to extract as cis modality
+        """
+        if cis_gene not in counts.index:
+            raise ValueError(
+                f"cis_gene '{cis_gene}' not found in counts.\n"
+                f"Available genes: {counts.index[:10].tolist()}..."
+            )
+
+        # Check if cis gene has zero variance (critical for cis modeling)
+        cis_gene_std = counts.loc[cis_gene].std()
+        if cis_gene_std == 0:
+            raise ValueError(
+                f"Cis gene '{cis_gene}' has zero standard deviation across all cells. "
+                f"Cannot model cis effects for a gene with constant expression."
+            )
+
+        print(f"[INFO] Extracting 'cis' modality from gene '{cis_gene}'")
+        cis_feature_meta = pd.DataFrame({
+            'gene': [cis_gene]
+        }, index=[cis_gene])
+        self.modalities['cis'] = Modality(
+            name='cis',
+            counts=counts.loc[[cis_gene]],
+            feature_meta=cis_feature_meta,
+            distribution='negbinom',
+            cells_axis=1
+        )
+
+    def _create_gene_modality(self, counts: pd.DataFrame, cis_gene: Optional[str] = None):
+        """
+        Create 'gene' modality from gene counts (excluding cis gene if specified).
+
+        Parameters
+        ----------
+        counts : pd.DataFrame
+            Gene counts (genes × cells)
+        cis_gene : str, optional
+            If provided, this gene will be excluded from the gene modality
+        """
+        if 'gene' in self.modalities:
+            warnings.warn("Gene modality already exists. Overwriting.")
+
+        # Exclude cis gene from gene modality (trans genes only)
+        if cis_gene is not None and cis_gene in counts.index:
+            print(f"[INFO] Creating 'gene' modality with trans genes (excluding '{cis_gene}')")
+            counts_trans = counts.drop(index=cis_gene)
+        else:
+            counts_trans = counts
+
+        # Filter genes with zero standard deviation across ALL cells
+        gene_stds = counts_trans.std(axis=1)
+        zero_std_mask = gene_stds == 0
+        num_zero_std = zero_std_mask.sum()
+
+        if num_zero_std > 0:
+            print(f"[INFO] Filtering {num_zero_std} gene(s) with zero standard deviation across all cells")
+            counts_trans = counts_trans.loc[~zero_std_mask]
+
+        if len(counts_trans) == 0:
+            raise ValueError("No genes left after filtering genes with zero standard deviation!")
+
+        # Create gene modality (trans genes only)
+        gene_feature_meta = pd.DataFrame({
+            'gene': counts_trans.index.tolist()
+        }, index=counts_trans.index)
+        self.modalities['gene'] = Modality(
+            name='gene',
+            counts=counts_trans,
+            feature_meta=gene_feature_meta,
+            distribution='negbinom',
+            cells_axis=1
+        )
 
     def add_modality(
         self,

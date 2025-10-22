@@ -6,6 +6,36 @@ Last updated: 2025-01-22
 
 ---
 
+## Recent Changes
+
+### Cis Modality Design (2025-01-22)
+
+**Change**: bayesDREAM now uses a separate 'cis' modality for cis gene/feature modeling.
+
+**Design**:
+- During `bayesDREAM()` initialization, the 'cis' modality is extracted from the primary modality
+- The primary modality contains only trans features (cis feature excluded)
+- `fit_cis()` always uses the 'cis' modality, regardless of primary modality type
+
+**Benefits**:
+- Consistent interface: `fit_cis()` works the same for gene, ATAC, or any modality
+- Clear separation: cis vs trans features are explicitly separated
+- Extensibility: Easy to support new modality types
+
+**Parameters**:
+```python
+# For gene modality
+model = bayesDREAM(counts=gene_counts, cis_gene='GFI1B', ...)
+# Creates: 'cis' modality (just GFI1B) + 'gene' modality (trans genes)
+
+# For ATAC (not yet implemented as primary, use add_atac_modality with cis_region)
+model = bayesDREAM(counts=gene_counts, cis_gene=None)
+model.add_atac_modality(atac_counts, region_meta, cis_region='chr9:123-456')
+# Creates/updates: 'cis' modality (chr9:123-456)
+```
+
+---
+
 ## High Priority
 
 ### 1. Implement Guide-Prior Infrastructure in fit_cis

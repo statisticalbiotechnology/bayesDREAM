@@ -3,6 +3,7 @@ ATAC-seq modality methods for bayesDREAM.
 """
 
 import os
+import warnings
 import numpy as np
 import pandas as pd
 import torch
@@ -29,6 +30,11 @@ class ATACModalityMixin:
         ATAC fragment counts are treated as negative binomial data (like gene expression).
         Regions can be promoters, gene bodies, or distal elements (enhancers).
 
+        **IMPORTANT**: This method does NOT extract a 'cis' modality by default.
+        The 'cis' modality is only created during bayesDREAM() initialization.
+        However, if cis_region is specified AND no 'cis' modality exists yet,
+        this method will create one from the specified ATAC region.
+
         Parameters
         ----------
         atac_counts : array or DataFrame
@@ -45,25 +51,24 @@ class ATACModalityMixin:
         name : str, optional
             Name for this ATAC modality (default: 'atac')
         cis_region : str, optional
-            Region ID to use as cis gene proxy (e.g., 'chr9:132283881-132284881')
-            If provided, this region will be used in fit_cis() instead of gene expression
+            Region ID to use as cis proxy (e.g., 'chr9:132283881-132284881').
+            If provided AND no 'cis' modality exists, will create 'cis' modality from this region.
+            If 'cis' modality already exists, this parameter is ignored with a warning.
 
         Examples
         --------
-        >>> # Load ATAC data
-        >>> atac_counts = pd.read_csv('atac_counts.csv', index_col=0)
-        >>> region_meta = pd.read_csv('region_meta.csv')
+        >>> # Method 1: Gene expression primary, ATAC secondary (no cis from ATAC)
+        >>> model = bayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B')
+        >>> model.add_atac_modality(atac_counts, region_meta)  # Just adds ATAC, no cis extraction
         >>>
-        >>> # Add ATAC modality
-        >>> model.add_atac_modality(
-        ...     atac_counts=atac_counts,
-        ...     region_meta=region_meta,
-        ...     cis_region='chr9:132283881-132284881'  # GFI1B promoter
-        ... )
+        >>> # Method 2: ATAC as cis proxy (creates 'cis' from ATAC region)
+        >>> model = bayesDREAM(meta=meta, counts=gene_counts, cis_gene=None)  # No cis yet
+        >>> model.add_atac_modality(atac_counts, region_meta, cis_region='chr9:132283881-132284881')
+        >>> # Now 'cis' modality exists from ATAC region
         >>>
-        >>> # Fit using ATAC
-        >>> model.fit_technical(modality_name='atac')
-        >>> model.fit_cis(modality_name='atac', cis_feature='chr9:132283881-132284881')
+        >>> # Fit using either approach
+        >>> model.fit_technical()
+        >>> model.fit_cis()
         """
         # Validate required columns
         required_cols = ['region_id', 'region_type', 'chrom', 'start', 'end', 'gene']
@@ -98,18 +103,24 @@ class ATACModalityMixin:
         if 'region_id' in region_meta.columns and region_meta.index.name != 'region_id':
             region_meta = region_meta.set_index('region_id')
 
-        # Store cis_region if provided
+        # Check if we should create 'cis' modality from cis_region
+        create_cis = False
         if cis_region is not None:
             if cis_region not in region_meta.index:
                 raise ValueError(
                     f"cis_region '{cis_region}' not found in region_meta.index.\n"
                     f"Available regions: {region_meta.index[:5].tolist()}..."
                 )
-            # Store for later use in fit_cis
-            if not hasattr(self, 'cis_feature_map'):
-                self.cis_feature_map = {}
-            self.cis_feature_map[name] = cis_region
-            print(f"[INFO] Set cis region for '{name}' modality: {cis_region}")
+            if 'cis' in self.modalities:
+                warnings.warn(
+                    f"cis_region '{cis_region}' specified but 'cis' modality already exists. "
+                    f"Ignoring cis_region parameter. The 'cis' modality is set during bayesDREAM initialization "
+                    f"and cannot be changed by add_*_modality() methods.",
+                    UserWarning
+                )
+            else:
+                print(f"[INFO] Creating 'cis' modality from ATAC region: {cis_region}")
+                create_cis = True
 
         # Convert to array if DataFrame
         if isinstance(atac_counts, pd.DataFrame):
@@ -159,4 +170,31 @@ class ATACModalityMixin:
         # Print region type summary
         region_summary = region_meta['region_type'].value_counts()
         print(f"[INFO] Region types: {region_summary.to_dict()}")
+
+        # Create 'cis' modality from cis_region if needed
+        if create_cis:
+            # Extract just the cis region
+            if is_dataframe:
+                cis_counts_df = counts_final.loc[[cis_region]]
+            else:
+                # Get index of cis_region in filtered data
+                cis_idx = region_meta.index.get_loc(cis_region)
+                cis_counts_array = counts_array[[cis_idx], :]
+                cis_counts_df = pd.DataFrame(
+                    cis_counts_array,
+                    index=[cis_region],
+                    columns=range(cis_counts_array.shape[1])
+                )
+
+            cis_region_meta = region_meta.loc[[cis_region]].copy()
+
+            cis_modality = Modality(
+                name='cis',
+                counts=cis_counts_df,
+                feature_meta=cis_region_meta,
+                distribution='negbinom',
+                cells_axis=1
+            )
+            self.add_modality('cis', cis_modality, overwrite=False)
+            print(f"[INFO] Created 'cis' modality with ATAC region '{cis_region}'")
 

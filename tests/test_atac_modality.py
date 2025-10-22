@@ -101,11 +101,12 @@ def test_atac_with_gene_expression():
     region_types = atac_mod.feature_meta['region_type'].value_counts()
     print(f"✓ Region types: {dict(region_types)}")
 
-    # Verify cis_feature_map
-    assert hasattr(model, 'cis_feature_map')
-    assert 'atac' in model.cis_feature_map
-    assert model.cis_feature_map['atac'] == 'region0'
-    print(f"✓ cis_feature_map stored: {model.cis_feature_map}")
+    # Verify 'cis' modality was created from ATAC region
+    assert 'cis' in model.modalities
+    cis_mod = model.get_modality('cis')
+    assert cis_mod.dims['n_features'] == 1
+    assert 'region0' in cis_mod.feature_meta.index
+    print(f"✓ 'cis' modality created from ATAC region 'region0'")
 
     print("\n✓ TEST 1 PASSED\n")
     return model
@@ -278,10 +279,10 @@ if __name__ == '__main__':
         print("\nATAC modality implementation is working correctly:")
         print("  1. ✓ add_atac_modality() creates modality with proper validation")
         print("  2. ✓ Region types (promoter, gene_body, distal) handled correctly")
-        print("  3. ✓ cis_feature_map stores cis region for later lookup")
+        print("  3. ✓ 'cis' modality created automatically from cis_region")
         print("  4. ✓ Gene expression is optional (ATAC-only mode works)")
         print("  5. ✓ Manual guide effects infrastructure ready")
-        print("  6. ✓ fit_cis() parameters accept ATAC-specific options")
+        print("  6. ✓ fit_cis() uses 'cis' modality consistently")
         print("\nNext steps:")
         print("  - Implement Bayesian integration of manual guide effects in _model_x")
         print("  - Test with real ATAC-seq data")

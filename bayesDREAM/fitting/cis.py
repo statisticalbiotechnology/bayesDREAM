@@ -234,60 +234,49 @@ class CisFitter:
         if self.model.cis_gene is None:
             raise ValueError("self.model.cis_gene must be set.")
 
-        # IMPORTANT: fit_cis ALWAYS uses the PRIMARY modality
-        # This ensures cis_gene is always in the modality being modeled
+        # fit_cis ALWAYS uses the 'cis' modality
+        # This modality is created automatically when bayesDREAM is initialized
         if modality_name is not None:
             warnings.warn(
-                "modality_name parameter is deprecated. fit_cis always uses the primary modality. "
-                f"Ignoring modality_name='{modality_name}' and using primary_modality='{self.model.primary_modality}'",
+                "modality_name parameter is deprecated. fit_cis always uses the 'cis' modality. "
+                f"Ignoring modality_name='{modality_name}'",
                 DeprecationWarning
             )
 
-        # Get primary modality
-        modality = self.model.get_modality(self.model.primary_modality)
+        # Get cis modality
+        if 'cis' not in self.model.modalities:
+            raise ValueError(
+                "No 'cis' modality found. The 'cis' modality should be created automatically "
+                "when bayesDREAM is initialized with a cis_gene. "
+                "Make sure cis_gene parameter is set during initialization."
+            )
+
+        cis_modality = self.model.get_modality('cis')
 
         # Determine which feature to use as cis proxy
         if cis_feature is None:
-            # Try to find cis feature from cis_feature_map (set by add_atac_modality)
-            if hasattr(self.model, 'cis_feature_map') and self.model.primary_modality in self.model.cis_feature_map:
-                cis_feature = self.model.cis_feature_map[self.model.primary_modality]
-                print(f"[INFO] Using stored cis feature: {cis_feature}")
-            else:
-                # Use self.model.cis_gene from base class counts (not from modality)
-                # For gene modality, cis_gene is excluded from the modality (trans genes only)
-                # but is present in base class self.model.counts for cis modeling
-                cis_feature = self.model.cis_gene
-                print(f"[INFO] Using cis_gene '{self.model.cis_gene}' for cis modeling")
+            # Default: use the first (and typically only) feature in cis modality
+            cis_feature = cis_modality.feature_meta.index[0]
+            print(f"[INFO] Using cis feature '{cis_feature}' from 'cis' modality")
         else:
-            print(f"[INFO] Using cis_feature '{cis_feature}' for cis modeling")
+            # User specified explicit cis_feature
+            if cis_feature not in cis_modality.feature_meta.index:
+                raise ValueError(
+                    f"cis_feature '{cis_feature}' not found in 'cis' modality.\n"
+                    f"Available features: {cis_modality.feature_meta.index.tolist()}"
+                )
+            print(f"[INFO] Using cis_feature '{cis_feature}' from 'cis' modality")
 
-        # Get counts for cis feature
-        # For gene modality: cis_gene is in base class counts (not in modality counts)
-        # For ATAC/other modalities: cis_feature should be in modality counts
-        if self.model.primary_modality == 'gene' and cis_feature == self.model.cis_gene:
-            # Use base class counts (includes cis_gene)
-            if cis_feature not in self.model.counts.index:
-                raise ValueError(
-                    f"cis_gene '{cis_feature}' not found in base class counts.\n"
-                    f"Available genes: {self.model.counts.index[:10].tolist()}..."
-                )
-            cis_counts = self.model.counts.loc[cis_feature].values
+        # Get counts for cis feature from cis modality
+        if isinstance(cis_modality.counts, pd.DataFrame):
+            cis_counts = cis_modality.counts.loc[cis_feature].values
         else:
-            # Use modality counts (ATAC, etc.)
-            if cis_feature not in modality.feature_meta.index:
-                raise ValueError(
-                    f"cis_feature '{cis_feature}' not found in primary modality '{self.model.primary_modality}'.\n"
-                    f"Available features: {modality.feature_meta.index[:10].tolist()}..."
-                )
-            if isinstance(modality.counts, pd.DataFrame):
-                cis_counts = modality.counts.loc[cis_feature].values
+            # numpy array - need to find index
+            feature_idx = cis_modality.feature_meta.index.get_loc(cis_feature)
+            if cis_modality.cells_axis == 1:
+                cis_counts = cis_modality.counts[feature_idx, :]
             else:
-                # numpy array - need to find index
-                feature_idx = modality.feature_meta.index.get_loc(cis_feature)
-                if modality.cells_axis == 1:
-                    cis_counts = modality.counts[feature_idx, :]
-                else:
-                    cis_counts = modality.counts[:, feature_idx]
+                cis_counts = cis_modality.counts[:, feature_idx]
 
         # convert to gpu for fitting
         if self.model.alpha_x_prefit is not None and self.model.alpha_x_prefit.device != self.model.device:
