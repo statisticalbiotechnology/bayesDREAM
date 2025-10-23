@@ -429,17 +429,20 @@ class TechnicalFitter:
     
         needs_filtering_mask = zero_std_mask | only_one_category_mask
         needs_exclusion_mask = zero_count_mask | needs_filtering_mask
-    
-        num_zero_count = zero_count_mask.sum()
-        num_zero_std = zero_std_mask.sum()
+
+        # Count features that are excluded ONLY for each reason (no overlap)
+        num_zero_count_only = (zero_count_mask & ~zero_std_mask & ~only_one_category_mask).sum()
+        num_zero_std_only = (zero_std_mask & ~only_one_category_mask).sum()
         num_single_category = only_one_category_mask.sum()
-    
-        if num_zero_count > 0:
-            warnings.warn(f"[WARNING] {num_zero_count} feature(s) have zero counts in NTC; alpha set to baseline for them.", UserWarning)
-        if num_zero_std > 0:
-            warnings.warn(f"[WARNING] {num_zero_std} feature(s) have zero std in NTC; excluded from fitting.", UserWarning)
-        if num_single_category > 0:
-            warnings.warn(f"[WARNING] {num_single_category} multinomial feature(s) have 1 category; excluded from fitting.", UserWarning)
+        num_excluded = needs_exclusion_mask.sum()
+
+        if num_excluded > 0:
+            warnings.warn(
+                f"[WARNING] {num_excluded} feature(s) excluded from fitting: "
+                f"{num_zero_count_only} zero-count-only, {num_zero_std_only} zero-std, "
+                f"{num_single_category} single-category. Alpha set to baseline for excluded features.",
+                UserWarning
+            )
     
         # ---------------------------
         # Subset to features that can be fit
@@ -558,12 +561,12 @@ class TechnicalFitter:
         epsilon_tensor      = torch.tensor(epsilon, dtype=torch.float32, device=self.model.device)
     
         denominator_ntc_tensor = None
-        if denominator is not None:
+        if denominator_ntc_for_fit is not None:
             if modality.cells_axis == 1:
-                denom_ntc = denominator[:, ntc_indices].T   # [T, N] -> [N, T]
+                denom_for_tensor = denominator_ntc_for_fit.T   # [T_fit, N] -> [N, T_fit]
             else:
-                denom_ntc = denominator[ntc_indices, :]     # [N, T]
-            denominator_ntc_tensor = torch.tensor(denom_ntc, dtype=torch.float32, device=self.model.device)
+                denom_for_tensor = denominator_ntc_for_fit     # [N, T_fit]
+            denominator_ntc_tensor = torch.tensor(denom_for_tensor, dtype=torch.float32, device=self.model.device)
     
         # ---------------------------
         # Guide (init) for log2_alpha_y
