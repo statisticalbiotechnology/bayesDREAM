@@ -20,7 +20,7 @@ class ModelLoader:
         self.model = model
 
     def load_technical_fit(self, input_dir: str = None, use_posterior: bool = True,
-                          modalities: list = None, load_model_level: bool = None):
+                          modalities: list = None):
         """
         Load fitted technical parameters.
 
@@ -33,9 +33,6 @@ class ModelLoader:
         modalities : list of str, optional
             List of modality names to load. If None, attempts to load all existing modalities.
             Example: ['gene', 'atac']
-        load_model_level : bool, optional
-            Deprecated. Model-level parameters are now automatically loaded when
-            primary modality is included. Ignored if provided.
 
         Returns
         -------
@@ -59,15 +56,6 @@ class ModelLoader:
 
         # Automatically load model-level parameters if primary modality is included
         should_load_model_level = self.model.primary_modality in modalities_to_load
-
-        if load_model_level is not None:
-            import warnings
-            warnings.warn(
-                "load_model_level parameter is deprecated. Model-level parameters are now "
-                "automatically loaded when the primary modality is included in the load.",
-                DeprecationWarning,
-                stacklevel=2
-            )
 
         # Load model-level parameters (when primary modality is being loaded)
         if should_load_model_level:
@@ -165,8 +153,7 @@ class ModelLoader:
         return loaded
 
 
-    def load_trans_fit(self, input_dir: str = None, modalities: list = None,
-                      load_model_level: bool = None):
+    def load_trans_fit(self, input_dir: str = None, modalities: list = None):
         """
         Load fitted trans parameters.
 
@@ -177,9 +164,6 @@ class ModelLoader:
         modalities : list of str, optional
             List of modality names to load. If None, attempts to load all existing modalities.
             Example: ['gene', 'atac']
-        load_model_level : bool, optional
-            Deprecated. Model-level parameters are now automatically loaded when
-            primary modality is included. Ignored if provided.
 
         Returns
         -------
@@ -203,15 +187,6 @@ class ModelLoader:
 
         # Automatically load model-level parameters if primary modality is included
         should_load_model_level = self.model.primary_modality in modalities_to_load
-
-        if load_model_level is not None:
-            import warnings
-            warnings.warn(
-                "load_model_level parameter is deprecated. Model-level parameters are now "
-                "automatically loaded when the primary modality is included in the load.",
-                DeprecationWarning,
-                stacklevel=2
-            )
 
         # Load model-level posterior samples (when primary modality is being loaded)
         if should_load_model_level:

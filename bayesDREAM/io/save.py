@@ -23,8 +23,7 @@ class ModelSaver:
     # Save/Load fitted parameters
     ########################################################
 
-    def save_technical_fit(self, output_dir: str = None, modalities: list = None,
-                          save_model_level: bool = None):
+    def save_technical_fit(self, output_dir: str = None, modalities: list = None):
         """
         Save fitted technical parameters from fit_technical().
 
@@ -35,9 +34,6 @@ class ModelSaver:
         modalities : list of str, optional
             List of modality names to save. If None, saves all modalities.
             Example: ['gene', 'atac']
-        save_model_level : bool, optional
-            Deprecated. Model-level parameters are now automatically saved when
-            primary modality is included. Ignored if provided.
 
         Returns
         -------
@@ -73,15 +69,6 @@ class ModelSaver:
 
         # Automatically save model-level parameters if primary modality is included
         should_save_model_level = self.model.primary_modality in modalities_to_save
-
-        if save_model_level is not None:
-            import warnings
-            warnings.warn(
-                "save_model_level parameter is deprecated. Model-level parameters are now "
-                "automatically saved when the primary modality is included in the save.",
-                DeprecationWarning,
-                stacklevel=2
-            )
 
         # Save model-level parameters (when primary modality is being saved)
         if should_save_model_level:
@@ -171,8 +158,7 @@ class ModelSaver:
         return saved_files
 
 
-    def save_trans_fit(self, output_dir: str = None, modalities: list = None,
-                      save_model_level: bool = None):
+    def save_trans_fit(self, output_dir: str = None, modalities: list = None):
         """
         Save fitted trans parameters from fit_trans().
 
@@ -183,9 +169,6 @@ class ModelSaver:
         modalities : list of str, optional
             List of modality names to save. If None, saves all modalities.
             Example: ['gene', 'atac']
-        save_model_level : bool, optional
-            Deprecated. Model-level parameters are now automatically saved when
-            primary modality is included. Ignored if provided.
 
         Returns
         -------
@@ -219,15 +202,6 @@ class ModelSaver:
 
         # Automatically save model-level parameters if primary modality is included
         should_save_model_level = self.model.primary_modality in modalities_to_save
-
-        if save_model_level is not None:
-            import warnings
-            warnings.warn(
-                "save_model_level parameter is deprecated. Model-level parameters are now "
-                "automatically saved when the primary modality is included in the save.",
-                DeprecationWarning,
-                stacklevel=2
-            )
 
         # Save model-level posterior samples (when primary modality is being saved)
         if should_save_model_level:
