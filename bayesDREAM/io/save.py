@@ -24,7 +24,7 @@ class ModelSaver:
     ########################################################
 
     def save_technical_fit(self, output_dir: str = None, modalities: list = None,
-                          save_model_level: bool = True):
+                          save_model_level: bool = None):
         """
         Save fitted technical parameters from fit_technical().
 
@@ -36,8 +36,8 @@ class ModelSaver:
             List of modality names to save. If None, saves all modalities.
             Example: ['gene', 'atac']
         save_model_level : bool, optional
-            If True, saves model-level alpha_x_prefit, alpha_y_prefit, and
-            posterior_samples_technical (default: True).
+            Deprecated. Model-level parameters are now automatically saved when
+            primary modality is included. Ignored if provided.
 
         Returns
         -------
@@ -49,10 +49,10 @@ class ModelSaver:
         Saves per-modality:
         - alpha_y_prefit_{modality}.pt: Overdispersion parameters for each modality
 
-        Saves model-level (if save_model_level=True):
+        Saves model-level (automatically when primary modality is included):
         - alpha_x_prefit.pt: Cis gene overdispersion (if set)
-        - alpha_y_prefit.pt: Trans gene overdispersion
-        - posterior_samples_technical.pt: Full posterior samples
+        - alpha_y_prefit.pt: Trans gene overdispersion (from primary modality)
+        - posterior_samples_technical.pt: Full posterior samples (from primary modality)
         """
         if output_dir is None:
             output_dir = self.model.output_dir
@@ -71,8 +71,20 @@ class ModelSaver:
                 raise ValueError(f"Unknown modalities: {invalid}. Available: {list(self.model.modalities.keys())}")
             modalities_to_save = modalities
 
-        # Save model-level parameters (backward compatibility)
-        if save_model_level:
+        # Automatically save model-level parameters if primary modality is included
+        should_save_model_level = self.model.primary_modality in modalities_to_save
+
+        if save_model_level is not None:
+            import warnings
+            warnings.warn(
+                "save_model_level parameter is deprecated. Model-level parameters are now "
+                "automatically saved when the primary modality is included in the save.",
+                DeprecationWarning,
+                stacklevel=2
+            )
+
+        # Save model-level parameters (when primary modality is being saved)
+        if should_save_model_level:
             if hasattr(self.model, 'alpha_x_prefit') and self.model.alpha_x_prefit is not None:
                 path = os.path.join(output_dir, 'alpha_x_prefit.pt')
                 torch.save(self.model.alpha_x_prefit, path)
@@ -160,7 +172,7 @@ class ModelSaver:
 
 
     def save_trans_fit(self, output_dir: str = None, modalities: list = None,
-                      save_model_level: bool = True):
+                      save_model_level: bool = None):
         """
         Save fitted trans parameters from fit_trans().
 
@@ -172,7 +184,8 @@ class ModelSaver:
             List of modality names to save. If None, saves all modalities.
             Example: ['gene', 'atac']
         save_model_level : bool, optional
-            If True, saves model-level posterior_samples_trans (default: True).
+            Deprecated. Model-level parameters are now automatically saved when
+            primary modality is included. Ignored if provided.
 
         Returns
         -------
@@ -184,7 +197,7 @@ class ModelSaver:
         Saves per-modality:
         - posterior_samples_trans_{modality}.pt: Full posterior samples for each modality
 
-        Saves model-level (if save_model_level=True):
+        Saves model-level (automatically when primary modality is included):
         - posterior_samples_trans.pt: Model-level posterior samples
         """
         if output_dir is None:
@@ -204,8 +217,20 @@ class ModelSaver:
                 raise ValueError(f"Unknown modalities: {invalid}. Available: {list(self.model.modalities.keys())}")
             modalities_to_save = modalities
 
-        # Save model-level posterior samples
-        if save_model_level:
+        # Automatically save model-level parameters if primary modality is included
+        should_save_model_level = self.model.primary_modality in modalities_to_save
+
+        if save_model_level is not None:
+            import warnings
+            warnings.warn(
+                "save_model_level parameter is deprecated. Model-level parameters are now "
+                "automatically saved when the primary modality is included in the save.",
+                DeprecationWarning,
+                stacklevel=2
+            )
+
+        # Save model-level posterior samples (when primary modality is being saved)
+        if should_save_model_level:
             if hasattr(self.model, 'posterior_samples_trans') and self.model.posterior_samples_trans is not None:
                 # Remove large observation arrays
                 posterior_clean = {k: v for k, v in self.model.posterior_samples_trans.items()
