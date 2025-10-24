@@ -18,17 +18,17 @@ This allows you to:
 
 | Method | Saves | File(s) Created | Modality Control |
 |--------|-------|-----------------|------------------|
-| `save_technical_fit()` | Technical parameters | `alpha_x_prefit.pt`, `alpha_y_prefit.pt`, `posterior_samples_technical.pt`, `alpha_y_prefit_{modality}.pt` | `modalities=`, `save_model_level=` |
+| `save_technical_fit()` | Technical parameters | `alpha_x_prefit.pt`, `alpha_y_prefit.pt`, `posterior_samples_technical.pt`, `alpha_y_prefit_{modality}.pt` | `modalities=` |
 | `save_cis_fit()` | Cis parameters | `x_true.pt`, `posterior_samples_cis.pt` | N/A (cis is model-level) |
-| `save_trans_fit()` | Trans parameters | `posterior_samples_trans.pt`, `posterior_samples_trans_{modality}.pt` | `modalities=`, `save_model_level=` |
+| `save_trans_fit()` | Trans parameters | `posterior_samples_trans.pt`, `posterior_samples_trans_{modality}.pt` | `modalities=` |
 
 ### Load Methods
 
 | Method | Loads | Required Files | Modality Control |
 |--------|-------|----------------|------------------|
-| `load_technical_fit()` | Technical parameters | `alpha_x_prefit.pt`, `alpha_y_prefit.pt`, etc. | `modalities=`, `load_model_level=` |
+| `load_technical_fit()` | Technical parameters | `alpha_x_prefit.pt`, `alpha_y_prefit.pt`, etc. | `modalities=` |
 | `load_cis_fit()` | Cis parameters | `x_true.pt`, `posterior_samples_cis.pt` | N/A (cis is model-level) |
-| `load_trans_fit()` | Trans parameters | `posterior_samples_trans.pt`, etc. | `modalities=`, `load_model_level=` |
+| `load_trans_fit()` | Trans parameters | `posterior_samples_trans.pt`, etc. | `modalities=` |
 
 ## Detailed Usage
 
@@ -50,23 +50,20 @@ model.save_technical_fit(output_dir='./my_results/technical/')
 # Save specific modalities only
 model.save_technical_fit(modalities=['gene', 'atac'])
 
-# Save only per-modality parameters (skip model-level backward compatibility)
-model.save_technical_fit(save_model_level=False)
-
-# Save only gene modality without model-level params
-model.save_technical_fit(modalities=['gene'], save_model_level=False)
+# Note: Model-level parameters are automatically saved when primary modality is included
+# If you save only non-primary modalities, model-level params are skipped automatically
+model.save_technical_fit(modalities=['atac'])  # Skips model-level (primary is 'gene')
 ```
 
 **What Gets Saved**:
 
-Model-level (when `save_model_level=True`, default):
-- `alpha_x_prefit.pt`: Overdispersion for cis gene (if in primary modality)
+Model-level (automatically saved when primary modality is included):
+- `alpha_x_prefit.pt`: Overdispersion for cis gene (if exists)
 - `alpha_y_prefit.pt`: Overdispersion for trans genes (primary modality, backward compat)
 - `posterior_samples_technical.pt`: Full posterior samples (primary modality)
 
-Per-modality (for modalities in `modalities` list):
+Per-modality (for each modality in `modalities` list):
 - `alpha_y_prefit_{modality}.pt`: Per-modality overdispersion
-- `posterior_samples_technical_{modality}.pt`: Per-modality posterior samples
 
 **File Structure**:
 ```
@@ -101,18 +98,15 @@ model.load_technical_fit(use_posterior=False)
 # Load specific modalities only
 model.load_technical_fit(modalities=['gene', 'atac'])
 
-# Load only per-modality parameters (skip model-level backward compatibility)
-model.load_technical_fit(load_model_level=False)
-
-# Load only gene modality without model-level params
-model.load_technical_fit(modalities=['gene'], load_model_level=False)
+# Note: Model-level parameters are automatically loaded when primary modality is included
+# If you load only non-primary modalities, model-level params are skipped automatically
+model.load_technical_fit(modalities=['atac'])  # Skips model-level (primary is 'gene')
 ```
 
 **Parameters**:
 - `input_dir`: Directory containing saved files (default: `self.output_dir`)
 - `use_posterior`: If `True`, loads full posterior samples. If `False`, uses posterior mean as point estimate
 - `modalities`: List of modality names to load (default: all available modalities)
-- `load_model_level`: If `True`, loads model-level backward compatibility params (default: `True`)
 
 **What Happens**:
 - Sets `self.alpha_x_prefit` and `self.alpha_x_type`
@@ -171,16 +165,16 @@ model.save_trans_fit()
 # Save specific modalities only
 model.save_trans_fit(modalities=['gene', 'atac'])
 
-# Save only per-modality parameters (skip model-level)
-model.save_trans_fit(save_model_level=False)
+# Note: Model-level parameters are automatically saved when primary modality is included
+model.save_trans_fit(modalities=['atac'])  # Skips model-level (primary is 'gene')
 ```
 
 **What Gets Saved**:
 
-Model-level (when `save_model_level=True`, default):
+Model-level (automatically saved when primary modality is included):
 - `posterior_samples_trans.pt`: Model-level posterior samples (primary modality, backward compat)
 
-Per-modality (for modalities in `modalities` list):
+Per-modality (for each modality in `modalities` list):
 - `posterior_samples_trans_{modality}.pt`: Per-modality posterior samples
 
 ### 6. Load Trans Fit
@@ -198,14 +192,13 @@ model.load_trans_fit()
 # Load specific modalities only
 model.load_trans_fit(modalities=['gene', 'atac'])
 
-# Load only per-modality parameters
-model.load_trans_fit(load_model_level=False)
+# Note: Model-level parameters are automatically loaded when primary modality is included
+model.load_trans_fit(modalities=['atac'])  # Skips model-level (primary is 'gene')
 ```
 
 **Parameters**:
 - `input_dir`: Directory containing saved files (default: `self.output_dir`)
 - `modalities`: List of modality names to load (default: all available modalities)
-- `load_model_level`: If `True`, loads model-level backward compatibility params (default: `True`)
 
 ## Complete Pipeline Examples
 
@@ -358,7 +351,7 @@ model3.load_cis_fit()
 
 # Fit trans on ATAC, save only ATAC trans results
 model3.fit_trans(modality_name='atac', sum_factor_col='sum_factor_adj')
-model3.save_trans_fit(modalities=['atac'], save_model_level=False)
+model3.save_trans_fit(modalities=['atac'])  # Model-level skipped automatically (primary is 'gene')
 ```
 
 ## Posterior Samples vs Point Estimates
@@ -406,10 +399,10 @@ model.load_technical_fit(modalities=['gene'])  # Skip loading large ATAC arrays
 ```python
 # Fit and save modalities one at a time
 model.fit_technical(modality_name='gene', ...)
-model.save_technical_fit(modalities=['gene'], save_model_level=True)
+model.save_technical_fit(modalities=['gene'])  # Includes model-level (primary)
 
 model.fit_technical(modality_name='atac', ...)
-model.save_technical_fit(modalities=['atac'], save_model_level=False)  # Don't overwrite model-level
+model.save_technical_fit(modalities=['atac'])  # Skips model-level (not primary)
 ```
 
 **Use Case 4: Different Compute Resources**
@@ -417,24 +410,27 @@ model.save_technical_fit(modalities=['atac'], save_model_level=False)  # Don't o
 # Fit heavy modalities on HPC, lighter ones locally
 # On HPC:
 model.fit_technical(modality_name='atac', ...)
-model.save_technical_fit(modalities=['atac'], save_model_level=False)
+model.save_technical_fit(modalities=['atac'])  # Skips model-level automatically
 
 # On local machine:
 model.load_technical_fit(modalities=['gene'])  # From previous run
 model.load_technical_fit(modalities=['atac'])  # From HPC
 ```
 
-### When to Use `save_model_level` / `load_model_level`
+### Automatic Model-Level Behavior
 
-**Set to `False` when:**
-- Saving per-modality results without affecting backward-compatible model-level params
-- Loading only per-modality data (e.g., for custom analysis)
-- Appending modality results to existing saves
+**When model-level parameters are saved/loaded:**
+- Automatically included when primary modality is in the `modalities` list
+- Automatically skipped when primary modality is NOT in the `modalities` list
+- No explicit flag needed - it's automatic based on whether you're saving/loading the primary modality
 
-**Set to `True` (default) when:**
-- Running standard pipeline
-- Need backward compatibility with old code
-- First time saving a given analysis
+**Example**:
+```python
+# Primary modality is 'gene'
+model.save_technical_fit(modalities=['gene'])  # Saves model-level params
+model.save_technical_fit(modalities=['atac'])  # Skips model-level params
+model.save_technical_fit(modalities=['gene', 'atac'])  # Saves model-level params
+```
 
 ## Advanced: Manual Save/Load
 

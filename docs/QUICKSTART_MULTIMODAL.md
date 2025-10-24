@@ -36,7 +36,8 @@ model = bayesDREAM(
 )
 
 # Run 3-step pipeline
-model.fit_technical(covariates=['cell_line'], sum_factor_col='sum_factor')
+model.set_technical_groups(['cell_line'])
+model.fit_technical(sum_factor_col='sum_factor')
 model.fit_cis(sum_factor_col='sum_factor')
 model.fit_trans(sum_factor_col='sum_factor_adj', function_type='additive_hill')
 ```
@@ -83,7 +84,8 @@ print(model.list_modalities())
 # 4 splicing_exon_skip binomial      20          500      NaN           False
 
 # Run pipeline (operates on gene modality)
-model.fit_technical(covariates=['cell_line'], sum_factor_col='sum_factor')
+model.set_technical_groups(['cell_line'])
+model.fit_technical(sum_factor_col='sum_factor')
 model.fit_cis(sum_factor_col='sum_factor')
 model.fit_trans(sum_factor_col='sum_factor_adj', function_type='additive_hill')
 
@@ -161,12 +163,14 @@ from bayesDREAM import bayesDREAM
 
 # Example 1: Gene counts (negbinom) - DEFAULT
 model = bayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B')
-model.fit_technical(covariates=['cell_line'], sum_factor_col='sum_factor', distribution='negbinom')
+model.set_technical_groups(['cell_line'])
+model.fit_technical(sum_factor_col='sum_factor', distribution='negbinom')
 model.fit_trans(sum_factor_col='sum_factor_adj', distribution='negbinom', function_type='additive_hill')
 
 # Example 2: Continuous measurements (normal) - e.g., SpliZ scores
 model = bayesDREAM(meta=meta, counts=spliz_scores, cis_gene='GFI1B')
-model.fit_technical(covariates=['cell_line'], distribution='normal')
+model.set_technical_groups(['cell_line'])
+model.fit_technical(distribution='normal')
 model.fit_trans(distribution='normal', function_type='polynomial')
 
 # Example 3: Exon skipping PSI (binomial)
@@ -301,7 +305,8 @@ model.add_splicing_modality(
 )
 
 # 3. Run pipeline
-model.fit_technical(covariates=['cell_line'], sum_factor_col='sum_factor')
+model.set_technical_groups(['cell_line'])
+model.fit_technical(sum_factor_col='sum_factor')
 model.fit_cis(sum_factor_col='sum_factor')
 model.fit_trans(sum_factor_col='sum_factor_adj', function_type='additive_hill')
 
@@ -327,7 +332,8 @@ model.add_transcript_modality(
 model.add_splicing_modality(sj_counts, sj_meta, ['sj', 'exon_skip'])
 
 # 4. Run pipeline
-model.fit_technical(covariates=['cell_line'], sum_factor_col='sum_factor')
+model.set_technical_groups(['cell_line'])
+model.fit_technical(sum_factor_col='sum_factor')
 model.fit_cis(sum_factor_col='sum_factor')
 model.fit_trans(sum_factor_col='sum_factor_adj', function_type='polynomial')
 

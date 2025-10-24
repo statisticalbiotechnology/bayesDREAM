@@ -124,7 +124,8 @@ model.add_custom_modality('spliz', spliz_scores, gene_meta, 'normal')
 print(model.list_modalities())
 
 # Run pipeline (operates on primary gene modality)
-model.fit_technical(covariates=['cell_line'], sum_factor_col='sum_factor')
+model.set_technical_groups(['cell_line'])
+model.fit_technical(sum_factor_col='sum_factor')
 model.fit_cis(sum_factor_col='sum_factor')
 model.fit_trans(sum_factor_col='sum_factor_adj', function_type='additive_hill')
 
@@ -153,8 +154,8 @@ model3.load_cis_fit()
 model3.fit_trans(sum_factor_col='sum_factor_adj')
 model3.save_trans_fit()
 
-# Selective modality saving
-model.save_technical_fit(modalities=['gene', 'atac'], save_model_level=True)
+# Selective modality saving (model-level saved automatically when primary modality included)
+model.save_technical_fit(modalities=['gene', 'atac'])
 model.load_technical_fit(modalities=['gene'])
 ```
 
@@ -173,8 +174,7 @@ See **[docs/SAVE_LOAD_GUIDE.md](docs/SAVE_LOAD_GUIDE.md)** for complete save/loa
 ### Technical Documentation
 - **[CLAUDE.md](CLAUDE.md)** - Complete architecture documentation for Claude Code
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - System architecture and design patterns
-- **[docs/REFACTORING_SUMMARY.md](docs/REFACTORING_SUMMARY.md)** - Modular refactoring details
-- **[docs/PER_MODALITY_FITTING_PLAN.md](docs/PER_MODALITY_FITTING_PLAN.md)** - Per-modality fitting implementation
+- **[docs/archive/](docs/archive/)** - Historical design documents and refactoring summaries
 
 ## Data Requirements
 
@@ -260,7 +260,7 @@ bayesDREAM/
 └── toydata/              # Test datasets
 ```
 
-**Note**: The codebase was refactored from a single 4,537-line file into a modular structure (93% reduction in model.py). This improves maintainability while preserving complete backward compatibility. See [docs/REFACTORING_SUMMARY.md](docs/REFACTORING_SUMMARY.md) for details.
+**Note**: The codebase was refactored from a single 4,537-line file into a modular structure (93% reduction in model.py). This improves maintainability while preserving complete backward compatibility. See [docs/archive/](docs/archive/) for refactoring history.
 
 ## Contributing
 
