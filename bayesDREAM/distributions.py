@@ -206,14 +206,11 @@ def sample_binomial_trans(
     else:
         logit_final = logit_mu
 
-    # Convert back to probability
-    probs = torch.sigmoid(logit_final)
-
     # Sample observations
     with pyro.plate("obs_plate", N, dim=-2):
         pyro.sample(
             "y_obs",
-            dist.Binomial(total_count=denominator_tensor, probs=probs),
+            dist.Binomial(total_count=denominator_tensor, logits=logit_final),
             obs=y_obs_tensor
         )
 

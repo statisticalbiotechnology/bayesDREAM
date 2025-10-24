@@ -154,14 +154,25 @@ class TechnicalFitter:
             mu_y = mu_ntc_mv  # [T, D]
     
         elif distribution == 'binomial':
-            # Beta prior from empirical NTC successes/totals (data-driven EB)
-            y_sum  = y_obs_ntc_tensor.sum(dim=0)                 # [T]
-            den_sum = denominator_ntc_tensor.sum(dim=0) + 1e-6   # [T]
-            a = y_sum + 1.0
-            b = (den_sum - y_sum) + 1.0
-            with f_plate:
+            # Empirical-Bayes Beta with bounded concentration (stable when denom >> counts)
+            y_sum  = y_obs_ntc_tensor.sum(dim=0).float()    # [T]
+            den_sum = denominator_ntc_tensor.sum(dim=0).float()  # [T]
+
+            # Smooth p-hat to keep it off 0/1 even if den_sum==0
+            p_hat = (y_sum + 0.5) / (den_sum + 1.0)         # [T] in (0,1)
+            p_hat = torch.clamp(p_hat, 1e-6, 1 - 1e-6)
+
+            # Cap effective sample size: informative but not razor-sharp
+            # tune these if needed (e.g., 20..100)
+            kappa = torch.clamp(den_sum, min=20.0, max=200.0)
+
+            # Tiny floor to avoid exactly 0 concentration parameters
+            a = p_hat * kappa + 1e-3
+            b = (1.0 - p_hat) * kappa + 1e-3
+
+            with pyro.plate("feature_plate_technical", T, dim=-1):
                 mu_ntc = pyro.sample("mu_ntc", dist.Beta(a, b))  # [T]
-            mu_y = mu_ntc  # [T] in [0,1]
+            mu_y = mu_ntc
     
         elif distribution == 'multinomial':
             with f_plate:
@@ -589,8 +600,13 @@ class TechnicalFitter:
                     return torch.zeros((C - 1, T_fit), dtype=torch.float32, device=self.model.device)
             else:
                 return pyro.infer.autoguide.initialization.init_to_median(site)
-    
-        guide_cellline = pyro.infer.autoguide.AutoIAFNormal(self._model_technical, init_loc_fn=init_loc_fn)
+
+        # Guide choice: calmer for binomial, IAF for others
+        if distribution == 'binomial':
+            guide_cellline = pyro.infer.autoguide.AutoNormal(self._model_technical, init_loc_fn=init_loc_fn)
+        else:
+            guide_cellline = pyro.infer.autoguide.AutoIAFNormal(self._model_technical, init_loc_fn=init_loc_fn)
+
         optimizer = pyro.optim.Adam({"lr": lr})
         svi = pyro.infer.SVI(self._model_technical, guide_cellline, optimizer, loss=pyro.infer.Trace_ELBO())
     
