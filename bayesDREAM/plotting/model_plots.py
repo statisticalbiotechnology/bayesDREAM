@@ -28,6 +28,7 @@ class PlottingMixin:
         order_by: str = 'mean',
         subset_features: Optional[List[str]] = None,
         plot_type: str = 'auto',
+        cell_line_index: Optional[int] = None,  # Deprecated, backward compatibility
         **kwargs
     ) -> plt.Figure:
         """
@@ -70,6 +71,14 @@ class PlottingMixin:
         >>> # Plot alpha_y for specific genes
         >>> fig = model.plot_technical_fit('alpha_y', subset_features=['GFI1B', 'TET2'])
         """
+        # Handle backward compatibility for cell_line_index
+        if cell_line_index is not None:
+            if technical_group_index is not None:
+                raise ValueError("Cannot specify both technical_group_index and cell_line_index. "
+                               "Use technical_group_index (cell_line_index is deprecated).")
+            warnings.warn("cell_line_index is deprecated, use technical_group_index instead", DeprecationWarning)
+            technical_group_index = cell_line_index
+
         if not hasattr(self, 'posterior_samples_technical'):
             raise ValueError("No technical fit found. Run fit_technical() first.")
 
@@ -79,13 +88,13 @@ class PlottingMixin:
         modality = self.get_modality(modality_name)
         posterior = self.posterior_samples_technical
 
-        # Get feature names
+        # Get feature names - will be adjusted based on alpha_y source later
         if 'gene' in modality.feature_meta.columns:
-            feature_names = modality.feature_meta['gene'].tolist()
+            modality_feature_names = modality.feature_meta['gene'].tolist()
         elif 'gene_name' in modality.feature_meta.columns:
-            feature_names = modality.feature_meta['gene_name'].tolist()
+            modality_feature_names = modality.feature_meta['gene_name'].tolist()
         else:
-            feature_names = modality.feature_meta.index.tolist()
+            modality_feature_names = modality.feature_meta.index.tolist()
 
         # Sample priors
         prior_dict = get_prior_samples(
@@ -142,44 +151,72 @@ class PlottingMixin:
             # 1D or 2D parameter: (samples, genes) or (samples, cell_lines, genes)
 
             # Try to get modality-specific alpha_y first, fall back to posterior_samples_technical
+            using_posterior_samples = False
             if hasattr(modality, 'alpha_y_prefit') and modality.alpha_y_prefit is not None:
                 # Use modality-specific alpha_y (correct number of features)
                 post_samples = modality.alpha_y_prefit
+                using_posterior_samples = False
             elif hasattr(self, 'alpha_y_prefit') and self.alpha_y_prefit is not None:
                 # Use model-level alpha_y_prefit (may be for primary modality)
                 if modality.name == self.primary_modality:
                     post_samples = self.alpha_y_prefit
+                    using_posterior_samples = False
                 else:
                     # Wrong modality, use posterior_samples_technical
                     if 'alpha_y' not in posterior:
                         raise ValueError(f"alpha_y not found for modality '{modality.name}'. "
                                        "Run fit_technical(modality_name='{modality.name}') first.")
                     post_samples = posterior['alpha_y']
+                    using_posterior_samples = True
             else:
                 # Fall back to posterior_samples_technical
                 if 'alpha_y' not in posterior:
                     raise ValueError("alpha_y not found in posterior_samples_technical")
                 post_samples = posterior['alpha_y']
+                using_posterior_samples = True
 
             if hasattr(post_samples, 'numpy'):
                 post_samples = post_samples.numpy()
 
+            # Determine feature names based on alpha_y source
+            if using_posterior_samples:
+                # posterior_samples_technical includes cis gene - need original feature names
+                if hasattr(self, 'counts_meta') and self.counts_meta is not None:
+                    # Use counts_meta if available
+                    if 'gene' in self.counts_meta.columns:
+                        feature_names = self.counts_meta['gene'].tolist()
+                    elif 'gene_name' in self.counts_meta.columns:
+                        feature_names = self.counts_meta['gene_name'].tolist()
+                    else:
+                        feature_names = self.counts_meta.index.tolist()
+                elif hasattr(self, 'counts') and self.counts is not None:
+                    # Fall back to counts index
+                    feature_names = self.counts.index.tolist()
+                else:
+                    # Last resort: construct from modality + cis gene
+                    if hasattr(self, 'cis_gene'):
+                        feature_names = [self.cis_gene] + modality_feature_names
+                    else:
+                        feature_names = modality_feature_names
+            else:
+                # Use modality feature names (excludes cis gene)
+                feature_names = modality_feature_names
+
             # Use sampled priors
             prior_samples = prior_dict['alpha_y'].numpy() if hasattr(prior_dict['alpha_y'], 'numpy') else prior_dict['alpha_y']
 
-            # Check shape compatibility
-            expected_n_features = len(feature_names)
-            actual_n_features = post_samples.shape[-1] if post_samples.ndim >= 2 else post_samples.shape[0]
-            if actual_n_features != expected_n_features:
-                raise ValueError(
-                    f"Shape mismatch: alpha_y has {actual_n_features} features, "
-                    f"but modality '{modality.name}' has {expected_n_features} features. "
-                    f"Try specifying modality_name explicitly or check that fit_technical "
-                    f"was run for this modality."
-                )
-
+            # Handle dimensionality and shape checking
             if post_samples.ndim == 2:
-                # (samples, genes)
+                # (samples, genes) - check shape compatibility
+                expected_n_features = len(feature_names)
+                actual_n_features = post_samples.shape[-1]
+                if actual_n_features != expected_n_features:
+                    raise ValueError(
+                        f"Shape mismatch: alpha_y has {actual_n_features} features, "
+                        f"but modality '{modality.name}' has {expected_n_features} features. "
+                        f"Try specifying modality_name explicitly or check that fit_technical "
+                        f"was run for this modality."
+                    )
                 return plot_1d_parameter(
                     prior_samples, post_samples, feature_names, 'alpha_y',
                     order_by, subset_features=subset_features, plot_type=plot_type,
@@ -188,16 +225,38 @@ class PlottingMixin:
             elif post_samples.ndim == 3:
                 # (samples, technical_groups, genes)
                 if technical_group_index is not None:
-                    # Plot single technical group
+                    # Plot single technical group - select FIRST, then check shape
                     prior_tg = prior_samples[:, technical_group_index, :]
                     post_tg = post_samples[:, technical_group_index, :]
+
+                    # Now check shape compatibility
+                    expected_n_features = len(feature_names)
+                    actual_n_features = post_tg.shape[-1]
+                    if actual_n_features != expected_n_features:
+                        raise ValueError(
+                            f"Shape mismatch: alpha_y has {actual_n_features} features, "
+                            f"but modality '{modality.name}' has {expected_n_features} features. "
+                            f"Try specifying modality_name explicitly or check that fit_technical "
+                            f"was run for this modality."
+                        )
+
                     return plot_1d_parameter(
                         prior_tg, post_tg, feature_names, f'alpha_y (technical_group {technical_group_index})',
                         order_by, subset_features=subset_features, plot_type=plot_type,
                         **kwargs
                     )
                 else:
-                    # Plot all technical groups (2D plot)
+                    # Plot all technical groups (2D plot) - check shape compatibility
+                    expected_n_features = len(feature_names)
+                    actual_n_features = post_samples.shape[-1]
+                    if actual_n_features != expected_n_features:
+                        raise ValueError(
+                            f"Shape mismatch: alpha_y has {actual_n_features} features, "
+                            f"but modality '{modality.name}' has {expected_n_features} features. "
+                            f"Try specifying modality_name explicitly or check that fit_technical "
+                            f"was run for this modality."
+                        )
+
                     n_groups = post_samples.shape[1]
                     group_names = [f'TG_{i}' for i in range(n_groups)]
                     return plot_2d_parameter(
