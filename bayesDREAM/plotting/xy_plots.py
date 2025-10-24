@@ -302,7 +302,7 @@ def plot_colored_line(
 
 
 # ============================================================================
-# Hill Function Utilities (for negbinom overlay)
+# Trans Function Prediction Utilities (for overlaying fitted functions)
 # ============================================================================
 
 def Hill_based_positive(x, Vmax, A, K, n, epsilon=1e-6):
@@ -331,6 +331,137 @@ def Hill_based_positive(x, Vmax, A, K, n, epsilon=1e-6):
     K_n = np.exp(n * K_log)
     denominator = K_n + x_n
     return Vmax * (x_n / denominator) + A
+
+
+def predict_trans_function(
+    model,
+    feature: str,
+    x_range: np.ndarray,
+    modality_name: Optional[str] = None
+) -> Optional[np.ndarray]:
+    """
+    Predict trans effect function for a feature given x_true values.
+
+    Automatically detects function type (additive_hill, single_hill, polynomial)
+    from posterior_samples_trans and computes predictions.
+
+    Parameters
+    ----------
+    model : bayesDREAM
+        Model with fit_trans() completed
+    feature : str
+        Feature name to predict
+    x_range : np.ndarray
+        X values to predict at (cis expression levels)
+    modality_name : str, optional
+        Modality name (default: primary modality)
+
+    Returns
+    -------
+    np.ndarray or None
+        Predicted y values at x_range, or None if:
+        - Trans model not fitted
+        - Feature not in trans_genes
+        - Cannot determine function type
+
+    Notes
+    -----
+    Works with all function types:
+    - additive_hill: A + alpha*Hill_a + beta*Hill_b
+    - single_hill: A + Vmax*Hill(x, K, n)
+    - polynomial: sum(coeffs[i] * x^i)
+    """
+    # Check if trans model fitted
+    if not hasattr(model, 'posterior_samples_trans') or model.posterior_samples_trans is None:
+        return None
+
+    posterior = model.posterior_samples_trans
+
+    # Check if feature in trans genes
+    trans_genes = model.trans_genes if hasattr(model, 'trans_genes') else []
+    if feature not in trans_genes:
+        return None
+
+    gene_idx = trans_genes.index(feature)
+
+    # Get baseline A (present in all function types)
+    if 'A' not in posterior:
+        return None
+
+    A_samples = posterior['A']
+    A = A_samples.mean(dim=0)[gene_idx].item() if hasattr(A_samples, 'mean') else A_samples.mean(axis=0)[gene_idx]
+
+    # Determine function type from available parameters
+    if 'Vmax_a' in posterior and 'Vmax_b' in posterior:
+        # ===== ADDITIVE HILL =====
+        try:
+            # Extract parameters
+            alpha = posterior['alpha'].mean(dim=0)[gene_idx].item() if hasattr(posterior['alpha'], 'mean') else posterior['alpha'].mean(axis=0)[gene_idx]
+            beta = posterior['beta'].mean(dim=0)[gene_idx].item() if hasattr(posterior['beta'], 'mean') else posterior['beta'].mean(axis=0)[gene_idx]
+            Vmax_a = posterior['Vmax_a'].mean(dim=0)[gene_idx].item() if hasattr(posterior['Vmax_a'], 'mean') else posterior['Vmax_a'].mean(axis=0)[gene_idx]
+            Vmax_b = posterior['Vmax_b'].mean(dim=0)[gene_idx].item() if hasattr(posterior['Vmax_b'], 'mean') else posterior['Vmax_b'].mean(axis=0)[gene_idx]
+            K_a = posterior['K_a'].mean(dim=0)[gene_idx].item() if hasattr(posterior['K_a'], 'mean') else posterior['K_a'].mean(axis=0)[gene_idx]
+            K_b = posterior['K_b'].mean(dim=0)[gene_idx].item() if hasattr(posterior['K_b'], 'mean') else posterior['K_b'].mean(axis=0)[gene_idx]
+            n_a = posterior['n_a'].mean(dim=0)[gene_idx].item() if hasattr(posterior['n_a'], 'mean') else posterior['n_a'].mean(axis=0)[gene_idx]
+            n_b = posterior['n_b'].mean(dim=0)[gene_idx].item() if hasattr(posterior['n_b'], 'mean') else posterior['n_b'].mean(axis=0)[gene_idx]
+
+            # Compute Hill functions
+            Hill_a = Hill_based_positive(x_range, Vmax=Vmax_a, A=0, K=K_a, n=n_a)
+            Hill_b = Hill_based_positive(x_range, Vmax=Vmax_b, A=0, K=K_b, n=n_b)
+
+            # Combined prediction
+            y_pred = A + alpha * Hill_a + beta * Hill_b
+            return y_pred
+
+        except (KeyError, IndexError, AttributeError):
+            return None
+
+    elif 'Vmax' in posterior and 'K' in posterior and 'n' in posterior:
+        # ===== SINGLE HILL =====
+        try:
+            Vmax = posterior['Vmax'].mean(dim=0)[gene_idx].item() if hasattr(posterior['Vmax'], 'mean') else posterior['Vmax'].mean(axis=0)[gene_idx]
+            K = posterior['K'].mean(dim=0)[gene_idx].item() if hasattr(posterior['K'], 'mean') else posterior['K'].mean(axis=0)[gene_idx]
+            n = posterior['n'].mean(dim=0)[gene_idx].item() if hasattr(posterior['n'], 'mean') else posterior['n'].mean(axis=0)[gene_idx]
+
+            # Compute Hill function
+            y_pred = Hill_based_positive(x_range, Vmax=Vmax, A=A, K=K, n=n)
+            return y_pred
+
+        except (KeyError, IndexError, AttributeError):
+            return None
+
+    elif 'theta' in posterior:
+        # ===== POLYNOMIAL OR THETA-BASED =====
+        try:
+            theta_samples = posterior['theta']
+            # theta shape: (samples, genes, n_params)
+
+            # Check if it's polynomial by number of parameters
+            if hasattr(theta_samples, 'mean'):
+                theta_mean = theta_samples.mean(dim=0)[gene_idx, :]  # (n_params,)
+                theta_np = theta_mean.cpu().numpy() if hasattr(theta_mean, 'cpu') else np.array(theta_mean)
+            else:
+                theta_mean = theta_samples.mean(axis=0)[gene_idx, :]
+                theta_np = np.array(theta_mean)
+
+            # Polynomial: y = coeffs[0] + coeffs[1]*x + coeffs[2]*x^2 + ...
+            # First coefficient is baseline (like A)
+            baseline = theta_np[0]
+            poly_coeffs = theta_np[1:]  # Remaining coefficients
+
+            # Compute polynomial
+            y_pred = np.full_like(x_range, baseline)
+            for i, coeff in enumerate(poly_coeffs, start=1):
+                y_pred += coeff * (x_range ** i)
+
+            return y_pred
+
+        except (KeyError, IndexError, AttributeError):
+            return None
+
+    else:
+        # Unknown function type
+        return None
 
 
 # ============================================================================
@@ -434,36 +565,26 @@ def plot_negbinom_xy(
             color = color_palette.get(group_label, f'C{group_code}')
             ax_plot.plot(np.log2(x_smooth), np.log2(y_smooth), color=color, linewidth=2, label=group_label)
 
-        # Hill function overlay
-        if show_hill_function and hasattr(model, 'posterior_samples_trans') and not corrected:
-            posterior = model.posterior_samples_trans
-            if 'A' in posterior:
-                # Get parameters
-                trans_genes = model.trans_genes
-                if feature in trans_genes:
-                    gene_idx = trans_genes.index(feature)
+        # Trans function overlay (if trans model fitted)
+        if show_hill_function and not corrected:
+            x_range = np.linspace(x_true.min(), x_true.max(), 100)
+            y_pred = predict_trans_function(model, feature, x_range, modality_name=None)
 
-                    A = posterior['A'].mean(dim=0)[gene_idx].item() if hasattr(posterior['A'], 'mean') else posterior['A'].mean(axis=0)[gene_idx]
+            if y_pred is not None and np.all(y_pred > 0):
+                # Only plot if all predictions are positive (for log2 transform)
+                ax_plot.plot(np.log2(x_range), np.log2(y_pred),
+                            color='blue', linestyle='--', linewidth=2,
+                            label='Fitted Trans Function')
 
-                    # Check function type by available parameters
-                    if 'Vmax_a' in posterior:
-                        # Additive Hill
-                        alpha = posterior['alpha'].mean(dim=0)[gene_idx].item() if hasattr(posterior['alpha'], 'mean') else posterior['alpha'].mean(axis=0)[gene_idx]
-                        beta = posterior['beta'].mean(dim=0)[gene_idx].item() if hasattr(posterior['beta'], 'mean') else posterior['beta'].mean(axis=0)[gene_idx]
-                        Vmax_a = posterior['Vmax_a'].mean(dim=0)[gene_idx].item() if hasattr(posterior['Vmax_a'], 'mean') else posterior['Vmax_a'].mean(axis=0)[gene_idx]
-                        Vmax_b = posterior['Vmax_b'].mean(dim=0)[gene_idx].item() if hasattr(posterior['Vmax_b'], 'mean') else posterior['Vmax_b'].mean(axis=0)[gene_idx]
-                        K_a = posterior['K_a'].mean(dim=0)[gene_idx].item() if hasattr(posterior['K_a'], 'mean') else posterior['K_a'].mean(axis=0)[gene_idx]
-                        K_b = posterior['K_b'].mean(dim=0)[gene_idx].item() if hasattr(posterior['K_b'], 'mean') else posterior['K_b'].mean(axis=0)[gene_idx]
-                        n_a = posterior['n_a'].mean(dim=0)[gene_idx].item() if hasattr(posterior['n_a'], 'mean') else posterior['n_a'].mean(axis=0)[gene_idx]
-                        n_b = posterior['n_b'].mean(dim=0)[gene_idx].item() if hasattr(posterior['n_b'], 'mean') else posterior['n_b'].mean(axis=0)[gene_idx]
-
-                        x_range = np.linspace(x_true.min(), x_true.max(), 100)
-                        Hill_a = Hill_based_positive(x_range, Vmax=Vmax_a, A=0, K=K_a, n=n_a)
-                        Hill_b = Hill_based_positive(x_range, Vmax=Vmax_b, A=0, K=K_b, n=n_b)
-                        y_pred = A + alpha * Hill_a + beta * Hill_b
-
-                        ax_plot.plot(np.log2(x_range), np.log2(y_pred), color='blue', linestyle='--', linewidth=2, label='Fitted Hill Function')
-                        ax_plot.axhline(np.log2(A), color='red', linestyle=':', linewidth=1, label='log2(A) baseline')
+                # Add baseline if available
+                if hasattr(model, 'posterior_samples_trans') and 'A' in model.posterior_samples_trans:
+                    A_samples = model.posterior_samples_trans['A']
+                    trans_genes = model.trans_genes if hasattr(model, 'trans_genes') else []
+                    if feature in trans_genes:
+                        gene_idx = trans_genes.index(feature)
+                        A = A_samples.mean(dim=0)[gene_idx].item() if hasattr(A_samples, 'mean') else A_samples.mean(axis=0)[gene_idx]
+                        if A > 0:
+                            ax_plot.axhline(np.log2(A), color='red', linestyle=':', linewidth=1, label='log2(A) baseline')
 
         ax_plot.set_xlabel(xlabel)
         ax_plot.set_ylabel('log2(Expression)')
@@ -491,6 +612,7 @@ def plot_binomial_xy(
     window: int,
     min_counts: int,
     color_palette: Dict[str, str],
+    show_trans_function: bool,
     xlabel: str,
     ax: Optional[plt.Axes] = None,
     **kwargs
@@ -559,6 +681,18 @@ def plot_binomial_xy(
         color = color_palette.get(group_label, f'C{group_code}')
         ax.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2, label=group_label)
 
+    # Trans function overlay (if trans model fitted)
+    if show_trans_function:
+        x_range = np.linspace(x_true.min(), x_true.max(), 100)
+        y_pred = predict_trans_function(model, feature, x_range, modality_name=modality.name)
+
+        if y_pred is not None:
+            # For binomial, PSI is in [0, 1], so clip predictions
+            y_pred_clipped = np.clip(y_pred, 0, 1)
+            ax.plot(np.log2(x_range), y_pred_clipped,
+                   color='blue', linestyle='--', linewidth=2,
+                   label='Fitted Trans Function')
+
     ax.axhline(0.0, linestyle='--', linewidth=1, alpha=0.6, color='gray')
     ax.set_xlabel(xlabel)
     ax.set_ylabel('PSI (Percent Spliced In)')
@@ -577,6 +711,7 @@ def plot_multinomial_xy(
     min_counts: int,
     show_correction: str,
     color_palette: Dict[str, str],
+    show_trans_function: bool,
     xlabel: str,
     figsize: Optional[Tuple[int, int]] = None,
     **kwargs
@@ -689,6 +824,7 @@ def plot_normal_xy(
     window: int,
     show_correction: str,
     color_palette: Dict[str, str],
+    show_trans_function: bool,
     xlabel: str,
     ax: Optional[plt.Axes] = None,
     **kwargs
@@ -768,6 +904,16 @@ def plot_normal_xy(
             # Plot
             color = color_palette.get(group_label, f'C{group_code}')
             ax_plot.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2, label=group_label)
+
+        # Trans function overlay (if trans model fitted)
+        if show_trans_function and not corrected:
+            x_range = np.linspace(x_true.min(), x_true.max(), 100)
+            y_pred = predict_trans_function(model, feature, x_range, modality_name=modality.name)
+
+            if y_pred is not None:
+                ax_plot.plot(np.log2(x_range), y_pred,
+                           color='blue', linestyle='--', linewidth=2,
+                           label='Fitted Trans Function')
 
         ax_plot.set_xlabel(xlabel)
         ax_plot.set_ylabel('Value')
