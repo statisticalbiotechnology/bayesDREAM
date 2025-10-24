@@ -501,6 +501,7 @@ def plot_negbinom_xy(
     show_correction: str,
     color_palette: Dict[str, str],
     show_hill_function: bool,
+    show_ntc_gradient: bool = False,
     xlabel: str,
     ax: Optional[plt.Axes] = None,
     **kwargs
@@ -509,6 +510,13 @@ def plot_negbinom_xy(
     Plot negbinom (gene counts) with optional Hill function overlay.
 
     Y-axis: log2(expression) where expression = counts / (sum_factor * alpha_y)
+
+    Parameters
+    ----------
+    show_ntc_gradient : bool
+        If True, color lines by NTC proportion in k-NN window (default: False)
+        Lighter colors = more NTC cells, Darker colors = fewer NTC cells
+        Only applies to uncorrected plots
     """
     # Get data
     feature_idx = modality.feature_meta.index.get_loc(feature) if feature in modality.feature_meta.index else None
@@ -557,8 +565,17 @@ def plot_negbinom_xy(
     group_labels = get_technical_group_labels(model)
     group_codes = sorted(df['technical_group_code'].unique())
 
+    # Detect NTC cells for gradient coloring
+    is_ntc = df['target'].str.lower() == 'ntc'
+
+    # Create colormap for gradient if needed
+    if show_ntc_gradient:
+        cmap = plt.cm.viridis_r  # Reversed: darker = fewer NTCs
+
     # Plot function
     def _plot_one(ax_plot, corrected):
+        colorbar_added = False  # Track if colorbar added
+
         for group_code, group_label in zip(group_codes, group_labels):
             df_group = df[df['technical_group_code'] == group_code].copy()
 
@@ -581,13 +598,45 @@ def plot_negbinom_xy(
             if len(df_group) == 0:
                 continue
 
+            # Get is_ntc for this group
+            is_ntc_group = is_ntc[df_group.index].values
+
             # k-NN smoothing
             k = _knn_k(len(df_group), window)
-            x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, y_expr.values, k)
+            if show_ntc_gradient and not corrected:
+                # Smoothing with NTC tracking
+                x_smooth, y_smooth, ntc_prop = _smooth_knn(
+                    df_group['x_true'].values,
+                    y_expr.values,
+                    k,
+                    is_ntc=is_ntc_group
+                )
 
-            # Plot
-            color = color_palette.get(group_label, f'C{group_code}')
-            ax_plot.plot(np.log2(x_smooth), np.log2(y_smooth), color=color, linewidth=2, label=group_label)
+                # Use gradient coloring
+                plot_colored_line(
+                    x=np.log2(x_smooth),
+                    y=np.log2(y_smooth),
+                    color_values=1 - ntc_prop,  # Darker = fewer NTCs
+                    cmap=cmap,
+                    ax=ax_plot,
+                    linewidth=2
+                )
+
+                # Add colorbar (once per axis)
+                if not colorbar_added:
+                    fig = ax_plot.get_figure()
+                    sm = ScalarMappable(cmap=cmap, norm=Normalize(0, 1))
+                    sm.set_array([])
+                    cbar = fig.colorbar(sm, ax=ax_plot)
+                    cbar.set_label('1 - Proportion NTC (darker = fewer NTCs)')
+                    colorbar_added = True
+            else:
+                # Standard smoothing without NTC tracking
+                x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, y_expr.values, k)
+
+                # Use standard coloring
+                color = color_palette.get(group_label, f'C{group_code}')
+                ax_plot.plot(np.log2(x_smooth), np.log2(y_smooth), color=color, linewidth=2, label=group_label)
 
         # Trans function overlay (if trans model fitted)
         if show_hill_function and not corrected:
@@ -637,6 +686,7 @@ def plot_binomial_xy(
     min_counts: int,
     color_palette: Dict[str, str],
     show_trans_function: bool,
+    show_ntc_gradient: bool = False,
     xlabel: str,
     ax: Optional[plt.Axes] = None,
     **kwargs
@@ -646,6 +696,12 @@ def plot_binomial_xy(
 
     Y-axis: PSI = counts / denominator
     Filter: min_counts on denominator
+
+    Parameters
+    ----------
+    show_ntc_gradient : bool
+        If True, color lines by NTC proportion in k-NN window (default: False)
+        Lighter colors = more NTC cells, Darker colors = fewer NTC cells
     """
     # Get data
     feature_idx = modality.feature_meta.index.get_loc(feature) if feature in modality.feature_meta.index else None
@@ -690,20 +746,61 @@ def plot_binomial_xy(
     group_labels = get_technical_group_labels(model)
     group_codes = sorted(df['technical_group_code'].unique())
 
+    # Detect NTC cells for gradient coloring
+    is_ntc = df['target'].str.lower() == 'ntc'
+
+    # Create colormap for gradient if needed
+    if show_ntc_gradient:
+        cmap = plt.cm.viridis_r  # Reversed: darker = fewer NTCs
+
     # Plot
+    colorbar_added = False  # Track if colorbar added
+
     for group_code, group_label in zip(group_codes, group_labels):
         df_group = df[df['technical_group_code'] == group_code].copy()
 
         if len(df_group) == 0:
             continue
 
+        # Get is_ntc for this group
+        is_ntc_group = is_ntc[df_group.index].values
+
         # k-NN smoothing
         k = _knn_k(len(df_group), window)
-        x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, df_group['PSI'].values, k)
+        if show_ntc_gradient:
+            # Smoothing with NTC tracking
+            x_smooth, y_smooth, ntc_prop = _smooth_knn(
+                df_group['x_true'].values,
+                df_group['PSI'].values,
+                k,
+                is_ntc=is_ntc_group
+            )
 
-        # Plot
-        color = color_palette.get(group_label, f'C{group_code}')
-        ax.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2, label=group_label)
+            # Use gradient coloring
+            plot_colored_line(
+                x=np.log2(x_smooth),
+                y=y_smooth,
+                color_values=1 - ntc_prop,  # Darker = fewer NTCs
+                cmap=cmap,
+                ax=ax,
+                linewidth=2
+            )
+
+            # Add colorbar (once per axis)
+            if not colorbar_added:
+                fig = ax.get_figure()
+                sm = ScalarMappable(cmap=cmap, norm=Normalize(0, 1))
+                sm.set_array([])
+                cbar = fig.colorbar(sm, ax=ax)
+                cbar.set_label('1 - Proportion NTC (darker = fewer NTCs)')
+                colorbar_added = True
+        else:
+            # Standard smoothing without NTC tracking
+            x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, df_group['PSI'].values, k)
+
+            # Use standard coloring
+            color = color_palette.get(group_label, f'C{group_code}')
+            ax.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2, label=group_label)
 
     # Trans function overlay (if trans model fitted)
     if show_trans_function:
@@ -736,6 +833,7 @@ def plot_multinomial_xy(
     show_correction: str,
     color_palette: Dict[str, str],
     show_trans_function: bool,
+    show_ntc_gradient: bool = False,
     xlabel: str,
     figsize: Optional[Tuple[int, int]] = None,
     **kwargs
@@ -746,7 +844,15 @@ def plot_multinomial_xy(
     Y-axis: Proportion for each category
     Layout: One row with K subplots (one per category)
     If show_correction='both': Two rows × K subplots
+
+    Parameters
+    ----------
+    show_ntc_gradient : bool
+        If True, color lines by NTC proportion in k-NN window (default: False)
+        **Note**: Not yet fully implemented for multinomial - will issue warning
     """
+    if show_ntc_gradient:
+        warnings.warn("NTC gradient coloring not yet implemented for multinomial distributions - using standard colors")
     # Get data
     feature_idx = modality.feature_meta.index.get_loc(feature) if feature in modality.feature_meta.index else None
     if feature_idx is None:
@@ -854,6 +960,7 @@ def plot_normal_xy(
     show_correction: str,
     color_palette: Dict[str, str],
     show_trans_function: bool,
+    show_ntc_gradient: bool = False,
     xlabel: str,
     ax: Optional[plt.Axes] = None,
     **kwargs
@@ -862,6 +969,13 @@ def plot_normal_xy(
     Plot normal distribution (continuous scores like SpliZ).
 
     Y-axis: Raw value
+
+    Parameters
+    ----------
+    show_ntc_gradient : bool
+        If True, color lines by NTC proportion in k-NN window (default: False)
+        Lighter colors = more NTC cells, Darker colors = fewer NTC cells
+        Only applies to uncorrected plots
     """
     # Get data
     feature_idx = modality.feature_meta.index.get_loc(feature) if feature in modality.feature_meta.index else None
@@ -906,8 +1020,17 @@ def plot_normal_xy(
     group_labels = get_technical_group_labels(model)
     group_codes = sorted(df['technical_group_code'].unique())
 
+    # Detect NTC cells for gradient coloring
+    is_ntc = df['target'].str.lower() == 'ntc'
+
+    # Create colormap for gradient if needed
+    if show_ntc_gradient:
+        cmap = plt.cm.viridis_r  # Reversed: darker = fewer NTCs
+
     # Plot function
     def _plot_one(ax_plot, corrected):
+        colorbar_added = False  # Track if colorbar added
+
         for group_code, group_label in zip(group_codes, group_labels):
             df_group = df[df['technical_group_code'] == group_code].copy()
 
@@ -926,13 +1049,45 @@ def plot_normal_xy(
                         correction = alpha_y_add[group_code, feature_idx]
                     y_plot = y_plot - correction
 
+            # Get is_ntc for this group
+            is_ntc_group = is_ntc[df_group.index].values
+
             # k-NN smoothing
             k = _knn_k(len(df_group), window)
-            x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, y_plot, k)
+            if show_ntc_gradient and not corrected:
+                # Smoothing with NTC tracking
+                x_smooth, y_smooth, ntc_prop = _smooth_knn(
+                    df_group['x_true'].values,
+                    y_plot,
+                    k,
+                    is_ntc=is_ntc_group
+                )
 
-            # Plot
-            color = color_palette.get(group_label, f'C{group_code}')
-            ax_plot.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2, label=group_label)
+                # Use gradient coloring
+                plot_colored_line(
+                    x=np.log2(x_smooth),
+                    y=y_smooth,
+                    color_values=1 - ntc_prop,  # Darker = fewer NTCs
+                    cmap=cmap,
+                    ax=ax_plot,
+                    linewidth=2
+                )
+
+                # Add colorbar (once per axis)
+                if not colorbar_added:
+                    fig = ax_plot.get_figure()
+                    sm = ScalarMappable(cmap=cmap, norm=Normalize(0, 1))
+                    sm.set_array([])
+                    cbar = fig.colorbar(sm, ax=ax_plot)
+                    cbar.set_label('1 - Proportion NTC (darker = fewer NTCs)')
+                    colorbar_added = True
+            else:
+                # Standard smoothing without NTC tracking
+                x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, y_plot, k)
+
+                # Use standard coloring
+                color = color_palette.get(group_label, f'C{group_code}')
+                ax_plot.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2, label=group_label)
 
         # Trans function overlay (if trans model fitted)
         if show_trans_function and not corrected:
@@ -971,6 +1126,7 @@ def plot_mvnormal_xy(
     show_correction: str,
     color_palette: Dict[str, str],
     show_trans_function: bool,
+    show_ntc_gradient: bool = False,
     xlabel: str,
     figsize: Optional[Tuple[int, int]] = None,
     **kwargs
@@ -981,7 +1137,15 @@ def plot_mvnormal_xy(
     Y-axis: Value for each dimension
     Layout: One row with D subplots (one per dimension)
     If show_correction='both': Two rows × D subplots
+
+    Parameters
+    ----------
+    show_ntc_gradient : bool
+        If True, color lines by NTC proportion in k-NN window (default: False)
+        **Note**: Not yet fully implemented for mvnormal - will issue warning
     """
+    if show_ntc_gradient:
+        warnings.warn("NTC gradient coloring not yet implemented for mvnormal distributions - using standard colors")
     # Get data
     feature_idx = modality.feature_meta.index.get_loc(feature) if feature in modality.feature_meta.index else None
     if feature_idx is None:
@@ -1106,6 +1270,7 @@ def plot_xy_data(
     min_counts: int = 3,
     color_palette: Optional[Dict[str, str]] = None,
     show_hill_function: bool = True,
+    show_ntc_gradient: bool = False,
     xlabel: str = "log2(x_true)",
     figsize: Optional[Tuple[int, int]] = None,
     src_barcodes: Optional[np.ndarray] = None,
@@ -1140,6 +1305,12 @@ def plot_xy_data(
         Overlay fitted trans function if trans model fitted (all distributions, default: True)
         Works with all function types: additive_hill, single_hill, polynomial
         Automatically detects function type from posterior_samples_trans
+    show_ntc_gradient : bool
+        Color lines by NTC proportion in k-NN window (default: False)
+        Lighter colors = more NTC cells, Darker colors = fewer NTC cells
+        Only applies to uncorrected plots
+        Fully implemented for: negbinom, binomial, normal
+        Not yet implemented for: multinomial, mvnormal (will issue warning)
     xlabel : str
         X-axis label (default: "log2(x_true)")
     figsize : tuple, optional
@@ -1180,6 +1351,9 @@ def plot_xy_data(
     >>>
     >>> # Show both corrected and uncorrected
     >>> model.plot_xy_data('TET2', show_correction='both')
+    >>>
+    >>> # Plot with NTC gradient coloring
+    >>> model.plot_xy_data('TET2', show_ntc_gradient=True)
     """
     # Check x_true is set
     if not hasattr(model, 'x_true') or model.x_true is None:
@@ -1227,6 +1401,7 @@ def plot_xy_data(
             show_correction=show_correction,
             color_palette=color_palette,
             show_hill_function=show_hill_function,
+            show_ntc_gradient=show_ntc_gradient,
             xlabel=xlabel,
             **kwargs
         )
@@ -1241,6 +1416,7 @@ def plot_xy_data(
             min_counts=min_counts,
             color_palette=color_palette,
             show_trans_function=show_hill_function,
+            show_ntc_gradient=show_ntc_gradient,
             xlabel=xlabel,
             **kwargs
         )
@@ -1256,6 +1432,7 @@ def plot_xy_data(
             show_correction=show_correction,
             color_palette=color_palette,
             show_trans_function=show_hill_function,
+            show_ntc_gradient=show_ntc_gradient,
             xlabel=xlabel,
             figsize=figsize,
             **kwargs
@@ -1271,6 +1448,7 @@ def plot_xy_data(
             show_correction=show_correction,
             color_palette=color_palette,
             show_trans_function=show_hill_function,
+            show_ntc_gradient=show_ntc_gradient,
             xlabel=xlabel,
             **kwargs
         )
@@ -1285,6 +1463,7 @@ def plot_xy_data(
             show_correction=show_correction,
             color_palette=color_palette,
             show_trans_function=show_hill_function,
+            show_ntc_gradient=show_ntc_gradient,
             xlabel=xlabel,
             figsize=figsize,
             **kwargs
