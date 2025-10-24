@@ -236,17 +236,30 @@ def _plot_1d_violin(
         order_by, custom_order, subset_features=None
     )
 
-    # Create split violin plot
-    sns.violinplot(
-        data=df,
-        x='feature',
-        y='value',
-        hue='distribution',
-        split=True,
-        ax=ax,
-        palette={'Prior': '#1f77b4', 'Posterior': '#ff7f0e'},
-        **kwargs
-    )
+    # Create split violin plot with error handling
+    try:
+        sns.violinplot(
+            data=df,
+            x='feature',
+            y='value',
+            hue='distribution',
+            split=True,
+            ax=ax,
+            palette={'Prior': '#1f77b4', 'Posterior': '#ff7f0e'},
+            **kwargs
+        )
+    except (np.linalg.LinAlgError, ValueError) as e:
+        # Fall back to boxplot if violin fails (e.g., singular covariance)
+        warnings.warn(f"Violin plot failed ({str(e)}), using boxplot instead")
+        sns.boxplot(
+            data=df,
+            x='feature',
+            y='value',
+            hue='distribution',
+            ax=ax,
+            palette={'Prior': '#1f77b4', 'Posterior': '#ff7f0e'},
+            **kwargs
+        )
 
     ax.set_xlabel('Feature')
     ax.set_ylabel('Value')
@@ -469,17 +482,30 @@ def _plot_2d_violin(
             order_by, custom_order, subset_features=None
         )
 
-        # Plot
-        sns.violinplot(
-            data=df,
-            x='feature',
-            y='value',
-            hue='distribution',
-            split=True,
-            ax=ax,
-            palette={'Prior': '#1f77b4', 'Posterior': '#ff7f0e'},
-            **kwargs
-        )
+        # Plot with error handling
+        try:
+            sns.violinplot(
+                data=df,
+                x='feature',
+                y='value',
+                hue='distribution',
+                split=True,
+                ax=ax,
+                palette={'Prior': '#1f77b4', 'Posterior': '#ff7f0e'},
+                **kwargs
+            )
+        except (np.linalg.LinAlgError, ValueError) as e:
+            # Fall back to boxplot if violin fails
+            warnings.warn(f"Violin plot failed for {dim_name} ({str(e)}), using boxplot instead")
+            sns.boxplot(
+                data=df,
+                x='feature',
+                y='value',
+                hue='distribution',
+                ax=ax,
+                palette={'Prior': '#1f77b4', 'Posterior': '#ff7f0e'},
+                **kwargs
+            )
 
         ax.set_ylabel(f'{dim_name}\nValue')
         ax.set_xlabel('')
