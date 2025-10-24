@@ -64,9 +64,20 @@ def plot_scalar_parameter(
     kde_kwargs = {'fill': True, 'alpha': 0.5, 'linewidth': 2}
     kde_kwargs.update(kwargs)
 
-    # Plot densities
-    sns.kdeplot(prior_samples, ax=ax, label='Prior', color='#1f77b4', **kde_kwargs)
-    sns.kdeplot(posterior_samples, ax=ax, label='Posterior', color='#ff7f0e', **kde_kwargs)
+    # Plot densities with error handling for low-variance data
+    try:
+        sns.kdeplot(prior_samples, ax=ax, label='Prior', color='#1f77b4', **kde_kwargs)
+    except (np.linalg.LinAlgError, ValueError) as e:
+        # Fall back to histogram if KDE fails (e.g., singular covariance)
+        warnings.warn(f"KDE failed for prior samples ({str(e)}), using histogram instead")
+        ax.hist(prior_samples, bins=30, alpha=0.5, color='#1f77b4', label='Prior', density=True)
+
+    try:
+        sns.kdeplot(posterior_samples, ax=ax, label='Posterior', color='#ff7f0e', **kde_kwargs)
+    except (np.linalg.LinAlgError, ValueError) as e:
+        # Fall back to histogram if KDE fails
+        warnings.warn(f"KDE failed for posterior samples ({str(e)}), using histogram instead")
+        ax.hist(posterior_samples, bins=30, alpha=0.5, color='#ff7f0e', label='Posterior', density=True)
 
     # Compute overlap
     overlap = compute_distribution_overlap(prior_samples, posterior_samples)

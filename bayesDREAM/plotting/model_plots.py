@@ -24,7 +24,7 @@ class PlottingMixin:
         self,
         param: str = 'alpha_y',
         modality_name: Optional[str] = None,
-        cell_line_index: Optional[int] = None,
+        technical_group_index: Optional[int] = None,
         order_by: str = 'mean',
         subset_features: Optional[List[str]] = None,
         plot_type: str = 'auto',
@@ -39,8 +39,9 @@ class PlottingMixin:
             Parameter to plot: 'beta_o', 'alpha_x', 'alpha_y', 'mu_ntc', 'o_y'
         modality_name : str, optional
             Modality name (default: primary modality)
-        cell_line_index : int, optional
-            Cell line index for alpha_y (if None, plots all cell lines)
+        technical_group_index : int, optional
+            Technical group index for alpha_y (e.g., 0 for first group, 1 for second).
+            If None, plots all technical groups as a 2D plot.
         order_by : str
             Feature ordering: 'mean', 'difference', 'alphabetical', 'input'
         subset_features : List[str], optional
@@ -60,10 +61,10 @@ class PlottingMixin:
         >>> # Plot beta_o (scalar parameter)
         >>> fig = model.plot_technical_fit('beta_o')
         >>>
-        >>> # Plot alpha_y for first cell line
-        >>> fig = model.plot_technical_fit('alpha_y', cell_line_index=0)
+        >>> # Plot alpha_y for first technical group
+        >>> fig = model.plot_technical_fit('alpha_y', technical_group_index=0)
         >>>
-        >>> # Plot alpha_y for all cell lines (2D parameter)
+        >>> # Plot alpha_y for all technical groups (2D parameter)
         >>> fig = model.plot_technical_fit('alpha_y')
         >>>
         >>> # Plot alpha_y for specific genes
@@ -104,6 +105,10 @@ class PlottingMixin:
             post_samples = posterior['beta_o'].numpy() if hasattr(posterior['beta_o'], 'numpy') else posterior['beta_o']
             prior_samples = prior_dict['beta_o'].numpy() if hasattr(prior_dict['beta_o'], 'numpy') else prior_dict['beta_o']
 
+            # Squeeze to 1D if needed (handle shape (n_samples, 1, 1) or (n_samples, 1))
+            post_samples = np.squeeze(post_samples)
+            prior_samples = np.squeeze(prior_samples)
+
             return plot_scalar_parameter(prior_samples, post_samples, 'beta_o', **kwargs)
 
         elif param == 'alpha_x':
@@ -135,15 +140,43 @@ class PlottingMixin:
 
         elif param == 'alpha_y':
             # 1D or 2D parameter: (samples, genes) or (samples, cell_lines, genes)
-            if 'alpha_y' not in posterior:
-                raise ValueError("alpha_y not found in posterior_samples_technical")
 
-            post_samples = posterior['alpha_y']
+            # Try to get modality-specific alpha_y first, fall back to posterior_samples_technical
+            if hasattr(modality, 'alpha_y_prefit') and modality.alpha_y_prefit is not None:
+                # Use modality-specific alpha_y (correct number of features)
+                post_samples = modality.alpha_y_prefit
+            elif hasattr(self, 'alpha_y_prefit') and self.alpha_y_prefit is not None:
+                # Use model-level alpha_y_prefit (may be for primary modality)
+                if modality.name == self.primary_modality:
+                    post_samples = self.alpha_y_prefit
+                else:
+                    # Wrong modality, use posterior_samples_technical
+                    if 'alpha_y' not in posterior:
+                        raise ValueError(f"alpha_y not found for modality '{modality.name}'. "
+                                       "Run fit_technical(modality_name='{modality.name}') first.")
+                    post_samples = posterior['alpha_y']
+            else:
+                # Fall back to posterior_samples_technical
+                if 'alpha_y' not in posterior:
+                    raise ValueError("alpha_y not found in posterior_samples_technical")
+                post_samples = posterior['alpha_y']
+
             if hasattr(post_samples, 'numpy'):
                 post_samples = post_samples.numpy()
 
             # Use sampled priors
             prior_samples = prior_dict['alpha_y'].numpy() if hasattr(prior_dict['alpha_y'], 'numpy') else prior_dict['alpha_y']
+
+            # Check shape compatibility
+            expected_n_features = len(feature_names)
+            actual_n_features = post_samples.shape[-1] if post_samples.ndim >= 2 else post_samples.shape[0]
+            if actual_n_features != expected_n_features:
+                raise ValueError(
+                    f"Shape mismatch: alpha_y has {actual_n_features} features, "
+                    f"but modality '{modality.name}' has {expected_n_features} features. "
+                    f"Try specifying modality_name explicitly or check that fit_technical "
+                    f"was run for this modality."
+                )
 
             if post_samples.ndim == 2:
                 # (samples, genes)
@@ -153,22 +186,22 @@ class PlottingMixin:
                     **kwargs
                 )
             elif post_samples.ndim == 3:
-                # (samples, cell_lines, genes)
-                if cell_line_index is not None:
-                    # Plot single cell line
-                    prior_cl = prior_samples[:, cell_line_index, :]
-                    post_cl = post_samples[:, cell_line_index, :]
+                # (samples, technical_groups, genes)
+                if technical_group_index is not None:
+                    # Plot single technical group
+                    prior_tg = prior_samples[:, technical_group_index, :]
+                    post_tg = post_samples[:, technical_group_index, :]
                     return plot_1d_parameter(
-                        prior_cl, post_cl, feature_names, f'alpha_y (cell_line {cell_line_index})',
+                        prior_tg, post_tg, feature_names, f'alpha_y (technical_group {technical_group_index})',
                         order_by, subset_features=subset_features, plot_type=plot_type,
                         **kwargs
                     )
                 else:
-                    # Plot all cell lines (2D plot)
-                    n_cell_lines = post_samples.shape[1]
-                    cell_line_names = [f'CL_{i}' for i in range(n_cell_lines)]
+                    # Plot all technical groups (2D plot)
+                    n_groups = post_samples.shape[1]
+                    group_names = [f'TG_{i}' for i in range(n_groups)]
                     return plot_2d_parameter(
-                        prior_samples, post_samples, feature_names, cell_line_names, 'alpha_y',
+                        prior_samples, post_samples, feature_names, group_names, 'alpha_y',
                         order_by=order_by, subset_features=subset_features,
                         plot_type=plot_type, **kwargs
                     )
