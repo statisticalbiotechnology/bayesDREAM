@@ -44,7 +44,12 @@ def _knn_k(n: int, window: Union[int, float]) -> int:
     return max(1, min(k, n))
 
 
-def _smooth_knn(x: np.ndarray, y: np.ndarray, k: int) -> Tuple[np.ndarray, np.ndarray]:
+def _smooth_knn(
+    x: np.ndarray,
+    y: np.ndarray,
+    k: int,
+    is_ntc: Optional[np.ndarray] = None
+) -> Union[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """
     k-NN smoothing along x-axis.
 
@@ -56,6 +61,9 @@ def _smooth_knn(x: np.ndarray, y: np.ndarray, k: int) -> Tuple[np.ndarray, np.nd
         Y values (1D)
     k : int
         Number of nearest neighbors
+    is_ntc : np.ndarray, optional
+        Boolean array indicating NTC cells (1D, same length as x)
+        If provided, returns NTC proportions in k-NN windows
 
     Returns
     -------
@@ -63,8 +71,12 @@ def _smooth_knn(x: np.ndarray, y: np.ndarray, k: int) -> Tuple[np.ndarray, np.nd
         Sorted x values
     y_hat : np.ndarray
         Smoothed y values
+    ntc_prop : np.ndarray, optional
+        If is_ntc provided: proportion of NTC cells in each k-NN window
     """
     if len(x) == 0:
+        if is_ntc is not None:
+            return np.array([]), np.array([]), np.array([])
         return np.array([]), np.array([])
 
     order = np.argsort(x)
@@ -75,11 +87,23 @@ def _smooth_knn(x: np.ndarray, y: np.ndarray, k: int) -> Tuple[np.ndarray, np.nd
     tree = cKDTree(x_sorted)
 
     y_hat = np.empty_like(y_sorted, dtype=float)
-    for i in range(len(x_sorted)):
-        _, idx = tree.query(x_sorted[i], k=k)
-        y_hat[i] = np.nanmean(y_sorted[idx])
 
-    return x_sorted.ravel(), y_hat
+    if is_ntc is not None:
+        is_ntc_sorted = np.asarray(is_ntc)[order]
+        ntc_prop = np.empty_like(y_sorted, dtype=float)
+
+        for i in range(len(x_sorted)):
+            _, idx = tree.query(x_sorted[i], k=k)
+            y_hat[i] = np.nanmean(y_sorted[idx])
+            ntc_prop[i] = np.mean(is_ntc_sorted[idx])  # Proportion of NTC in window
+
+        return x_sorted.ravel(), y_hat, ntc_prop
+    else:
+        for i in range(len(x_sorted)):
+            _, idx = tree.query(x_sorted[i], k=k)
+            y_hat[i] = np.nanmean(y_sorted[idx])
+
+        return x_sorted.ravel(), y_hat
 
 
 def _to_2d(a):

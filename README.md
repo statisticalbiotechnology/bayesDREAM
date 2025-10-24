@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="bayesDREAM logo.pdf" alt="bayesDREAM Logo" width="600"/>
+</p>
+
 # bayesDREAM: Bayesian Dosage Response Effects Across Modalities
 
 A Bayesian framework for modeling perturbation effects across multiple molecular modalities using PyTorch and Pyro.
