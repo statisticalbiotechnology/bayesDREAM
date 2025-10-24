@@ -14,6 +14,11 @@ from .distributions import (
     is_3d_distribution,
     DISTRIBUTION_REGISTRY
 )
+from .plotting import (
+    plot_scalar_parameter,
+    plot_1d_parameter,
+    plot_2d_parameter
+)
 
 __version__ = "1.0.0"
 __all__ = [
@@ -23,5 +28,8 @@ __all__ = [
     "requires_denominator",
     "requires_sum_factor",
     "is_3d_distribution",
-    "DISTRIBUTION_REGISTRY"
+    "DISTRIBUTION_REGISTRY",
+    "plot_scalar_parameter",
+    "plot_1d_parameter",
+    "plot_2d_parameter"
 ]

@@ -45,14 +45,15 @@ from .distributions import get_observation_sampler, requires_denominator, is_3d_
 # Import fitters
 from .fitting import TechnicalFitter, CisFitter, TransFitter
 from .io import ModelSaver, ModelLoader
+from .plotting.model_plots import PlottingMixin
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
 
-class _BayesDREAMCore:
+class _BayesDREAMCore(PlottingMixin):
     """
     Internal core class for the three-step Bayesian Dosage Response Effects Across Modalities framework:
-    
+
     1) Optional cell-line prefit (modeling alpha_y for NTC),
     2) Fitting cis effects (model_x),
     3) Fitting trans effects (model_y).
