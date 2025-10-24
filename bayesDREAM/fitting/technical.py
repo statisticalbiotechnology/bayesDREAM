@@ -779,63 +779,21 @@ class TechnicalFitter:
             modality.feature_meta['technical_correction_applied'] = ~needs_exclusion_mask
     
         # ----------------------------------------
-        # Persist results
+        # Persist results at modality level
         # ----------------------------------------
         modality.alpha_y_prefit       = posterior_samples["alpha_y"]        # multiplicative (back-compat)
         modality.alpha_y_prefit_mult  = posterior_samples["alpha_y_mult"]
         modality.alpha_y_prefit_add   = posterior_samples["alpha_y_add"]
         modality.posterior_samples_technical = posterior_samples
-    
+
         if modality.is_exon_skipping():
             modality.mark_technical_fit_complete()
-    
+
+        # Store losses for primary modality only
         if modality_name == self.model.primary_modality:
             self.model.loss_technical = losses
-            self.model.posterior_samples_technical = posterior_samples
 
-            # Extract cis gene alpha if it exists in the fitted features
-            if self.model.cis_gene is not None and 'cis' in self.model.modalities:
-                # Check if cis gene was included in the fit (it should be when fitting with original counts)
-                # The original counts (passed to base class) include the cis gene
-                if hasattr(self.model, 'counts') and self.model.cis_gene in self.model.counts.index:
-                    # Get the position of cis gene in the ORIGINAL counts (before filtering)
-                    all_genes_orig = self.model.counts.index.tolist()
-                    if self.model.cis_gene in all_genes_orig:
-                        cis_idx_orig = all_genes_orig.index(self.model.cis_gene)
-
-                        # Check if this index is within the fitted features (not filtered out)
-                        full_alpha_y = posterior_samples["alpha_y"]  # (S?, C, T_all)
-                        if cis_idx_orig < full_alpha_y.shape[-1]:
-                            # Cis gene was included in fit
-                            self.model.alpha_x_prefit = full_alpha_y[..., cis_idx_orig]  # (S?, C)
-                            self.model.alpha_x_type = 'posterior'
-
-                            # For alpha_y_prefit, exclude cis gene
-                            all_idx = list(range(full_alpha_y.shape[-1]))
-                            trans_idx = [i for i in all_idx if i != cis_idx_orig]
-                            self.model.alpha_y_prefit = full_alpha_y[..., trans_idx]
-                            self.model.alpha_y_type = 'posterior'
-                            print(f"[INFO] Extracted alpha_x_prefit for cis '{self.model.cis_gene}' (index {cis_idx_orig}) and excluded it from alpha_y_prefit")
-                        else:
-                            # Cis gene was filtered out during fit
-                            self.model.alpha_y_prefit = full_alpha_y
-                            self.model.alpha_y_type = 'posterior'
-                            print(f"[INFO] Cis '{self.model.cis_gene}' was filtered out during fit - will be fit separately in fit_cis")
-                    else:
-                        self.model.alpha_y_prefit = posterior_samples["alpha_y"]
-                        self.model.alpha_y_type = 'posterior'
-                        print(f"[INFO] Cis '{self.model.cis_gene}' not in original counts - will be fit in fit_cis")
-                else:
-                    self.model.alpha_y_prefit = posterior_samples["alpha_y"]
-                    self.model.alpha_y_type = 'posterior'
-                    print(f"[INFO] No original counts available - will fit cis in fit_cis later")
-            else:
-                self.model.alpha_y_prefit = posterior_samples["alpha_y"]
-                self.model.alpha_y_type = 'posterior'
-
-            print(f"[INFO] Stored results in modality '{modality_name}' and at model level (primary modality)")
-        else:
-            print(f"[INFO] Stored results in modality '{modality_name}'")
+        print(f"[INFO] Stored technical fit results in modality '{modality_name}'")
     
         if self.model.device.type == "cuda":
             torch.cuda.empty_cache()

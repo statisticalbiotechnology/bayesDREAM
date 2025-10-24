@@ -43,12 +43,12 @@ class ModelSaver:
         Notes
         -----
         Saves per-modality:
-        - alpha_y_prefit_{modality}.pt: Overdispersion parameters for each modality
+        - alpha_y_prefit_{modality}.pt: Appropriate alpha_y for distribution (add or mult)
+        - posterior_samples_technical_{modality}.pt: Full posterior samples
 
         Saves model-level (automatically when primary modality is included):
         - alpha_x_prefit.pt: Cis gene overdispersion (if set)
         - alpha_y_prefit.pt: Trans gene overdispersion (from primary modality)
-        - posterior_samples_technical.pt: Full posterior samples (from primary modality)
         """
         if output_dir is None:
             output_dir = self.model.output_dir
@@ -86,23 +86,44 @@ class ModelSaver:
                 saved_files['alpha_y_type'] = self.model.alpha_y_type
                 print(f"[SAVE] alpha_y_prefit ({self.model.alpha_y_type}) → {path}")
 
-            if hasattr(self.model, 'posterior_samples_technical') and self.model.posterior_samples_technical is not None:
-                # Remove large observation arrays before saving
-                posterior_clean = {k: v for k, v in self.model.posterior_samples_technical.items()
-                                 if k not in ['y_obs_ntc', 'y_obs']}
-                path = os.path.join(output_dir, 'posterior_samples_technical.pt')
-                torch.save(posterior_clean, path)
-                saved_files['posterior_samples_technical'] = path
-                print(f"[SAVE] posterior_samples_technical → {path}")
-
-        # Save per-modality alpha_y_prefit
+        # Save per-modality alpha_y_prefit and posterior_samples_technical
         for mod_name in modalities_to_save:
             mod = self.model.modalities[mod_name]
+
+            # Save distribution-appropriate alpha_y
             if hasattr(mod, 'alpha_y_prefit') and mod.alpha_y_prefit is not None:
+                # Determine which alpha_y to save based on distribution
+                if mod.distribution == 'negbinom':
+                    # Save multiplicative for negbinom
+                    if hasattr(mod, 'alpha_y_prefit_mult') and mod.alpha_y_prefit_mult is not None:
+                        alpha_to_save = mod.alpha_y_prefit_mult
+                        alpha_type = 'mult'
+                    else:
+                        alpha_to_save = mod.alpha_y_prefit
+                        alpha_type = 'mult (default)'
+                else:
+                    # Save additive for normal, binomial, mvnormal, multinomial
+                    if hasattr(mod, 'alpha_y_prefit_add') and mod.alpha_y_prefit_add is not None:
+                        alpha_to_save = mod.alpha_y_prefit_add
+                        alpha_type = 'add'
+                    else:
+                        alpha_to_save = mod.alpha_y_prefit
+                        alpha_type = 'add (default)'
+
                 path = os.path.join(output_dir, f'alpha_y_prefit_{mod_name}.pt')
-                torch.save(mod.alpha_y_prefit, path)
+                torch.save(alpha_to_save, path)
                 saved_files[f'alpha_y_prefit_{mod_name}'] = path
-                print(f"[SAVE] {mod_name}.alpha_y_prefit → {path}")
+                print(f"[SAVE] {mod_name}.alpha_y_prefit ({alpha_type}) → {path}")
+
+            # Save modality-specific posterior_samples_technical
+            if hasattr(mod, 'posterior_samples_technical') and mod.posterior_samples_technical is not None:
+                # Remove large observation arrays before saving
+                posterior_clean = {k: v for k, v in mod.posterior_samples_technical.items()
+                                 if k not in ['y_obs_ntc', 'y_obs']}
+                path = os.path.join(output_dir, f'posterior_samples_technical_{mod_name}.pt')
+                torch.save(posterior_clean, path)
+                saved_files[f'posterior_samples_technical_{mod_name}'] = path
+                print(f"[SAVE] {mod_name}.posterior_samples_technical → {path}")
 
         print(f"[SAVE] Technical fit saved to {output_dir}")
         print(f"[SAVE] Modalities saved: {modalities_to_save}")

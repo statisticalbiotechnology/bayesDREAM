@@ -79,14 +79,16 @@ class PlottingMixin:
             warnings.warn("cell_line_index is deprecated, use technical_group_index instead", DeprecationWarning)
             technical_group_index = cell_line_index
 
-        if not hasattr(self, 'posterior_samples_technical'):
-            raise ValueError("No technical fit found. Run fit_technical() first.")
-
         if modality_name is None:
             modality_name = self.primary_modality
 
         modality = self.get_modality(modality_name)
-        posterior = self.posterior_samples_technical
+
+        # Get modality-specific posterior samples
+        if not hasattr(modality, 'posterior_samples_technical') or modality.posterior_samples_technical is None:
+            raise ValueError(f"No technical fit found for modality '{modality_name}'. Run fit_technical(modality_name='{modality_name}') first.")
+
+        posterior = modality.posterior_samples_technical
 
         # Get feature names - will be adjusted based on alpha_y source later
         if 'gene' in modality.feature_meta.columns:
@@ -150,57 +152,17 @@ class PlottingMixin:
         elif param == 'alpha_y':
             # 1D or 2D parameter: (samples, genes) or (samples, cell_lines, genes)
 
-            # Try to get modality-specific alpha_y first, fall back to posterior_samples_technical
-            using_posterior_samples = False
-            if hasattr(modality, 'alpha_y_prefit') and modality.alpha_y_prefit is not None:
-                # Use modality-specific alpha_y (correct number of features)
-                post_samples = modality.alpha_y_prefit
-                using_posterior_samples = False
-            elif hasattr(self, 'alpha_y_prefit') and self.alpha_y_prefit is not None:
-                # Use model-level alpha_y_prefit (may be for primary modality)
-                if modality.name == self.primary_modality:
-                    post_samples = self.alpha_y_prefit
-                    using_posterior_samples = False
-                else:
-                    # Wrong modality, use posterior_samples_technical
-                    if 'alpha_y' not in posterior:
-                        raise ValueError(f"alpha_y not found for modality '{modality.name}'. "
-                                       "Run fit_technical(modality_name='{modality.name}') first.")
-                    post_samples = posterior['alpha_y']
-                    using_posterior_samples = True
-            else:
-                # Fall back to posterior_samples_technical
-                if 'alpha_y' not in posterior:
-                    raise ValueError("alpha_y not found in posterior_samples_technical")
-                post_samples = posterior['alpha_y']
-                using_posterior_samples = True
+            # Use modality-specific alpha_y from posterior_samples_technical
+            if 'alpha_y' not in posterior:
+                raise ValueError(f"alpha_y not found for modality '{modality.name}'. "
+                               "Run fit_technical(modality_name='{modality.name}') first.")
+            post_samples = posterior['alpha_y']
 
             if hasattr(post_samples, 'numpy'):
                 post_samples = post_samples.numpy()
 
-            # Determine feature names based on alpha_y source
-            if using_posterior_samples:
-                # posterior_samples_technical includes cis gene - need original feature names
-                if hasattr(self, 'counts_meta') and self.counts_meta is not None:
-                    # Use counts_meta if available
-                    if 'gene' in self.counts_meta.columns:
-                        feature_names = self.counts_meta['gene'].tolist()
-                    elif 'gene_name' in self.counts_meta.columns:
-                        feature_names = self.counts_meta['gene_name'].tolist()
-                    else:
-                        feature_names = self.counts_meta.index.tolist()
-                elif hasattr(self, 'counts') and self.counts is not None:
-                    # Fall back to counts index
-                    feature_names = self.counts.index.tolist()
-                else:
-                    # Last resort: construct from modality + cis gene
-                    if hasattr(self, 'cis_gene'):
-                        feature_names = [self.cis_gene] + modality_feature_names
-                    else:
-                        feature_names = modality_feature_names
-            else:
-                # Use modality feature names (excludes cis gene)
-                feature_names = modality_feature_names
+            # Use modality feature names (posterior is modality-specific)
+            feature_names = modality_feature_names
 
             # Use sampled priors
             prior_samples = prior_dict['alpha_y'].numpy() if hasattr(prior_dict['alpha_y'], 'numpy') else prior_dict['alpha_y']

@@ -85,14 +85,7 @@ class ModelLoader:
                 loaded['alpha_y_prefit'] = self.model.alpha_y_prefit
                 print(f"[LOAD] alpha_y_prefit ({self.model.alpha_y_type}) ← {alpha_y_path}")
 
-            # Load posterior samples
-            posterior_path = os.path.join(input_dir, 'posterior_samples_technical.pt')
-            if os.path.exists(posterior_path):
-                self.model.posterior_samples_technical = torch.load(posterior_path)
-                loaded['posterior_samples_technical'] = self.model.posterior_samples_technical
-                print(f"[LOAD] posterior_samples_technical ← {posterior_path}")
-
-        # Load per-modality alpha_y_prefit
+        # Load per-modality alpha_y_prefit and posterior_samples_technical
         for mod_name in modalities_to_load:
             mod_path = os.path.join(input_dir, f'alpha_y_prefit_{mod_name}.pt')
             if os.path.exists(mod_path):
@@ -103,6 +96,13 @@ class ModelLoader:
                     self.model.modalities[mod_name].alpha_y_prefit = alpha_y_mod.mean(dim=0)
                 loaded[f'alpha_y_prefit_{mod_name}'] = self.model.modalities[mod_name].alpha_y_prefit
                 print(f"[LOAD] {mod_name}.alpha_y_prefit ← {mod_path}")
+
+            # Load modality-specific posterior_samples_technical
+            posterior_path = os.path.join(input_dir, f'posterior_samples_technical_{mod_name}.pt')
+            if os.path.exists(posterior_path):
+                self.model.modalities[mod_name].posterior_samples_technical = torch.load(posterior_path)
+                loaded[f'posterior_samples_technical_{mod_name}'] = self.model.modalities[mod_name].posterior_samples_technical
+                print(f"[LOAD] {mod_name}.posterior_samples_technical ← {posterior_path}")
 
         print(f"[LOAD] Technical fit loaded from {input_dir}")
         print(f"[LOAD] Modalities loaded: {modalities_to_load}")
