@@ -13,6 +13,7 @@ Comprehensive documentation for the bayesDREAM multi-modal Bayesian framework.
 
 - **[API_REFERENCE.md](API_REFERENCE.md)** - Complete API documentation for all classes and methods
 - **[QUICKSTART_MULTIMODAL.md](QUICKSTART_MULTIMODAL.md)** - Quick reference for multi-modal workflows
+- **[PLOTTING_GUIDE.md](PLOTTING_GUIDE.md)** - Comprehensive guide to visualization functions
 - **[DATA_ACCESS.md](DATA_ACCESS.md)** - Guide to accessing fitted parameters and posterior samples
 - **[SAVE_LOAD_GUIDE.md](SAVE_LOAD_GUIDE.md)** - Save/load pipeline stages with modality-specific control
 

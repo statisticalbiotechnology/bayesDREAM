@@ -170,6 +170,7 @@ See **[docs/SAVE_LOAD_GUIDE.md](docs/SAVE_LOAD_GUIDE.md)** for complete save/loa
 
 ### User Guides
 - **[docs/QUICKSTART_MULTIMODAL.md](docs/QUICKSTART_MULTIMODAL.md)** - Quick reference guide
+- **[docs/PLOTTING_GUIDE.md](docs/PLOTTING_GUIDE.md)** - Comprehensive visualization guide
 - **[docs/SAVE_LOAD_GUIDE.md](docs/SAVE_LOAD_GUIDE.md)** - Save/load pipeline stages with modality-specific control
 - **[docs/API_REFERENCE.md](docs/API_REFERENCE.md)** - Complete API reference with all functions
 - **[docs/DATA_ACCESS.md](docs/DATA_ACCESS.md)** - Guide to accessing and working with data
