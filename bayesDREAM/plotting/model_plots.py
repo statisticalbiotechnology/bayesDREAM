@@ -123,7 +123,7 @@ class PlottingMixin:
             return plot_scalar_parameter(prior_samples, post_samples, 'beta_o', **kwargs)
 
         elif param == 'alpha_x':
-            # Scalar or 1D parameter (per cell line)
+            # 1D or 2D parameter (per technical group)
             if not hasattr(self, 'alpha_x_prefit'):
                 raise ValueError("alpha_x not found. Check if cis gene was included in technical fit.")
 
@@ -142,12 +142,22 @@ class PlottingMixin:
                 if prior_samples.ndim == 3:
                     prior_samples = prior_samples[:, :, 0]  # Take first gene dimension
 
+            # Handle different dimensionalities
             if post_samples.ndim == 1:
-                # Scalar (one cell line)
+                # (samples,) - single value across all groups
                 return plot_scalar_parameter(prior_samples, post_samples, 'alpha_x', **kwargs)
+            elif post_samples.ndim == 2:
+                # (samples, technical_groups) - one value per group
+                n_groups = post_samples.shape[1]
+                group_names = [f'TG_{i}' for i in range(n_groups)]
+
+                # Reshape for 1D plotting: treat as separate features
+                return plot_1d_parameter(
+                    prior_samples, post_samples, group_names, 'alpha_x',
+                    order_by='input', plot_type='violin', **kwargs
+                )
             else:
-                # Multiple cell lines
-                return plot_scalar_parameter(prior_samples, post_samples, 'alpha_x', **kwargs)
+                raise ValueError(f"Unexpected alpha_x shape: {post_samples.shape}")
 
         elif param == 'alpha_y':
             # 1D or 2D parameter: (samples, genes) or (samples, cell_lines, genes)

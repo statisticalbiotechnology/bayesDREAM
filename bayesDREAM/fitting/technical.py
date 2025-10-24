@@ -781,9 +781,55 @@ class TechnicalFitter:
         # ----------------------------------------
         # Persist results at modality level
         # ----------------------------------------
-        modality.alpha_y_prefit       = posterior_samples["alpha_y"]        # multiplicative (back-compat)
-        modality.alpha_y_prefit_mult  = posterior_samples["alpha_y_mult"]
-        modality.alpha_y_prefit_add   = posterior_samples["alpha_y_add"]
+        # For primary modality fitted with original counts (includes cis gene),
+        # we need to extract alpha_x for the cis gene and exclude it from modality alpha_y
+        if modality_name == self.model.primary_modality and hasattr(self.model, 'counts') and \
+           self.model.cis_gene is not None and 'cis' in self.model.modalities:
+
+            # Check if cis gene is in the original counts
+            if isinstance(self.model.counts, pd.DataFrame) and self.model.cis_gene in self.model.counts.index:
+                all_genes_orig = self.model.counts.index.tolist()
+                cis_idx_orig = all_genes_orig.index(self.model.cis_gene)
+
+                # Full alpha includes all genes from original counts (92 features)
+                full_alpha_y_mult = posterior_samples["alpha_y_mult"]  # (S, C, T_all)
+                full_alpha_y_add = posterior_samples["alpha_y_add"]
+
+                if cis_idx_orig < full_alpha_y_mult.shape[-1]:
+                    # Extract cis gene alpha
+                    self.model.alpha_x_prefit = full_alpha_y_mult[..., cis_idx_orig]
+                    self.model.alpha_x_type = 'posterior'
+
+                    # For modality alpha_y, exclude cis gene (91 features)
+                    all_idx = list(range(full_alpha_y_mult.shape[-1]))
+                    trans_idx = [i for i in all_idx if i != cis_idx_orig]
+
+                    modality.alpha_y_prefit = full_alpha_y_mult[..., trans_idx]
+                    modality.alpha_y_prefit_mult = full_alpha_y_mult[..., trans_idx]
+                    modality.alpha_y_prefit_add = full_alpha_y_add[..., trans_idx]
+
+                    # Also update posterior_samples to match modality features
+                    posterior_samples["alpha_y"] = modality.alpha_y_prefit
+                    posterior_samples["alpha_y_mult"] = modality.alpha_y_prefit_mult
+                    posterior_samples["alpha_y_add"] = modality.alpha_y_prefit_add
+
+                    print(f"[INFO] Extracted alpha_x for cis '{self.model.cis_gene}' and excluded it from modality alpha_y")
+                else:
+                    # Cis gene was filtered out, just store as-is
+                    modality.alpha_y_prefit = posterior_samples["alpha_y"]
+                    modality.alpha_y_prefit_mult = posterior_samples["alpha_y_mult"]
+                    modality.alpha_y_prefit_add = posterior_samples["alpha_y_add"]
+            else:
+                # Cis gene not in counts, store as-is
+                modality.alpha_y_prefit = posterior_samples["alpha_y"]
+                modality.alpha_y_prefit_mult = posterior_samples["alpha_y_mult"]
+                modality.alpha_y_prefit_add = posterior_samples["alpha_y_add"]
+        else:
+            # Not primary modality or no cis gene, store as-is
+            modality.alpha_y_prefit = posterior_samples["alpha_y"]
+            modality.alpha_y_prefit_mult = posterior_samples["alpha_y_mult"]
+            modality.alpha_y_prefit_add = posterior_samples["alpha_y_add"]
+
         modality.posterior_samples_technical = posterior_samples
 
         if modality.is_exon_skipping():
