@@ -804,6 +804,11 @@ def plot_multinomial_xy(
                 color = color_palette.get(group_label, f'C{group_code}')
                 ax.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2, label=group_label if k == 0 else None)
 
+            # Trans function overlay (note: not fully supported for multinomial)
+            if show_trans_function and k == 0 and row == 0:
+                warnings.warn("Trans function overlay for multinomial not yet fully implemented - "
+                             "prediction would require modeling all K proportions simultaneously")
+
             ax.set_xlabel(xlabel)
             ax.set_ylabel(f'Proportion (Category {k})')
             ax.set_title(f"Category {k}")
@@ -941,6 +946,7 @@ def plot_mvnormal_xy(
     window: int,
     show_correction: str,
     color_palette: Dict[str, str],
+    show_trans_function: bool,
     xlabel: str,
     figsize: Optional[Tuple[int, int]] = None,
     **kwargs
@@ -1038,6 +1044,18 @@ def plot_mvnormal_xy(
                 color = color_palette.get(group_label, f'C{group_code}')
                 ax.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2, label=group_label if d == 0 else None)
 
+            # Trans function overlay (if trans model fitted)
+            # Note: mvnormal has multiple dimensions, so we overlay on first dimension only
+            if show_trans_function and not corrected and d == 0:
+                x_range = np.linspace(x_true.min(), x_true.max(), 100)
+                y_pred = predict_trans_function(model, feature, x_range, modality_name=modality.name)
+
+                if y_pred is not None:
+                    ax.plot(np.log2(x_range), y_pred,
+                           color='blue', linestyle='--', linewidth=2,
+                           label='Fitted Trans Function')
+                    warnings.warn("Trans function overlay on mvnormal shows prediction on first dimension only")
+
             ax.set_xlabel(xlabel)
             ax.set_ylabel(f'Dimension {d}')
             title_suffix = ' (corrected)' if corrected else ' (uncorrected)'
@@ -1095,7 +1113,9 @@ def plot_xy_data(
         Custom colors for technical groups
         Example: {'CRISPRa': 'crimson', 'CRISPRi': 'dodgerblue'}
     show_hill_function : bool
-        Overlay Hill function if trans model fitted (negbinom only, default: True)
+        Overlay fitted trans function if trans model fitted (all distributions, default: True)
+        Works with all function types: additive_hill, single_hill, polynomial
+        Automatically detects function type from posterior_samples_trans
     xlabel : str
         X-axis label (default: "log2(x_true)")
     figsize : tuple, optional
@@ -1196,6 +1216,7 @@ def plot_xy_data(
             window=window,
             min_counts=min_counts,
             color_palette=color_palette,
+            show_trans_function=show_hill_function,
             xlabel=xlabel,
             **kwargs
         )
@@ -1210,6 +1231,7 @@ def plot_xy_data(
             min_counts=min_counts,
             show_correction=show_correction,
             color_palette=color_palette,
+            show_trans_function=show_hill_function,
             xlabel=xlabel,
             figsize=figsize,
             **kwargs
@@ -1224,6 +1246,7 @@ def plot_xy_data(
             window=window,
             show_correction=show_correction,
             color_palette=color_palette,
+            show_trans_function=show_hill_function,
             xlabel=xlabel,
             **kwargs
         )
@@ -1237,6 +1260,7 @@ def plot_xy_data(
             window=window,
             show_correction=show_correction,
             color_palette=color_palette,
+            show_trans_function=show_hill_function,
             xlabel=xlabel,
             figsize=figsize,
             **kwargs

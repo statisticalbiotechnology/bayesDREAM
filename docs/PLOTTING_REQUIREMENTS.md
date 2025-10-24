@@ -317,7 +317,9 @@ def plot_xy_data(
 - ✅ User-configurable `min_counts` parameter for binomial/multinomial filtering
 - ✅ Informative technical group labels (e.g., "CRISPRa" not "Group_0")
 - ✅ Default color palette (crimson/dodgerblue) with user override option
-- ✅ Hill function overlay for negbinom when trans fit available
+- ✅ **Trans function overlay for ALL distributions (negbinom, binomial, normal, mvnormal)**
+- ✅ **Supports ALL function types: additive_hill, single_hill, polynomial**
+- ✅ **Automatic function type detection from posterior_samples_trans**
 - ✅ Technical correction with warning if fit_technical not run
 - ✅ Layout handling for single plots (both = 1×2) and multi-plots (both = 2×N)
 
