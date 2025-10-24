@@ -14,6 +14,7 @@ from .prior_posterior import (
     plot_1d_parameter,
     plot_2d_parameter
 )
+from .prior_sampling import get_prior_samples
 
 
 class PlottingMixin:
@@ -85,6 +86,15 @@ class PlottingMixin:
         else:
             feature_names = modality.feature_meta.index.tolist()
 
+        # Sample priors
+        prior_dict = get_prior_samples(
+            self,
+            fit_type='technical',
+            modality_name=modality_name,
+            nsamples=posterior[list(posterior.keys())[0]].shape[0],  # Match posterior sample count
+            distribution=modality.distribution
+        )
+
         # Extract parameter and prior
         if param == 'beta_o':
             # Scalar parameter
@@ -92,11 +102,7 @@ class PlottingMixin:
                 raise ValueError("beta_o not found in posterior_samples_technical")
 
             post_samples = posterior['beta_o'].numpy() if hasattr(posterior['beta_o'], 'numpy') else posterior['beta_o']
-
-            # Prior: Gamma(beta_o_alpha, beta_o_beta) - sample from prior
-            # This would need the prior parameters - for now, use a dummy prior
-            warnings.warn("Prior sampling for beta_o not yet implemented - using posterior as prior for demo")
-            prior_samples = post_samples
+            prior_samples = prior_dict['beta_o'].numpy() if hasattr(prior_dict['beta_o'], 'numpy') else prior_dict['beta_o']
 
             return plot_scalar_parameter(prior_samples, post_samples, 'beta_o', **kwargs)
 
@@ -109,9 +115,16 @@ class PlottingMixin:
             if hasattr(post_samples, 'numpy'):
                 post_samples = post_samples.numpy()
 
-            # Prior sampling - dummy for now
-            warnings.warn("Prior sampling for alpha_x not yet implemented - using posterior as prior for demo")
-            prior_samples = post_samples
+            # For alpha_x, we need cis priors (will implement below)
+            # For now use technical priors as approximation
+            if 'alpha_x' in prior_dict:
+                prior_samples = prior_dict['alpha_x'].numpy() if hasattr(prior_dict['alpha_x'], 'numpy') else prior_dict['alpha_x']
+            else:
+                # Fall back to alpha_y structure if alpha_x not in prior_dict
+                warnings.warn("alpha_x not in prior_dict - using alpha_y structure as approximation")
+                prior_samples = prior_dict['alpha_y'].numpy() if hasattr(prior_dict['alpha_y'], 'numpy') else prior_dict['alpha_y']
+                if prior_samples.ndim == 3:
+                    prior_samples = prior_samples[:, :, 0]  # Take first gene dimension
 
             if post_samples.ndim == 1:
                 # Scalar (one cell line)
@@ -129,9 +142,8 @@ class PlottingMixin:
             if hasattr(post_samples, 'numpy'):
                 post_samples = post_samples.numpy()
 
-            # Prior: log-normal - sample from prior
-            warnings.warn("Prior sampling for alpha_y not yet implemented - using posterior as prior for demo")
-            prior_samples = post_samples
+            # Use sampled priors
+            prior_samples = prior_dict['alpha_y'].numpy() if hasattr(prior_dict['alpha_y'], 'numpy') else prior_dict['alpha_y']
 
             if post_samples.ndim == 2:
                 # (samples, genes)
@@ -198,6 +210,13 @@ class PlottingMixin:
 
         posterior = self.posterior_samples_cis
 
+        # Sample priors
+        prior_dict = get_prior_samples(
+            self,
+            fit_type='cis',
+            nsamples=posterior[list(posterior.keys())[0]].shape[0]
+        )
+
         # Get guide names
         guide_names = self.meta_guides['guide'].tolist() if hasattr(self, 'meta_guides') else None
         if guide_names is None:
@@ -212,9 +231,8 @@ class PlottingMixin:
             if hasattr(post_samples, 'numpy'):
                 post_samples = post_samples.numpy()
 
-            # Prior: needs to be extracted from mu_x or constructed
-            warnings.warn("Prior sampling for x_true not yet implemented - using posterior as prior for demo")
-            prior_samples = post_samples
+            # Use sampled priors
+            prior_samples = prior_dict['x_true'].numpy() if hasattr(prior_dict['x_true'], 'numpy') else prior_dict['x_true']
 
             return plot_1d_parameter(
                 prior_samples, post_samples, guide_names, 'x_true',
@@ -231,6 +249,7 @@ class PlottingMixin:
         subset_features: Optional[List[str]] = None,
         order_by: str = 'mean',
         plot_type: str = 'auto',
+        function_type: str = 'additive_hill',
         **kwargs
     ) -> plt.Figure:
         """
@@ -248,6 +267,8 @@ class PlottingMixin:
             Feature ordering
         plot_type : str
             'auto', 'violin', or 'scatter'
+        function_type : str
+            Function type used in fit: 'additive_hill', 'single_hill', 'polynomial'
         **kwargs
             Additional plotting arguments
 
@@ -259,7 +280,7 @@ class PlottingMixin:
         Examples
         --------
         >>> # Plot theta (Hill function parameters)
-        >>> fig = model.plot_trans_fit('theta')
+        >>> fig = model.plot_trans_fit('theta', function_type='additive_hill')
         >>>
         >>> # Plot for specific genes
         >>> fig = model.plot_trans_fit('theta', subset_features=['GFI1B', 'TET2'])
@@ -272,6 +293,16 @@ class PlottingMixin:
 
         modality = self.get_modality(modality_name)
         posterior = self.posterior_samples_trans
+
+        # Sample priors
+        prior_dict = get_prior_samples(
+            self,
+            fit_type='trans',
+            modality_name=modality_name,
+            nsamples=posterior[list(posterior.keys())[0]].shape[0],
+            function_type=function_type,
+            distribution=modality.distribution
+        )
 
         # Get feature names
         if 'gene' in modality.feature_meta.columns:
@@ -289,8 +320,8 @@ class PlottingMixin:
             if hasattr(post_samples, 'numpy'):
                 post_samples = post_samples.numpy()
 
-            warnings.warn("Prior sampling for theta not yet implemented - using posterior as prior for demo")
-            prior_samples = post_samples
+            # Use sampled priors
+            prior_samples = prior_dict['theta'].numpy() if hasattr(prior_dict['theta'], 'numpy') else prior_dict['theta']
 
             # theta is typically (samples, genes, n_params)
             if post_samples.ndim == 3:
