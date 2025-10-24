@@ -148,6 +148,15 @@ model.plot_xy_data(
     show_correction='corrected',
     show_hill_function=True  # if trans model fitted
 )
+
+# With NTC gradient coloring
+model.plot_xy_data(
+    feature='TET2',
+    modality_name='gene',
+    window=100,
+    show_correction='uncorrected',  # gradient only on uncorrected
+    show_ntc_gradient=True  # color by NTC proportion
+)
 ```
 
 ---
@@ -226,7 +235,8 @@ def plot_xy_data(
     show_correction: str = 'corrected',  # 'uncorrected', 'corrected', 'both'
     min_denominator: int = 3,  # for binomial only
     color_palette: Optional[Dict[str, str]] = None,
-    show_hill_function: bool = True,  # for negbinom with trans fit
+    show_hill_function: bool = True,  # for all distributions with trans fit
+    show_ntc_gradient: bool = False,  # NEW: NTC gradient coloring
     xlabel: str = "log2(x_true)",
     figsize: Optional[Tuple[int, int]] = None,
     **kwargs
@@ -251,7 +261,14 @@ def plot_xy_data(
     color_palette : dict, optional
         Custom colors for technical groups (e.g., {'CRISPRa': 'crimson', 'CRISPRi': 'dodgerblue'})
     show_hill_function : bool
-        Overlay Hill function if trans model fitted (for negbinom only)
+        Overlay fitted trans function if trans model fitted (all distributions)
+        Works with all function types: additive_hill, single_hill, polynomial
+    show_ntc_gradient : bool
+        Color lines by NTC proportion in k-NN window (default: False)
+        Lighter = more NTC cells, Darker = fewer NTC cells
+        Only applies to uncorrected plots
+        Fully implemented for: negbinom, binomial, normal
+        Not yet implemented for: multinomial, mvnormal (will issue warning)
     xlabel : str
         X-axis label (default: "log2(x_true)")
     figsize : tuple, optional
@@ -322,6 +339,7 @@ def plot_xy_data(
 - ✅ **Automatic function type detection from posterior_samples_trans**
 - ✅ Technical correction with warning if fit_technical not run
 - ✅ Layout handling for single plots (both = 1×2) and multi-plots (both = 2×N)
+- ✅ **NTC gradient coloring** (negbinom, binomial, normal; partial for multinomial/mvnormal)
 
 ---
 
