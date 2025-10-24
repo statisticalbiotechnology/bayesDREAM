@@ -2,20 +2,23 @@
 
 ## 1. Prior Sampling Implementation
 
-**STATUS: TODO**
+**STATUS: ✅ COMPLETED**
 
-All plotting functions must use actual prior samples from the Pyro model distributions, not dummy posteriors.
+All plotting functions now use actual prior samples from the Pyro model distributions.
 
-### Requirements:
-- Extract prior distribution definitions from each Pyro model (`_model_technical`, `_model_x`, `_model_y`)
-- Sample from these priors with the same shape as posterior samples
-- Pass real prior samples to all plotting functions
+### Implementation:
+- ✅ Created `bayesDREAM/plotting/prior_sampling.py` module
+- ✅ `sample_technical_priors()`: StudentT for alpha_y, Gamma for beta_o, etc.
+- ✅ `sample_cis_priors()`: LogNormal for x_true, proper guide-level structure
+- ✅ `sample_trans_priors()`: Hill/polynomial function priors with sparsity
+- ✅ Updated `model_plots.py` to use real priors (NO MORE DUMMY WARNINGS)
+- ✅ All prior distributions match Pyro model definitions
 
 ---
 
 ## 2. Raw X-Y Data Plotting
 
-**STATUS: TODO**
+**STATUS: ✅ COMPLETED**
 
 Plot raw data after `x_true` has been fit, showing relationship between cis gene expression and trans modality values.
 
@@ -289,25 +292,34 @@ def plot_xy_data(
 
 ## 9. Implementation Checklist
 
-### Phase 1: Prior Sampling ✓ TODO
-- [ ] Implement `sample_prior()` method for technical fit
-- [ ] Implement `sample_prior()` method for cis fit
-- [ ] Implement `sample_prior()` method for trans fit
-- [ ] Update all plotting functions to use real priors
-- [ ] Test prior sampling matches distribution definitions
+### Phase 1: Prior Sampling ✅ COMPLETED
+- ✅ Implement `sample_prior()` method for technical fit
+- ✅ Implement `sample_prior()` method for cis fit
+- ✅ Implement `sample_prior()` method for trans fit
+- ✅ Update all plotting functions to use real priors
+- ✅ Test prior sampling matches distribution definitions
 
-### Phase 2: Raw X-Y Plotting ✓ TODO
-- [ ] Create `bayesDREAM/plotting/xy_plots.py`
-- [ ] Implement k-NN smoothing utilities
-- [ ] Implement technical group label extraction
-- [ ] Implement negbinom plotting (with optional Hill overlay)
-- [ ] Implement binomial plotting (PSI)
-- [ ] Implement multinomial plotting (multi-subplot)
-- [ ] Implement normal plotting
-- [ ] Implement mvnormal plotting (multi-subplot)
-- [ ] Add `plot_xy_data()` method to PlottingMixin
-- [ ] Write comprehensive tests
-- [ ] Add documentation examples
+### Phase 2: Raw X-Y Plotting ✅ COMPLETED
+- ✅ Create `bayesDREAM/plotting/xy_plots.py`
+- ✅ Implement k-NN smoothing utilities (`_knn_k`, `_smooth_knn`)
+- ✅ Implement technical group label extraction (`get_technical_group_labels`)
+- ✅ Implement negbinom plotting (with optional Hill overlay) - `plot_negbinom_xy`
+- ✅ Implement binomial plotting (PSI) - `plot_binomial_xy`
+- ✅ Implement multinomial plotting (multi-subplot) - `plot_multinomial_xy`
+- ✅ Implement normal plotting - `plot_normal_xy`
+- ✅ Implement mvnormal plotting (multi-subplot) - `plot_mvnormal_xy`
+- ✅ Add `plot_xy_data()` method to PlottingMixin
+- ⏳ Write comprehensive tests (next step)
+- ✅ Add documentation examples (in docstrings)
+
+### Key Features Implemented:
+- ✅ User-configurable `window` parameter for k-NN smoothing
+- ✅ User-configurable `min_counts` parameter for binomial/multinomial filtering
+- ✅ Informative technical group labels (e.g., "CRISPRa" not "Group_0")
+- ✅ Default color palette (crimson/dodgerblue) with user override option
+- ✅ Hill function overlay for negbinom when trans fit available
+- ✅ Technical correction with warning if fit_technical not run
+- ✅ Layout handling for single plots (both = 1×2) and multi-plots (both = 2×N)
 
 ---
 

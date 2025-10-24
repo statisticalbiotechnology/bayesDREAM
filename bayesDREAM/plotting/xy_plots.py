@@ -334,6 +334,767 @@ def Hill_based_positive(x, Vmax, A, K, n, epsilon=1e-6):
 
 
 # ============================================================================
-# Main plotting functions (to be continued in next edit)
+# Distribution-Specific Plotting Functions
 # ============================================================================
 
+def plot_negbinom_xy(
+    model,
+    feature: str,
+    modality,
+    x_true: np.ndarray,
+    window: int,
+    show_correction: str,
+    color_palette: Dict[str, str],
+    show_hill_function: bool,
+    xlabel: str,
+    ax: Optional[plt.Axes] = None,
+    **kwargs
+) -> plt.Axes:
+    """
+    Plot negbinom (gene counts) with optional Hill function overlay.
+
+    Y-axis: log2(expression) where expression = counts / (sum_factor * alpha_y)
+    """
+    # Get data
+    feature_idx = modality.feature_meta.index.get_loc(feature) if feature in modality.feature_meta.index else None
+    if feature_idx is None:
+        # Try by gene name
+        if 'gene' in modality.feature_meta.columns:
+            mask = modality.feature_meta['gene'] == feature
+            if mask.sum() > 0:
+                feature_idx = mask.idxmax()
+        if feature_idx is None:
+            raise ValueError(f"Feature '{feature}' not found in modality")
+
+    # Get counts for this feature
+    if modality.cells_axis == 1:
+        y_obs = modality.counts[feature_idx, :]
+    else:
+        y_obs = modality.counts[:, feature_idx]
+
+    # Build dataframe
+    df = pd.DataFrame({
+        'x_true': x_true,
+        'y_obs': y_obs,
+        'technical_group_code': model.meta['technical_group_code'].values,
+        'target': model.meta['target'].values,
+        'sum_factor': model.meta['sum_factor'].values if 'sum_factor' in model.meta.columns else 1.0
+    })
+
+    # Technical correction
+    has_technical_fit = modality.alpha_y_prefit is not None
+
+    if show_correction == 'corrected' and not has_technical_fit:
+        warnings.warn(f"Technical fit not available for modality '{modality.name}' - showing uncorrected only")
+        show_correction = 'uncorrected'
+
+    # Create axes
+    if ax is None:
+        if show_correction == 'both':
+            fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        else:
+            fig, ax = plt.subplots(1, 1, figsize=(8, 5))
+            axes = [ax]
+    else:
+        axes = [ax]
+
+    # Get technical group labels
+    group_labels = get_technical_group_labels(model)
+    group_codes = sorted(df['technical_group_code'].unique())
+
+    # Plot function
+    def _plot_one(ax_plot, corrected):
+        for group_code, group_label in zip(group_codes, group_labels):
+            df_group = df[df['technical_group_code'] == group_code].copy()
+
+            if corrected and has_technical_fit:
+                # Apply alpha_y correction
+                alpha_y_full = modality.alpha_y_prefit  # [S or 1, C, T]
+                if alpha_y_full.ndim == 3:
+                    alpha_y_val = alpha_y_full[:, group_code, feature_idx].mean()
+                else:
+                    alpha_y_val = alpha_y_full[group_code, feature_idx]
+                y_expr = df_group['y_obs'] / (df_group['sum_factor'] * alpha_y_val)
+            else:
+                y_expr = df_group['y_obs'] / df_group['sum_factor']
+
+            # Filter valid
+            valid = (df_group['x_true'] > 0) & np.isfinite(y_expr) & (y_expr > 0)
+            df_group = df_group[valid].copy()
+            y_expr = y_expr[valid]
+
+            if len(df_group) == 0:
+                continue
+
+            # k-NN smoothing
+            k = _knn_k(len(df_group), window)
+            x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, y_expr.values, k)
+
+            # Plot
+            color = color_palette.get(group_label, f'C{group_code}')
+            ax_plot.plot(np.log2(x_smooth), np.log2(y_smooth), color=color, linewidth=2, label=group_label)
+
+        # Hill function overlay
+        if show_hill_function and hasattr(model, 'posterior_samples_trans') and not corrected:
+            posterior = model.posterior_samples_trans
+            if 'A' in posterior:
+                # Get parameters
+                trans_genes = model.trans_genes
+                if feature in trans_genes:
+                    gene_idx = trans_genes.index(feature)
+
+                    A = posterior['A'].mean(dim=0)[gene_idx].item() if hasattr(posterior['A'], 'mean') else posterior['A'].mean(axis=0)[gene_idx]
+
+                    # Check function type by available parameters
+                    if 'Vmax_a' in posterior:
+                        # Additive Hill
+                        alpha = posterior['alpha'].mean(dim=0)[gene_idx].item() if hasattr(posterior['alpha'], 'mean') else posterior['alpha'].mean(axis=0)[gene_idx]
+                        beta = posterior['beta'].mean(dim=0)[gene_idx].item() if hasattr(posterior['beta'], 'mean') else posterior['beta'].mean(axis=0)[gene_idx]
+                        Vmax_a = posterior['Vmax_a'].mean(dim=0)[gene_idx].item() if hasattr(posterior['Vmax_a'], 'mean') else posterior['Vmax_a'].mean(axis=0)[gene_idx]
+                        Vmax_b = posterior['Vmax_b'].mean(dim=0)[gene_idx].item() if hasattr(posterior['Vmax_b'], 'mean') else posterior['Vmax_b'].mean(axis=0)[gene_idx]
+                        K_a = posterior['K_a'].mean(dim=0)[gene_idx].item() if hasattr(posterior['K_a'], 'mean') else posterior['K_a'].mean(axis=0)[gene_idx]
+                        K_b = posterior['K_b'].mean(dim=0)[gene_idx].item() if hasattr(posterior['K_b'], 'mean') else posterior['K_b'].mean(axis=0)[gene_idx]
+                        n_a = posterior['n_a'].mean(dim=0)[gene_idx].item() if hasattr(posterior['n_a'], 'mean') else posterior['n_a'].mean(axis=0)[gene_idx]
+                        n_b = posterior['n_b'].mean(dim=0)[gene_idx].item() if hasattr(posterior['n_b'], 'mean') else posterior['n_b'].mean(axis=0)[gene_idx]
+
+                        x_range = np.linspace(x_true.min(), x_true.max(), 100)
+                        Hill_a = Hill_based_positive(x_range, Vmax=Vmax_a, A=0, K=K_a, n=n_a)
+                        Hill_b = Hill_based_positive(x_range, Vmax=Vmax_b, A=0, K=K_b, n=n_b)
+                        y_pred = A + alpha * Hill_a + beta * Hill_b
+
+                        ax_plot.plot(np.log2(x_range), np.log2(y_pred), color='blue', linestyle='--', linewidth=2, label='Fitted Hill Function')
+                        ax_plot.axhline(np.log2(A), color='red', linestyle=':', linewidth=1, label='log2(A) baseline')
+
+        ax_plot.set_xlabel(xlabel)
+        ax_plot.set_ylabel('log2(Expression)')
+        title_suffix = ' (corrected)' if corrected else ' (uncorrected)'
+        ax_plot.set_title(f"{model.cis_gene} → {feature}{title_suffix}")
+        ax_plot.legend(frameon=False)
+
+    # Plot
+    if show_correction == 'both':
+        _plot_one(axes[0], corrected=False)
+        _plot_one(axes[1], corrected=True)
+    elif show_correction == 'corrected':
+        _plot_one(axes[0], corrected=True)
+    else:
+        _plot_one(axes[0], corrected=False)
+
+    return axes[0] if len(axes) == 1 else axes
+
+
+def plot_binomial_xy(
+    model,
+    feature: str,
+    modality,
+    x_true: np.ndarray,
+    window: int,
+    min_counts: int,
+    color_palette: Dict[str, str],
+    xlabel: str,
+    ax: Optional[plt.Axes] = None,
+    **kwargs
+) -> plt.Axes:
+    """
+    Plot binomial (PSI - percent spliced in).
+
+    Y-axis: PSI = counts / denominator
+    Filter: min_counts on denominator
+    """
+    # Get data
+    feature_idx = modality.feature_meta.index.get_loc(feature) if feature in modality.feature_meta.index else None
+    if feature_idx is None:
+        raise ValueError(f"Feature '{feature}' not found in modality")
+
+    # Get counts and denominator
+    if modality.cells_axis == 1:
+        counts = modality.counts[feature_idx, :]
+        denom = modality.denominator[feature_idx, :]
+    else:
+        counts = modality.counts[:, feature_idx]
+        denom = modality.denominator[:, feature_idx]
+
+    # Filter by min_counts
+    valid_mask = denom >= min_counts
+
+    # Build dataframe
+    df = pd.DataFrame({
+        'x_true': x_true[valid_mask],
+        'counts': counts[valid_mask],
+        'denominator': denom[valid_mask],
+        'technical_group_code': model.meta['technical_group_code'].values[valid_mask],
+        'target': model.meta['target'].values[valid_mask]
+    })
+
+    # Compute PSI
+    df['PSI'] = df['counts'] / df['denominator']
+
+    # Filter valid
+    valid = (df['x_true'] > 0) & np.isfinite(df['PSI'])
+    df = df[valid].copy()
+
+    if len(df) == 0:
+        raise ValueError(f"No data remaining after filtering (min_counts={min_counts})")
+
+    # Create axes
+    if ax is None:
+        fig, ax = plt.subplots(1, 1, figsize=(8, 5))
+
+    # Get technical group labels
+    group_labels = get_technical_group_labels(model)
+    group_codes = sorted(df['technical_group_code'].unique())
+
+    # Plot
+    for group_code, group_label in zip(group_codes, group_labels):
+        df_group = df[df['technical_group_code'] == group_code].copy()
+
+        if len(df_group) == 0:
+            continue
+
+        # k-NN smoothing
+        k = _knn_k(len(df_group), window)
+        x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, df_group['PSI'].values, k)
+
+        # Plot
+        color = color_palette.get(group_label, f'C{group_code}')
+        ax.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2, label=group_label)
+
+    ax.axhline(0.0, linestyle='--', linewidth=1, alpha=0.6, color='gray')
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel('PSI (Percent Spliced In)')
+    ax.set_title(f"{model.cis_gene} → {feature} (min_counts={min_counts})")
+    ax.legend(frameon=False)
+
+    return ax
+
+
+def plot_multinomial_xy(
+    model,
+    feature: str,
+    modality,
+    x_true: np.ndarray,
+    window: int,
+    min_counts: int,
+    show_correction: str,
+    color_palette: Dict[str, str],
+    xlabel: str,
+    figsize: Optional[Tuple[int, int]] = None,
+    **kwargs
+) -> Union[plt.Figure, List[plt.Axes]]:
+    """
+    Plot multinomial (e.g., donor/acceptor usage) - one subplot per category.
+
+    Y-axis: Proportion for each category
+    Layout: One row with K subplots (one per category)
+    If show_correction='both': Two rows × K subplots
+    """
+    # Get data
+    feature_idx = modality.feature_meta.index.get_loc(feature) if feature in modality.feature_meta.index else None
+    if feature_idx is None:
+        raise ValueError(f"Feature '{feature}' not found in modality")
+
+    # Get counts: shape (cells, K) for this feature
+    if modality.counts.ndim == 3:
+        counts_3d = modality.counts[feature_idx, :, :]  # (cells, K)
+    else:
+        raise ValueError(f"Expected 3D counts for multinomial, got {modality.counts.ndim}D")
+
+    K = counts_3d.shape[1]
+
+    # Filter by min_counts (total across categories)
+    total_counts = counts_3d.sum(axis=1)
+    valid_mask = total_counts >= min_counts
+
+    # Build dataframe
+    df = pd.DataFrame({
+        'x_true': x_true[valid_mask],
+        'technical_group_code': model.meta['technical_group_code'].values[valid_mask],
+        'target': model.meta['target'].values[valid_mask]
+    })
+
+    # Add proportions for each category
+    for k in range(K):
+        df[f'cat_{k}'] = counts_3d[valid_mask, k] / total_counts[valid_mask]
+
+    # Filter valid x_true
+    valid = df['x_true'] > 0
+    df = df[valid].copy()
+
+    if len(df) == 0:
+        raise ValueError(f"No data remaining after filtering (min_counts={min_counts})")
+
+    # Check technical correction availability
+    has_technical_fit = modality.alpha_y_prefit is not None
+    if show_correction == 'corrected' and not has_technical_fit:
+        warnings.warn(f"Technical fit not available for modality '{modality.name}' - showing uncorrected only")
+        show_correction = 'uncorrected'
+
+    # Note: Multinomial technical correction is complex and may not be implemented yet
+    if show_correction != 'uncorrected' and has_technical_fit:
+        warnings.warn("Technical correction for multinomial not yet fully implemented - showing uncorrected")
+        show_correction = 'uncorrected'
+
+    # Create figure
+    if figsize is None:
+        figsize = (4 * K, 5) if show_correction != 'both' else (4 * K, 10)
+
+    if show_correction == 'both':
+        fig, axes = plt.subplots(2, K, figsize=figsize, squeeze=False)
+    else:
+        fig, axes = plt.subplots(1, K, figsize=figsize, squeeze=False)
+
+    # Get technical group labels
+    group_labels = get_technical_group_labels(model)
+    group_codes = sorted(df['technical_group_code'].unique())
+
+    # Plot each category
+    for k in range(K):
+        row_idx = 0 if show_correction != 'both' else (0, 1)
+        rows = [row_idx] if isinstance(row_idx, int) else row_idx
+
+        for row in rows:
+            ax = axes[row, k]
+
+            for group_code, group_label in zip(group_codes, group_labels):
+                df_group = df[df['technical_group_code'] == group_code].copy()
+
+                if len(df_group) == 0:
+                    continue
+
+                # k-NN smoothing
+                knn = _knn_k(len(df_group), window)
+                x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, df_group[f'cat_{k}'].values, knn)
+
+                # Plot
+                color = color_palette.get(group_label, f'C{group_code}')
+                ax.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2, label=group_label if k == 0 else None)
+
+            ax.set_xlabel(xlabel)
+            ax.set_ylabel(f'Proportion (Category {k})')
+            ax.set_title(f"Category {k}")
+            if k == 0 and row == 0:
+                ax.legend(frameon=False, loc='upper right')
+
+    plt.suptitle(f"{model.cis_gene} → {feature} (min_counts={min_counts})")
+    plt.tight_layout()
+
+    return fig
+
+
+def plot_normal_xy(
+    model,
+    feature: str,
+    modality,
+    x_true: np.ndarray,
+    window: int,
+    show_correction: str,
+    color_palette: Dict[str, str],
+    xlabel: str,
+    ax: Optional[plt.Axes] = None,
+    **kwargs
+) -> plt.Axes:
+    """
+    Plot normal distribution (continuous scores like SpliZ).
+
+    Y-axis: Raw value
+    """
+    # Get data
+    feature_idx = modality.feature_meta.index.get_loc(feature) if feature in modality.feature_meta.index else None
+    if feature_idx is None:
+        raise ValueError(f"Feature '{feature}' not found in modality")
+
+    # Get values
+    if modality.cells_axis == 1:
+        y_vals = modality.counts[feature_idx, :]
+    else:
+        y_vals = modality.counts[:, feature_idx]
+
+    # Build dataframe
+    df = pd.DataFrame({
+        'x_true': x_true,
+        'y_val': y_vals,
+        'technical_group_code': model.meta['technical_group_code'].values,
+        'target': model.meta['target'].values
+    })
+
+    # Filter valid
+    valid = (df['x_true'] > 0) & np.isfinite(df['y_val'])
+    df = df[valid].copy()
+
+    # Check technical correction
+    has_technical_fit = modality.alpha_y_prefit is not None
+    if show_correction == 'corrected' and not has_technical_fit:
+        warnings.warn(f"Technical fit not available for modality '{modality.name}' - showing uncorrected only")
+        show_correction = 'uncorrected'
+
+    # Create axes
+    if ax is None:
+        if show_correction == 'both':
+            fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        else:
+            fig, ax = plt.subplots(1, 1, figsize=(8, 5))
+            axes = [ax]
+    else:
+        axes = [ax]
+
+    # Get technical group labels
+    group_labels = get_technical_group_labels(model)
+    group_codes = sorted(df['technical_group_code'].unique())
+
+    # Plot function
+    def _plot_one(ax_plot, corrected):
+        for group_code, group_label in zip(group_codes, group_labels):
+            df_group = df[df['technical_group_code'] == group_code].copy()
+
+            if len(df_group) == 0:
+                continue
+
+            y_plot = df_group['y_val'].values
+
+            if corrected and has_technical_fit:
+                # Apply additive correction (alpha_y_add for normal)
+                if hasattr(modality, 'alpha_y_prefit_add'):
+                    alpha_y_add = modality.alpha_y_prefit_add
+                    if alpha_y_add.ndim == 3:
+                        correction = alpha_y_add[:, group_code, feature_idx].mean()
+                    else:
+                        correction = alpha_y_add[group_code, feature_idx]
+                    y_plot = y_plot - correction
+
+            # k-NN smoothing
+            k = _knn_k(len(df_group), window)
+            x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, y_plot, k)
+
+            # Plot
+            color = color_palette.get(group_label, f'C{group_code}')
+            ax_plot.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2, label=group_label)
+
+        ax_plot.set_xlabel(xlabel)
+        ax_plot.set_ylabel('Value')
+        title_suffix = ' (corrected)' if corrected else ' (uncorrected)'
+        ax_plot.set_title(f"{model.cis_gene} → {feature}{title_suffix}")
+        ax_plot.legend(frameon=False)
+
+    # Plot
+    if show_correction == 'both':
+        _plot_one(axes[0], corrected=False)
+        _plot_one(axes[1], corrected=True)
+    elif show_correction == 'corrected':
+        _plot_one(axes[0], corrected=True)
+    else:
+        _plot_one(axes[0], corrected=False)
+
+    return axes[0] if len(axes) == 1 else axes
+
+
+def plot_mvnormal_xy(
+    model,
+    feature: str,
+    modality,
+    x_true: np.ndarray,
+    window: int,
+    show_correction: str,
+    color_palette: Dict[str, str],
+    xlabel: str,
+    figsize: Optional[Tuple[int, int]] = None,
+    **kwargs
+) -> Union[plt.Figure, List[plt.Axes]]:
+    """
+    Plot multivariate normal (e.g., SpliZVD) - one subplot per dimension.
+
+    Y-axis: Value for each dimension
+    Layout: One row with D subplots (one per dimension)
+    If show_correction='both': Two rows × D subplots
+    """
+    # Get data
+    feature_idx = modality.feature_meta.index.get_loc(feature) if feature in modality.feature_meta.index else None
+    if feature_idx is None:
+        raise ValueError(f"Feature '{feature}' not found in modality")
+
+    # Get values: shape (cells, D) for this feature
+    if modality.counts.ndim == 3:
+        values_3d = modality.counts[feature_idx, :, :]  # (cells, D)
+    else:
+        raise ValueError(f"Expected 3D counts for mvnormal, got {modality.counts.ndim}D")
+
+    D = values_3d.shape[1]
+
+    # Check technical correction
+    has_technical_fit = modality.alpha_y_prefit is not None
+    if show_correction == 'corrected' and not has_technical_fit:
+        warnings.warn(f"Technical fit not available for modality '{modality.name}' - showing uncorrected only")
+        show_correction = 'uncorrected'
+
+    # Create figure
+    if figsize is None:
+        figsize = (4 * D, 5) if show_correction != 'both' else (4 * D, 10)
+
+    if show_correction == 'both':
+        fig, axes = plt.subplots(2, D, figsize=figsize, squeeze=False)
+    else:
+        fig, axes = plt.subplots(1, D, figsize=figsize, squeeze=False)
+
+    # Build dataframe
+    df = pd.DataFrame({
+        'x_true': x_true,
+        'technical_group_code': model.meta['technical_group_code'].values,
+        'target': model.meta['target'].values
+    })
+
+    for d in range(D):
+        df[f'dim_{d}'] = values_3d[:, d]
+
+    # Filter valid
+    valid = df['x_true'] > 0
+    for d in range(D):
+        valid &= np.isfinite(df[f'dim_{d}'])
+    df = df[valid].copy()
+
+    # Get technical group labels
+    group_labels = get_technical_group_labels(model)
+    group_codes = sorted(df['technical_group_code'].unique())
+
+    # Plot each dimension
+    for d in range(D):
+        row_idx = 0 if show_correction != 'both' else (0, 1)
+        rows = [row_idx] if isinstance(row_idx, int) else row_idx
+
+        for row, corrected in zip(rows, [False, True] if len(rows) == 2 else [show_correction == 'corrected']):
+            ax = axes[row, d]
+
+            for group_code, group_label in zip(group_codes, group_labels):
+                df_group = df[df['technical_group_code'] == group_code].copy()
+
+                if len(df_group) == 0:
+                    continue
+
+                y_plot = df_group[f'dim_{d}'].values
+
+                if corrected and has_technical_fit:
+                    # Apply additive correction
+                    if hasattr(modality, 'alpha_y_prefit_add'):
+                        alpha_y_add = modality.alpha_y_prefit_add
+                        # alpha_y_add shape: [S or 1, C, T, D] or [C, T, D]
+                        # Need to extract [group_code, feature_idx, d]
+                        if alpha_y_add.ndim == 4:
+                            correction = alpha_y_add[:, group_code, feature_idx, d].mean()
+                        elif alpha_y_add.ndim == 3:
+                            correction = alpha_y_add[group_code, feature_idx, d]
+                        else:
+                            correction = 0  # Fallback
+                        y_plot = y_plot - correction
+
+                # k-NN smoothing
+                k = _knn_k(len(df_group), window)
+                x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, y_plot, k)
+
+                # Plot
+                color = color_palette.get(group_label, f'C{group_code}')
+                ax.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2, label=group_label if d == 0 else None)
+
+            ax.set_xlabel(xlabel)
+            ax.set_ylabel(f'Dimension {d}')
+            title_suffix = ' (corrected)' if corrected else ' (uncorrected)'
+            ax.set_title(f"Dim {d}{title_suffix}")
+            if d == 0 and row == 0:
+                ax.legend(frameon=False, loc='upper right')
+
+    plt.suptitle(f"{model.cis_gene} → {feature}")
+    plt.tight_layout()
+
+    return fig
+
+
+# ============================================================================
+# Unified plot_xy_data function
+# ============================================================================
+
+def plot_xy_data(
+    model,
+    feature: str,
+    modality_name: Optional[str] = None,
+    window: int = 100,
+    show_correction: str = 'corrected',
+    min_counts: int = 3,
+    color_palette: Optional[Dict[str, str]] = None,
+    show_hill_function: bool = True,
+    xlabel: str = "log2(x_true)",
+    figsize: Optional[Tuple[int, int]] = None,
+    src_barcodes: Optional[np.ndarray] = None,
+    **kwargs
+) -> Union[plt.Figure, plt.Axes]:
+    """
+    Plot raw x-y data showing relationship between cis gene expression and modality values.
+
+    Requires x_true to be set (must run fit_cis() first).
+
+    Parameters
+    ----------
+    model : bayesDREAM
+        Fitted bayesDREAM model with x_true set
+    feature : str
+        Feature name (gene, junction, donor, etc.)
+    modality_name : str, optional
+        Modality name (default: primary modality)
+    window : int
+        k-NN window size for smoothing (default: 100 cells)
+    show_correction : str
+        'uncorrected': no technical correction
+        'corrected': apply alpha_y technical correction (default)
+        'both': show both side-by-side
+    min_counts : int
+        Minimum denominator for binomial (default: 3)
+        Minimum total counts for multinomial (default: 3)
+    color_palette : dict, optional
+        Custom colors for technical groups
+        Example: {'CRISPRa': 'crimson', 'CRISPRi': 'dodgerblue'}
+    show_hill_function : bool
+        Overlay Hill function if trans model fitted (negbinom only, default: True)
+    xlabel : str
+        X-axis label (default: "log2(x_true)")
+    figsize : tuple, optional
+        Figure size (auto-sized if None)
+    src_barcodes : np.ndarray, optional
+        Source barcode order if x_true not in model.meta order
+    **kwargs
+        Additional plotting arguments
+
+    Returns
+    -------
+    plt.Figure or plt.Axes
+        Matplotlib figure or axes object
+
+    Raises
+    ------
+    ValueError
+        If x_true not set (must run fit_cis first)
+        If feature not found in modality
+        If show_correction='corrected' but fit_technical not run
+
+    Warnings
+    --------
+    If fit_technical not run for modality and show_correction='corrected',
+    warns and plots uncorrected only.
+
+    Examples
+    --------
+    >>> # Plot gene counts with Hill function
+    >>> model.plot_xy_data('TET2', window=100, show_hill_function=True)
+    >>>
+    >>> # Plot splice junction with min_counts filter
+    >>> model.plot_xy_data('chr1:12345:67890:+', modality_name='splicing_sj',
+    ...                     min_counts=5)
+    >>>
+    >>> # Plot with custom colors
+    >>> model.plot_xy_data('GFI1B', color_palette={'CRISPRa': 'red', 'CRISPRi': 'blue'})
+    >>>
+    >>> # Show both corrected and uncorrected
+    >>> model.plot_xy_data('TET2', show_correction='both')
+    """
+    # Check x_true is set
+    if not hasattr(model, 'x_true') or model.x_true is None:
+        raise ValueError(
+            "x_true not set. Must run fit_cis() before plotting x-y data.\n"
+            "Example: model.fit_cis(sum_factor_col='sum_factor')"
+        )
+
+    # Check technical_group_code is set
+    if 'technical_group_code' not in model.meta.columns:
+        raise ValueError(
+            "technical_group_code not set. Must run set_technical_groups() first.\n"
+            "Example: model.set_technical_groups(['cell_line'])"
+        )
+
+    # Get x_true
+    x2d = _to_2d(model.x_true)
+    x_true = x2d.mean(axis=0) if x2d.ndim == 2 else x2d.ravel()
+
+    # Reorder if needed
+    if src_barcodes is not None:
+        cell_barcodes = model.meta['cell'].values if 'cell' in model.meta.columns else model.meta.index.values
+        x_true = reorder_xtrue_by_barcode(x_true, src_barcodes, cell_barcodes)
+
+    # Get modality
+    if modality_name is None:
+        modality_name = model.primary_modality
+    modality = model.get_modality(modality_name)
+
+    # Get color palette
+    if color_palette is None:
+        group_labels = get_technical_group_labels(model)
+        color_palette = get_default_color_palette(group_labels)
+
+    # Route to distribution-specific plotting function
+    distribution = modality.distribution
+
+    if distribution == 'negbinom':
+        return plot_negbinom_xy(
+            model=model,
+            feature=feature,
+            modality=modality,
+            x_true=x_true,
+            window=window,
+            show_correction=show_correction,
+            color_palette=color_palette,
+            show_hill_function=show_hill_function,
+            xlabel=xlabel,
+            **kwargs
+        )
+
+    elif distribution == 'binomial':
+        return plot_binomial_xy(
+            model=model,
+            feature=feature,
+            modality=modality,
+            x_true=x_true,
+            window=window,
+            min_counts=min_counts,
+            color_palette=color_palette,
+            xlabel=xlabel,
+            **kwargs
+        )
+
+    elif distribution == 'multinomial':
+        return plot_multinomial_xy(
+            model=model,
+            feature=feature,
+            modality=modality,
+            x_true=x_true,
+            window=window,
+            min_counts=min_counts,
+            show_correction=show_correction,
+            color_palette=color_palette,
+            xlabel=xlabel,
+            figsize=figsize,
+            **kwargs
+        )
+
+    elif distribution == 'normal':
+        return plot_normal_xy(
+            model=model,
+            feature=feature,
+            modality=modality,
+            x_true=x_true,
+            window=window,
+            show_correction=show_correction,
+            color_palette=color_palette,
+            xlabel=xlabel,
+            **kwargs
+        )
+
+    elif distribution == 'mvnormal':
+        return plot_mvnormal_xy(
+            model=model,
+            feature=feature,
+            modality=modality,
+            x_true=x_true,
+            window=window,
+            show_correction=show_correction,
+            color_palette=color_palette,
+            xlabel=xlabel,
+            figsize=figsize,
+            **kwargs
+        )
+
+    else:
+        raise ValueError(f"Plotting not implemented for distribution '{distribution}'")

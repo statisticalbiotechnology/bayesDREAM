@@ -342,3 +342,49 @@ class PlottingMixin:
 
         else:
             raise ValueError(f"Unknown parameter: {param}. Must be 'theta', 'gamma', or 'mu_y'")
+
+    def plot_xy_data(self, *args, **kwargs):
+        """
+        Plot raw x-y data showing relationship between cis gene expression and modality values.
+
+        This method is delegated to xy_plots.plot_xy_data(). See that function for full documentation.
+
+        Parameters
+        ----------
+        feature : str
+            Feature name (gene, junction, donor, etc.)
+        modality_name : str, optional
+            Modality name (default: primary modality)
+        window : int
+            k-NN window size for smoothing (default: 100 cells)
+        show_correction : str
+            'uncorrected', 'corrected', or 'both' (default: 'corrected')
+        min_counts : int
+            Minimum denominator for binomial/minimum total for multinomial (default: 3)
+        color_palette : dict, optional
+            Custom colors for technical groups
+        show_hill_function : bool
+            Overlay Hill function if trans model fitted (default: True)
+        **kwargs
+            Additional plotting arguments
+
+        Returns
+        -------
+        plt.Figure or plt.Axes
+            Matplotlib figure or axes object
+
+        Examples
+        --------
+        >>> # Plot gene counts with Hill function overlay
+        >>> fig = model.plot_xy_data('TET2', window=100, show_hill_function=True)
+        >>>
+        >>> # Plot splice junction with filtering
+        >>> fig = model.plot_xy_data('chr1:12345:67890:+',
+        ...                          modality_name='splicing_sj',
+        ...                          min_counts=5)
+        >>>
+        >>> # Plot with both corrected and uncorrected
+        >>> fig = model.plot_xy_data('GFI1B', show_correction='both')
+        """
+        from .xy_plots import plot_xy_data
+        return plot_xy_data(self, *args, **kwargs)
