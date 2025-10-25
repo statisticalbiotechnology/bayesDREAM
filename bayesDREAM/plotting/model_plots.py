@@ -113,6 +113,14 @@ class PlottingMixin:
             warnings.warn("cell_line_index is deprecated, use technical_group_index instead", DeprecationWarning)
             technical_group_index = cell_line_index
 
+        # Check for invalid technical_group_index
+        if technical_group_index is not None and technical_group_index == 0:
+            raise ValueError(
+                "technical_group_index=0 is the baseline/reference group and has no variation "
+                "(all values are set to baseline: 1.0 for multiplicative, 0.0 for additive). "
+                "Please specify a different technical group index (1, 2, ...) or omit to plot all groups."
+            )
+
         if modality_name is None:
             modality_name = self.primary_modality
 
@@ -186,6 +194,11 @@ class PlottingMixin:
             elif post_samples.ndim == 2:
                 # (samples, technical_groups) - one value per group
                 if technical_group_index is not None:
+                    # Check if trying to plot baseline group
+                    if technical_group_index == 0:
+                        # Already caught by earlier check, but this makes it explicit
+                        raise ValueError("Cannot plot technical_group_index=0 (baseline group with no variation)")
+
                     # Plot single technical group
                     prior_tg = prior_samples[:, technical_group_index]
                     post_tg = post_samples[:, technical_group_index]
@@ -196,6 +209,13 @@ class PlottingMixin:
                     )
                 else:
                     # Plot all technical groups - treat as separate features
+                    # Exclude baseline group (TG_0) which is always constant
+                    if post_samples.shape[1] > 1:
+                        prior_samples = prior_samples[:, 1:]  # Skip first group
+                        post_samples = post_samples[:, 1:]
+                        group_names = group_names[1:]  # Skip first name
+                        print(f"Note: Excluding baseline technical group (index 0) which has no variation")
+
                     return plot_1d_parameter(
                         prior_samples, post_samples, group_names, 'alpha_x',
                         order_by='input', plot_type='violin', **kwargs
@@ -283,14 +303,18 @@ class PlottingMixin:
                             f"was run for this modality."
                         )
 
-                    # Filter out features where posterior is constant (manually set to baseline)
+                    # Filter out features where posterior is constant (no variance in NTC data)
+                    # These were set to baseline because NTC had no variation to fit
                     # For multiplicative: baseline=1, for additive: baseline=0
                     post_std = np.std(post_tg, axis=0)
                     non_constant_mask = post_std > 1e-10  # Not all the same value
 
                     if not non_constant_mask.all():
                         n_constant = (~non_constant_mask).sum()
-                        warnings.warn(f"Excluding {n_constant} features with constant values (manually set to baseline)")
+                        warnings.warn(
+                            f"Excluding {n_constant} features with no variance in NTC data "
+                            f"(set to baseline: 1.0 for mult, 0.0 for add)"
+                        )
 
                         prior_tg = prior_tg[:, non_constant_mask]
                         post_tg = post_tg[:, non_constant_mask]
@@ -313,6 +337,13 @@ class PlottingMixin:
                             f"Try specifying modality_name explicitly or check that fit_technical "
                             f"was run for this modality."
                         )
+
+                    # Exclude baseline group (TG_0) which is always constant
+                    if post_samples.shape[1] > 1:
+                        prior_samples = prior_samples[:, 1:, :]  # Skip first group
+                        post_samples = post_samples[:, 1:, :]
+                        group_names = group_names[1:]  # Skip first name
+                        print(f"Note: Excluding baseline technical group (index 0) which has no variation")
 
                     return plot_2d_parameter(
                         prior_samples, post_samples, feature_names, group_names, 'alpha_y',

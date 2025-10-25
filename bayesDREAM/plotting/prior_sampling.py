@@ -58,13 +58,15 @@ def sample_technical_priors(
     # Sample priors based on distribution
     prior_samples = {}
 
-    # Cell-line effects: log2_alpha_y ~ StudentT(df=3, loc=0, scale=20)
-    log2_alpha_y = dist.StudentT(df=3, loc=0.0, scale=20.0).sample((nsamples, C - 1, T))
+    # Cell-line effects: log2_alpha_y ~ StudentT(df=3, loc=0, scale=1.0)
+    # Using scale=1.0 instead of 20.0 to avoid extreme bimodal distributions
+    # This gives reasonable variation around baseline (2^-3 to 2^3 ≈ 0.125 to 8x)
+    log2_alpha_y = dist.StudentT(df=3, loc=0.0, scale=1.0).sample((nsamples, C - 1, T))
     prior_samples['log2_alpha_y'] = log2_alpha_y
     prior_samples['alpha_y_mul'] = 2.0 ** log2_alpha_y  # multiplicative
     prior_samples['delta_y_add'] = log2_alpha_y  # additive/logit
 
-    # Add baseline row
+    # Add baseline row (first technical group is always 1.0 or 0.0)
     alpha_full_mul = torch.cat([torch.ones(nsamples, 1, T), prior_samples['alpha_y_mul']], dim=1)
     alpha_full_add = torch.cat([torch.zeros(nsamples, 1, T), prior_samples['delta_y_add']], dim=1)
     prior_samples['alpha_y'] = alpha_full_mul  # back-compat
@@ -189,13 +191,13 @@ def sample_cis_priors(
         if model.alpha_x_prefit.ndim >= 2:
             # Cell-line specific
             C = model.meta['technical_group_code'].nunique()
-            log2_alpha_x = dist.StudentT(df=3, loc=0.0, scale=20.0).sample((nsamples, C - 1, 1))
+            log2_alpha_x = dist.StudentT(df=3, loc=0.0, scale=1.0).sample((nsamples, C - 1, 1))
             alpha_x_mul = 2.0 ** log2_alpha_x
             alpha_full_mul = torch.cat([torch.ones(nsamples, 1, 1), alpha_x_mul], dim=1)
             prior_samples['alpha_x'] = alpha_full_mul.squeeze(-1)  # (nsamples, C)
         else:
             # Scalar
-            log2_alpha_x = dist.StudentT(df=3, loc=0.0, scale=20.0).sample((nsamples,))
+            log2_alpha_x = dist.StudentT(df=3, loc=0.0, scale=1.0).sample((nsamples,))
             prior_samples['alpha_x'] = 2.0 ** log2_alpha_x
 
     # beta_o, o_x for negbinom (same as technical model)
