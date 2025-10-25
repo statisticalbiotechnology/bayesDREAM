@@ -226,20 +226,62 @@ class PlottingMixin:
         elif param == 'alpha_y':
             # 1D or 2D parameter: (samples, genes) or (samples, cell_lines, genes)
 
-            # Use modality-specific alpha_y from posterior_samples_technical
-            if 'alpha_y' not in posterior:
-                raise ValueError(f"alpha_y not found for modality '{modality.name}'. "
-                               "Run fit_technical(modality_name='{modality.name}') first.")
-            post_samples = posterior['alpha_y']
+            # Determine if we should plot in log2 space based on distribution
+            # Multiplicative (negbinom): plot log2(alpha_y_mult) - baseline is 0 in log2 space
+            # Additive (normal, binomial, etc.): plot alpha_y_add (already in log2 space) - baseline is 0
+            is_multiplicative = modality.distribution == 'negbinom'
 
-            if hasattr(post_samples, 'numpy'):
-                post_samples = post_samples.numpy()
+            if is_multiplicative:
+                # For negbinom: use multiplicative and convert to log2
+                if 'alpha_y_mult' in posterior:
+                    post_samples = posterior['alpha_y_mult']
+                elif 'alpha_y' in posterior:
+                    post_samples = posterior['alpha_y']
+                else:
+                    raise ValueError(f"alpha_y not found for modality '{modality.name}'. "
+                                   "Run fit_technical(modality_name='{modality.name}') first.")
+
+                if hasattr(post_samples, 'numpy'):
+                    post_samples = post_samples.numpy()
+
+                # Convert to log2 space (baseline group will be 0 since log2(1)=0)
+                post_samples = np.log2(post_samples + 1e-10)  # Small epsilon to avoid log(0)
+
+                # Use log2 priors
+                prior_samples = prior_dict['log2_alpha_y'].numpy() if hasattr(prior_dict['log2_alpha_y'], 'numpy') else prior_dict['log2_alpha_y']
+                # Add baseline row of zeros
+                if prior_samples.ndim == 2:
+                    prior_samples = np.concatenate([np.zeros((1, prior_samples.shape[1])), prior_samples], axis=0)
+                elif prior_samples.ndim == 3:
+                    prior_samples = np.concatenate([np.zeros((prior_samples.shape[0], 1, prior_samples.shape[2])), prior_samples], axis=1)
+
+                param_label = 'log2(alpha_y)'
+            else:
+                # For additive distributions: use additive (already in log2 space)
+                if 'alpha_y_add' in posterior:
+                    post_samples = posterior['alpha_y_add']
+                elif 'alpha_y' in posterior:
+                    post_samples = posterior['alpha_y']
+                else:
+                    raise ValueError(f"alpha_y not found for modality '{modality.name}'. "
+                                   "Run fit_technical(modality_name='{modality.name}') first.")
+
+                if hasattr(post_samples, 'numpy'):
+                    post_samples = post_samples.numpy()
+
+                # Already in additive (log2) space
+                # Use log2 priors (same as multiplicative, baseline is 0)
+                prior_samples = prior_dict['log2_alpha_y'].numpy() if hasattr(prior_dict['log2_alpha_y'], 'numpy') else prior_dict['log2_alpha_y']
+                # Add baseline row of zeros
+                if prior_samples.ndim == 2:
+                    prior_samples = np.concatenate([np.zeros((1, prior_samples.shape[1])), prior_samples], axis=0)
+                elif prior_samples.ndim == 3:
+                    prior_samples = np.concatenate([np.zeros((prior_samples.shape[0], 1, prior_samples.shape[2])), prior_samples], axis=1)
+
+                param_label = 'alpha_y (additive)'
 
             # Use modality feature names (posterior is modality-specific)
             feature_names = modality_feature_names
-
-            # Use sampled priors
-            prior_samples = prior_dict['alpha_y'].numpy() if hasattr(prior_dict['alpha_y'], 'numpy') else prior_dict['alpha_y']
 
             # If primary modality with cis gene extracted, prior includes cis gene but posterior doesn't
             # Need to exclude cis gene from prior to match posterior shape
@@ -278,7 +320,7 @@ class PlottingMixin:
                         f"was run for this modality."
                     )
                 return plot_1d_parameter(
-                    prior_samples, post_samples, feature_names, 'alpha_y',
+                    prior_samples, post_samples, feature_names, param_label,
                     order_by, subset_features=subset_features, plot_type=plot_type,
                     **kwargs
                 )
@@ -322,7 +364,7 @@ class PlottingMixin:
 
                     group_name = group_names[technical_group_index]
                     return plot_1d_parameter(
-                        prior_tg, post_tg, feature_names, f'alpha_y ({group_name})',
+                        prior_tg, post_tg, feature_names, f'{param_label} ({group_name})',
                         order_by, subset_features=subset_features, plot_type=plot_type,
                         **kwargs
                     )
@@ -346,7 +388,7 @@ class PlottingMixin:
                         print(f"Note: Excluding baseline technical group (index 0) which has no variation")
 
                     return plot_2d_parameter(
-                        prior_samples, post_samples, feature_names, group_names, 'alpha_y',
+                        prior_samples, post_samples, feature_names, group_names, param_label,
                         order_by=order_by, subset_features=subset_features,
                         plot_type=plot_type, **kwargs
                     )
