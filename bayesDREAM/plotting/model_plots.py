@@ -5,6 +5,7 @@ These are added as methods to the bayesDREAM model class for easy access.
 """
 
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from typing import Optional, List, Union
 import warnings
@@ -19,6 +20,39 @@ from .prior_sampling import get_prior_samples
 
 class PlottingMixin:
     """Mixin class providing plotting methods for bayesDREAM models."""
+
+    def _get_technical_group_names(self) -> List[str]:
+        """
+        Get informative names for technical groups from model metadata.
+
+        Returns
+        -------
+        List[str]
+            Names for each technical group (e.g., ['K562', 'Jurkat'] instead of ['TG_0', 'TG_1'])
+        """
+        if not hasattr(self, 'meta') or 'technical_group_code' not in self.meta.columns:
+            # No technical groups, return generic name
+            return ['TG_0']
+
+        # Get unique technical group codes and their corresponding covariate values
+        if hasattr(self, 'technical_group_col') and self.technical_group_col:
+            # Use the stored column name if available
+            group_col = self.technical_group_col
+            unique_groups = self.meta.groupby('technical_group_code')[group_col].first().sort_index()
+            return unique_groups.tolist()
+        else:
+            # Try to infer from commonly used columns
+            possible_cols = ['cell_line', 'condition', 'batch', 'sample']
+            for col in possible_cols:
+                if col in self.meta.columns:
+                    unique_groups = self.meta.groupby('technical_group_code')[col].first().sort_index()
+                    # Check if it actually varies by technical group
+                    if len(unique_groups.unique()) == len(unique_groups):
+                        return unique_groups.tolist()
+
+            # Fall back to generic names if can't find informative column
+            n_groups = self.meta['technical_group_code'].nunique()
+            return [f'TG_{i}' for i in range(n_groups)]
 
     def plot_technical_fit(
         self,
@@ -142,20 +176,30 @@ class PlottingMixin:
                 if prior_samples.ndim == 3:
                     prior_samples = prior_samples[:, :, 0]  # Take first gene dimension
 
+            # Get informative technical group names
+            group_names = self._get_technical_group_names()
+
             # Handle different dimensionalities
             if post_samples.ndim == 1:
                 # (samples,) - single value across all groups
                 return plot_scalar_parameter(prior_samples, post_samples, 'alpha_x', **kwargs)
             elif post_samples.ndim == 2:
                 # (samples, technical_groups) - one value per group
-                n_groups = post_samples.shape[1]
-                group_names = [f'TG_{i}' for i in range(n_groups)]
+                if technical_group_index is not None:
+                    # Plot single technical group
+                    prior_tg = prior_samples[:, technical_group_index]
+                    post_tg = post_samples[:, technical_group_index]
+                    group_name = group_names[technical_group_index]
 
-                # Reshape for 1D plotting: treat as separate features
-                return plot_1d_parameter(
-                    prior_samples, post_samples, group_names, 'alpha_x',
-                    order_by='input', plot_type='violin', **kwargs
-                )
+                    return plot_scalar_parameter(
+                        prior_tg, post_tg, f'alpha_x ({group_name})', **kwargs
+                    )
+                else:
+                    # Plot all technical groups - treat as separate features
+                    return plot_1d_parameter(
+                        prior_samples, post_samples, group_names, 'alpha_x',
+                        order_by='input', plot_type='violin', **kwargs
+                    )
             else:
                 raise ValueError(f"Unexpected alpha_x shape: {post_samples.shape}")
 
@@ -220,6 +264,9 @@ class PlottingMixin:
                 )
             elif post_samples.ndim == 3:
                 # (samples, technical_groups, genes)
+                # Get informative technical group names
+                group_names = self._get_technical_group_names()
+
                 if technical_group_index is not None:
                     # Plot single technical group - select FIRST, then check shape
                     prior_tg = prior_samples[:, technical_group_index, :]
@@ -236,8 +283,9 @@ class PlottingMixin:
                             f"was run for this modality."
                         )
 
+                    group_name = group_names[technical_group_index]
                     return plot_1d_parameter(
-                        prior_tg, post_tg, feature_names, f'alpha_y (technical_group {technical_group_index})',
+                        prior_tg, post_tg, feature_names, f'alpha_y ({group_name})',
                         order_by, subset_features=subset_features, plot_type=plot_type,
                         **kwargs
                     )
@@ -253,8 +301,6 @@ class PlottingMixin:
                             f"was run for this modality."
                         )
 
-                    n_groups = post_samples.shape[1]
-                    group_names = [f'TG_{i}' for i in range(n_groups)]
                     return plot_2d_parameter(
                         prior_samples, post_samples, feature_names, group_names, 'alpha_y',
                         order_by=order_by, subset_features=subset_features,

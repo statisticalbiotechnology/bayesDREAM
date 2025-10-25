@@ -617,7 +617,10 @@ def _plot_2d_scatter(
                 df_dim = df_all[df_all['dimension'] == dim_name]
                 ax.scatter(df_dim['log2fc'], df_dim['overlap'],
                           label=dim_name, alpha=0.6, s=30, **kwargs)
-            ax.legend(title='Dimension')
+
+            # Use "Technical Group" for alpha parameters, "Dimension" for others
+            legend_title = 'Technical Group' if 'alpha' in param_name.lower() else 'Dimension'
+            ax.legend(title=legend_title)
 
         elif color_by == 'feature':
             # Color by feature (only practical if few features)
