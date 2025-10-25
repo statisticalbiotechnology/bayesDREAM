@@ -177,6 +177,30 @@ class PlottingMixin:
             # Use sampled priors
             prior_samples = prior_dict['alpha_y'].numpy() if hasattr(prior_dict['alpha_y'], 'numpy') else prior_dict['alpha_y']
 
+            # If primary modality with cis gene extracted, prior includes cis gene but posterior doesn't
+            # Need to exclude cis gene from prior to match posterior shape
+            if modality_name == self.primary_modality and hasattr(self, 'counts') and \
+               self.cis_gene is not None and 'cis' in self.modalities:
+                # Check if cis gene is in original counts
+                if isinstance(self.counts, pd.DataFrame) and self.cis_gene in self.counts.index:
+                    all_genes_orig = self.counts.index.tolist()
+                    cis_idx_orig = all_genes_orig.index(self.cis_gene)
+
+                    # Prior was sampled with all features including cis gene
+                    # Exclude cis gene to match modality alpha_y (which excludes cis)
+                    if prior_samples.ndim == 2:
+                        # (samples, features)
+                        if cis_idx_orig < prior_samples.shape[1]:
+                            all_idx = list(range(prior_samples.shape[1]))
+                            trans_idx = [i for i in all_idx if i != cis_idx_orig]
+                            prior_samples = prior_samples[:, trans_idx]
+                    elif prior_samples.ndim == 3:
+                        # (samples, technical_groups, features)
+                        if cis_idx_orig < prior_samples.shape[2]:
+                            all_idx = list(range(prior_samples.shape[2]))
+                            trans_idx = [i for i in all_idx if i != cis_idx_orig]
+                            prior_samples = prior_samples[:, :, trans_idx]
+
             # Handle dimensionality and shape checking
             if post_samples.ndim == 2:
                 # (samples, genes) - check shape compatibility

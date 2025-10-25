@@ -22,27 +22,33 @@ def compute_distribution_overlap(prior_samples: np.ndarray, posterior_samples: n
     Returns
     -------
     float
-        Percentage overlap between 0 and 100
+        Percentage overlap between 0 and 100, or 0.0 if KDE fails
     """
     from scipy.stats import gaussian_kde
 
-    # Combine samples to get common evaluation points
-    all_samples = np.concatenate([prior_samples, posterior_samples])
-    x_eval = np.linspace(all_samples.min(), all_samples.max(), 200)
+    try:
+        # Combine samples to get common evaluation points
+        all_samples = np.concatenate([prior_samples, posterior_samples])
+        x_eval = np.linspace(all_samples.min(), all_samples.max(), 200)
 
-    # Compute KDEs
-    kde_prior = gaussian_kde(prior_samples)
-    kde_post = gaussian_kde(posterior_samples)
+        # Compute KDEs
+        kde_prior = gaussian_kde(prior_samples)
+        kde_post = gaussian_kde(posterior_samples)
 
-    # Evaluate densities
-    prior_density = kde_prior(x_eval)
-    post_density = kde_post(x_eval)
+        # Evaluate densities
+        prior_density = kde_prior(x_eval)
+        post_density = kde_post(x_eval)
 
-    # Compute overlap as integral of minimum
-    overlap = np.trapz(np.minimum(prior_density, post_density), x_eval)
+        # Compute overlap as integral of minimum
+        overlap = np.trapz(np.minimum(prior_density, post_density), x_eval)
 
-    # Normalize to percentage
-    return overlap * 100
+        # Normalize to percentage
+        return overlap * 100
+
+    except (np.linalg.LinAlgError, ValueError) as e:
+        # Return 0 overlap if KDE fails (e.g., singular covariance, constant data)
+        warnings.warn(f"KDE failed for overlap computation ({str(e)}), returning 0% overlap")
+        return 0.0
 
 
 def get_feature_ordering(
