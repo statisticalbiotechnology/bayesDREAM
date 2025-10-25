@@ -283,6 +283,19 @@ class PlottingMixin:
                             f"was run for this modality."
                         )
 
+                    # Filter out features where posterior is constant (manually set to baseline)
+                    # For multiplicative: baseline=1, for additive: baseline=0
+                    post_std = np.std(post_tg, axis=0)
+                    non_constant_mask = post_std > 1e-10  # Not all the same value
+
+                    if not non_constant_mask.all():
+                        n_constant = (~non_constant_mask).sum()
+                        warnings.warn(f"Excluding {n_constant} features with constant values (manually set to baseline)")
+
+                        prior_tg = prior_tg[:, non_constant_mask]
+                        post_tg = post_tg[:, non_constant_mask]
+                        feature_names = [name for name, keep in zip(feature_names, non_constant_mask) if keep]
+
                     group_name = group_names[technical_group_index]
                     return plot_1d_parameter(
                         prior_tg, post_tg, feature_names, f'alpha_y ({group_name})',
