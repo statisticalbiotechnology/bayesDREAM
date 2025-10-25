@@ -6,9 +6,132 @@ to enable true prior/posterior comparison plots.
 """
 
 import numpy as np
+import pandas as pd
 import torch
 import pyro
 import pyro.distributions as dist
+
+
+def _compute_data_driven_priors(model, modality, distribution, epsilon=1e-6):
+    """
+    Compute data-driven prior parameters (mu_x_mean_tensor, mu_x_sd_tensor) from NTC data.
+
+    This replicates the logic from bayesDREAM/fitting/technical.py:469-494.
+
+    Parameters
+    ----------
+    model : bayesDREAM
+        The model instance
+    modality : Modality
+        The modality to compute priors for
+    distribution : str
+        Distribution type
+    epsilon : float
+        Small value to ensure positivity
+
+    Returns
+    -------
+    mu_x_mean_tensor : torch.Tensor
+        Feature-specific prior means [T] or [T, D]
+    mu_x_sd_tensor : torch.Tensor
+        Feature-specific prior standard deviations [T] or [T, D]
+    """
+    # Get counts - use original if primary modality with cis gene
+    if modality.name == model.primary_modality and hasattr(model, 'counts'):
+        if isinstance(model.counts, pd.DataFrame):
+            counts = model.counts.values
+            cell_names = model.counts.columns.tolist()
+        else:
+            counts = model.counts
+            cell_names = model.meta['cell'].values[:counts.shape[modality.cells_axis]]
+    else:
+        counts = modality.counts
+        cell_names = modality.cell_names if modality.cell_names is not None else \
+                     model.meta['cell'].values[:counts.shape[modality.cells_axis]]
+
+    # Subset to NTC cells
+    cell_set = set(cell_names)
+    meta_subset = model.meta[model.meta['cell'].isin(cell_set)].copy()
+    meta_ntc = meta_subset[meta_subset["target"] == "ntc"].copy()
+
+    ntc_cell_list = meta_ntc["cell"].tolist()
+    ntc_indices = [i for i, c in enumerate(cell_names) if c in ntc_cell_list]
+
+    if len(ntc_indices) == 0:
+        raise ValueError("No NTC cells found for computing data-driven priors")
+
+    # Extract NTC counts
+    if counts.ndim == 2:
+        counts_ntc = counts[:, ntc_indices] if modality.cells_axis == 1 else counts[ntc_indices, :]
+    elif counts.ndim == 3:
+        counts_ntc = counts[:, ntc_indices, :]
+    else:
+        raise ValueError(f"Unexpected dimensions: {counts.ndim}")
+
+    # Get technical groups and guides for NTC cells
+    groups_ntc = meta_ntc['technical_group_code'].values
+    guides_ntc = meta_ntc['guide_code'].values
+
+    # Prepare data for prior computation (handle 3D by summing/averaging last axis)
+    if counts_ntc.ndim == 3:
+        if distribution == 'multinomial':
+            y_obs_ntc_for_priors = counts_ntc.sum(axis=2)  # [T, N] or [N, T]
+        elif distribution == 'mvnormal':
+            y_obs_ntc_for_priors = counts_ntc.mean(axis=2)
+        else:
+            y_obs_ntc_for_priors = counts_ntc.sum(axis=2)
+    else:
+        y_obs_ntc_for_priors = counts_ntc
+
+    # Transpose if needed to get [N, T]
+    if modality.cells_axis == 1:
+        y_obs_ntc_for_priors = y_obs_ntc_for_priors.T
+
+    # Apply size factors for negbinom
+    if distribution == 'negbinom' and 'sum_factor' in meta_ntc.columns:
+        y_obs_ntc_factored = y_obs_ntc_for_priors / meta_ntc['sum_factor'].values.reshape(-1, 1)
+    else:
+        y_obs_ntc_factored = y_obs_ntc_for_priors
+
+    # Compute mu_x_mean and mu_x_sd based on distribution
+    if distribution == 'negbinom':
+        baseline_mask = (groups_ntc == 0)
+        mu_x_mean = np.mean(y_obs_ntc_factored[baseline_mask, :], axis=0)
+        guide_means = np.array([np.mean(y_obs_ntc_factored[guides_ntc == g], axis=0)
+                               for g in np.unique(guides_ntc)])
+        mu_x_sd = np.std(guide_means, axis=0) + epsilon
+        mu_x_mean = mu_x_mean + epsilon  # strictly positive for Gamma
+
+    elif distribution == 'normal':
+        baseline_mask = (groups_ntc == 0)
+        mu_x_mean = np.mean(y_obs_ntc_factored[baseline_mask, :], axis=0)
+        guide_means = np.array([np.mean(y_obs_ntc_factored[guides_ntc == g], axis=0)
+                               for g in np.unique(guides_ntc)])
+        mu_x_sd = np.std(guide_means, axis=0) + epsilon
+
+    elif distribution == 'mvnormal':
+        # Compute per-dimension: [T, D]
+        if modality.cells_axis == 1:
+            y_obs_ntc_mv = counts_ntc.transpose(1, 0, 2)  # [T, N, D] -> [N, T, D]
+        else:
+            y_obs_ntc_mv = counts_ntc
+
+        mu_x_mean = np.mean(y_obs_ntc_mv, axis=0)  # [T, D]
+        guide_means = np.stack([np.mean(y_obs_ntc_mv[guides_ntc == g], axis=0)
+                               for g in np.unique(guides_ntc)], axis=0)  # [G, T, D]
+        mu_x_sd = np.std(guide_means, axis=0) + epsilon  # [T, D]
+
+    else:
+        # binomial & multinomial: not used
+        T = y_obs_ntc_for_priors.shape[1]
+        mu_x_mean = np.zeros(T, dtype=float)
+        mu_x_sd = np.ones(T, dtype=float)
+
+    # Convert to tensors
+    mu_x_mean_tensor = torch.tensor(mu_x_mean, dtype=torch.float32)
+    mu_x_sd_tensor = torch.tensor(mu_x_sd, dtype=torch.float32)
+
+    return mu_x_mean_tensor, mu_x_sd_tensor
 
 
 def sample_technical_priors(
@@ -73,6 +196,9 @@ def sample_technical_priors(
     prior_samples['alpha_y_mult'] = alpha_full_mul
     prior_samples['alpha_y_add'] = alpha_full_add
 
+    # Compute data-driven prior parameters from NTC data
+    mu_x_mean_tensor, mu_x_sd_tensor = _compute_data_driven_priors(model, modality, distribution)
+
     # Distribution-specific parameters
     if distribution == 'negbinom':
         # Default prior parameters from fit_technical
@@ -87,9 +213,17 @@ def sample_technical_priors(
         o_y = dist.Exponential(beta_o.unsqueeze(-1)).sample((T,)).squeeze()  # (nsamples, T)
         prior_samples['o_y'] = o_y
 
-        # mu_ntc: Would need empirical estimates from data
-        # For now, sample from broad Gamma (will be replaced with actual data-driven priors)
-        mu_ntc = dist.Gamma(2.0, 0.1).sample((nsamples, T))
+        # mu_ntc ~ Gamma(alpha, beta) with data-driven parameters
+        # Shape-rate parameterization: alpha = mu^2/sigma^2, beta = mu/sigma^2
+        alpha_param = (mu_x_mean_tensor ** 2) / (mu_x_sd_tensor ** 2)
+        beta_param = mu_x_mean_tensor / (mu_x_sd_tensor ** 2)
+
+        # Sample for each feature
+        mu_ntc_list = []
+        for i in range(T):
+            mu_ntc_feat = dist.Gamma(alpha_param[i], beta_param[i]).sample((nsamples,))
+            mu_ntc_list.append(mu_ntc_feat)
+        mu_ntc = torch.stack(mu_ntc_list, dim=1)  # (nsamples, T)
         prior_samples['mu_ntc'] = mu_ntc
 
     elif distribution == 'normal':
@@ -97,14 +231,64 @@ def sample_technical_priors(
         sigma_y = dist.HalfCauchy(10.0).sample((nsamples, T))
         prior_samples['sigma_y'] = sigma_y
 
-        # mu_ntc ~ Normal(mu, sd) - would need data-driven priors
-        mu_ntc = dist.Normal(0.0, 10.0).sample((nsamples, T))
+        # mu_ntc ~ Normal(mu_x_mean, mu_x_sd) with data-driven parameters
+        mu_ntc = dist.Normal(mu_x_mean_tensor, mu_x_sd_tensor).sample((nsamples,))
         prior_samples['mu_ntc'] = mu_ntc
 
     elif distribution == 'binomial':
-        # mu_ntc ~ Beta(a, b) - would need empirical Beta parameters from data
-        # For now, use uniform Beta(1, 1)
-        mu_ntc = dist.Beta(1.0, 1.0).sample((nsamples, T))
+        # mu_ntc ~ Beta(a, b) with empirical Bayes parameters from NTC data
+        # This matches the logic in technical.py:156-116
+
+        # Get denominator if available
+        if modality.denominator is not None:
+            # Subset to NTC cells (recompute indices)
+            if modality.name == model.primary_modality and hasattr(model, 'counts'):
+                cell_names = model.counts.columns.tolist() if isinstance(model.counts, pd.DataFrame) else \
+                             model.meta['cell'].values[:model.counts.shape[modality.cells_axis]]
+            else:
+                cell_names = modality.cell_names if modality.cell_names is not None else \
+                             model.meta['cell'].values[:modality.counts.shape[modality.cells_axis]]
+
+            meta_subset = model.meta[model.meta['cell'].isin(set(cell_names))].copy()
+            meta_ntc = meta_subset[meta_subset["target"] == "ntc"].copy()
+            ntc_indices = [i for i, c in enumerate(cell_names) if c in meta_ntc["cell"].tolist()]
+
+            # Get NTC counts and denominators
+            counts = modality.counts
+            denominator = modality.denominator
+
+            if counts.ndim == 2:
+                counts_ntc = counts[:, ntc_indices] if modality.cells_axis == 1 else counts[ntc_indices, :]
+                denom_ntc = denominator[:, ntc_indices] if modality.cells_axis == 1 else denominator[ntc_indices, :]
+            else:
+                counts_ntc = counts[:, ntc_indices, :]
+                denom_ntc = denominator[:, ntc_indices, :]
+
+            # Sum across cells to get empirical estimates
+            if modality.cells_axis == 1:
+                y_sum = counts_ntc.sum(axis=1)  # [T]
+                den_sum = denom_ntc.sum(axis=1)  # [T]
+            else:
+                y_sum = counts_ntc.sum(axis=0)  # [T]
+                den_sum = denom_ntc.sum(axis=0)  # [T]
+
+            # Compute Beta parameters (matching technical.py)
+            p_hat = (y_sum + 0.5) / (den_sum + 1.0)
+            p_hat = np.clip(p_hat, 1e-6, 1 - 1e-6)
+            kappa = np.clip(den_sum, 20.0, 200.0)
+            a = p_hat * kappa + 1e-3
+            b = (1.0 - p_hat) * kappa + 1e-3
+
+            # Sample for each feature
+            mu_ntc_list = []
+            for i in range(T):
+                mu_ntc_feat = dist.Beta(torch.tensor(a[i]), torch.tensor(b[i])).sample((nsamples,))
+                mu_ntc_list.append(mu_ntc_feat)
+            mu_ntc = torch.stack(mu_ntc_list, dim=1)  # (nsamples, T)
+        else:
+            # Fallback to uniform if no denominator
+            mu_ntc = dist.Beta(1.0, 1.0).sample((nsamples, T))
+
         prior_samples['mu_ntc'] = mu_ntc
 
     elif distribution == 'multinomial':
@@ -113,10 +297,34 @@ def sample_technical_priors(
         if K is None:
             raise ValueError("Cannot determine K for multinomial distribution")
 
-        # probs_baseline ~ Dirichlet(concentration)
-        # Use uniform Dirichlet(1, ..., 1)
-        concentration = torch.ones(T, K)
-        probs_baseline = dist.Dirichlet(concentration).sample((nsamples,))  # (nsamples, T, K)
+        # probs_baseline ~ Dirichlet(concentration) with empirical concentration from NTC data
+        # This matches technical.py:118-123
+
+        # Subset to NTC cells (recompute indices)
+        if modality.name == model.primary_modality and hasattr(model, 'counts'):
+            cell_names = model.counts.columns.tolist() if isinstance(model.counts, pd.DataFrame) else \
+                         model.meta['cell'].values[:model.counts.shape[modality.cells_axis]]
+        else:
+            cell_names = modality.cell_names if modality.cell_names is not None else \
+                         model.meta['cell'].values[:modality.counts.shape[modality.cells_axis]]
+
+        meta_subset = model.meta[model.meta['cell'].isin(set(cell_names))].copy()
+        meta_ntc = meta_subset[meta_subset["target"] == "ntc"].copy()
+        ntc_indices = [i for i, c in enumerate(cell_names) if c in meta_ntc["cell"].tolist()]
+
+        # Get NTC counts (3D: T, N, K or N, T, K)
+        counts_ntc = modality.counts[:, ntc_indices, :]  # Assuming cells_axis=1 for 3D
+
+        # Sum across cells: [T, K]
+        total_counts_per_feature = counts_ntc.sum(axis=1)  # [T, K]
+        concentration = torch.tensor(total_counts_per_feature + 1.0, dtype=torch.float32)
+
+        # Sample for each feature
+        probs_list = []
+        for i in range(T):
+            probs_feat = dist.Dirichlet(concentration[i]).sample((nsamples,))
+            probs_list.append(probs_feat)
+        probs_baseline = torch.stack(probs_list, dim=1)  # (nsamples, T, K)
         prior_samples['probs_baseline'] = probs_baseline
 
     elif distribution == 'mvnormal':
@@ -129,8 +337,8 @@ def sample_technical_priors(
         sigma_y_mv = dist.HalfCauchy(10.0).sample((nsamples, T, D))
         prior_samples['sigma_y_mv'] = sigma_y_mv
 
-        # mu_ntc_mv ~ Normal(0, 10)
-        mu_ntc_mv = dist.Normal(0.0, 10.0).sample((nsamples, T, D))
+        # mu_ntc_mv ~ Normal(mu_x_mean, mu_x_sd) with data-driven parameters [T, D]
+        mu_ntc_mv = dist.Normal(mu_x_mean_tensor, mu_x_sd_tensor).sample((nsamples,))
         prior_samples['mu_ntc_mv'] = mu_ntc_mv
 
     return prior_samples
