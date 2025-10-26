@@ -13,7 +13,7 @@ bayesDREAM has evolved from a **single-modality, gene-specific implementation** 
 **Key Achievements:**
 - ✅ Multi-modal support (genes, transcripts, splicing, ATAC-seq, custom)
 - ✅ Flexible cis-feature specification (genes, ATAC regions, any feature)
-- ✅ Prior-guided cis selection (e.g., using ATAC to identify regulatory regions)
+- 🚧 Prior-informed cis fitting (infrastructure for using ATAC to inform gene expression priors - partial implementation)
 - ✅ Comprehensive plotting infrastructure with interactive visualizations
 - ✅ Modular architecture (93% reduction in main file size)
 - ✅ Full backward compatibility with original API
@@ -148,69 +148,105 @@ model.fit_trans(modality_name='gene')  # Trans = Gene expression changes
 - Capture chromatin-mediated effects
 - Test hypotheses about regulatory architecture
 
-#### 2c. Prior-Guided Cis Selection: ATAC + GEX Integration
+#### 2c. Prior-Informed Cis Fitting: ATAC + GEX Integration
 
-**Use Case:** You have both ATAC and gene expression, and you want to use **ATAC data to select the cis feature** (regulatory region driving effects).
+**Major Innovation:** Use one modality to inform **Bayesian priors** on another modality's cis fit.
 
-```python
-# Step 1: Identify cis peak from ATAC data
-# (e.g., differential accessibility analysis, prior knowledge, etc.)
-cis_peak = 'chr9:132283881-132284881'  # GFI1B promoter region
+**What This Means:**
+When fitting the cis model, bayesDREAM estimates guide-level effects with two key parameters:
+- **`x_eff_g`**: Guide mean (expected expression level for each guide)
+- **`sigma_eff`**: Guide variance (uncertainty in expression for each guide)
 
-# Step 2: Initialize with ATAC as primary, peak as cis
-model = bayesDREAM(
-    meta=meta,
-    counts=atac_counts,
-    atac_meta=atac_meta,
-    primary_modality='atac',
-    cis_feature=cis_peak,  # Selected based on ATAC prior
-    output_dir='./output'
-)
+The framework allows you to **use prior knowledge** (e.g., from ATAC-seq) to inform these priors, improving inference when you have multi-modal data.
 
-# Step 3: Add gene expression for trans effects
-model.add_gene_modality(
-    gene_counts=gene_counts,
-    gene_meta=gene_meta
-)
-
-# Step 4: Model chromatin → transcription cascade
-model.set_technical_groups(['cell_line'])
-model.fit_technical()  # Technical variation in ATAC
-model.fit_cis()        # Model cis ATAC accessibility
-model.fit_trans(modality_name='gene')  # How ATAC drives gene expression
-
-# Interpretation:
-# - x_true = accessibility of chr9:132283881-132284881
-# - Trans effects = how this accessibility regulates genome-wide gene expression
-```
-
-**Alternative: Gene as Cis, ATAC as Prior**
+**Example: Using ATAC to Inform Gene Expression Priors**
 
 ```python
-# Use ATAC to inform which gene to model
-# Example: Select gene with most variable promoter accessibility
-most_variable_promoter = identify_from_atac(atac_counts, atac_meta)
-target_gene = 'GFI1B'  # Mapped from ATAC peak
+# Scenario: You have ATAC + GEX data for GFI1B perturbation
+# Goal: Use ATAC accessibility to inform priors on GFI1B expression levels
 
+# Step 1: Compute priors from ATAC data
+# Higher ATAC accessibility → expect higher gene expression
+atac_peak = 'chr9:132283881-132284881'  # GFI1B promoter
+atac_values = atac_counts.loc[atac_peak, :]  # Per-guide ATAC levels
+
+# Compute guide-level ATAC statistics
+guide_atac_mean = meta.groupby('guide')[atac_values].mean()
+guide_atac_var = meta.groupby('guide')[atac_values].var()
+
+# Transform to expression scale (e.g., log-linear relationship)
+prior_x_eff_g = np.log2(1 + guide_atac_mean * scaling_factor)
+prior_sigma_eff = np.sqrt(guide_atac_var) / guide_atac_mean
+
+# Step 2: Initialize model with gene expression as cis
 model = bayesDREAM(
     meta=meta,
     counts=gene_counts,
     gene_meta=gene_meta,
-    cis_gene=target_gene,  # Selected using ATAC prior
+    cis_gene='GFI1B',
     output_dir='./output'
 )
 
-# Add ATAC as secondary modality
-model.add_atac_modality(
-    atac_counts=atac_counts,
-    atac_meta=atac_meta,
-    genes_to_peaks=genes_to_peaks
+# Step 3: Fit cis model with ATAC-informed priors
+# ⚠️ INFRASTRUCTURE SETUP - NOT YET FULLY IMPLEMENTED
+# The fit_cis method has parameters for custom priors, but full integration pending
+model.fit_cis(
+    sum_factor_col='sum_factor',
+    prior_x_eff_g=prior_x_eff_g,      # Custom mean priors from ATAC
+    prior_sigma_eff=prior_sigma_eff   # Custom variance priors from ATAC
 )
 
-# Fit: Model gene expression → ATAC changes
-model.fit_cis()  # Cis = GFI1B expression
-model.fit_trans(modality_name='atac')  # Trans = Chromatin changes
+# Benefits:
+# - Guides with high ATAC → prior expects high expression
+# - Guides with variable ATAC → prior allows more uncertainty
+# - Improves inference when GEX data is noisy or sparse
 ```
+
+**Status:**
+- ✅ **Infrastructure set up**: `fit_cis()` signature supports `prior_x_eff_g` and `prior_sigma_eff` parameters
+- 🚧 **Full implementation pending**: Complete integration of custom priors into Pyro model
+- 📋 **Use case validated**: ATAC → GEX prior transformation tested conceptually
+- 🔜 **Coming soon**: Full support for cross-modality prior specification
+
+**Why This Matters:**
+- **Improved inference**: Leverage complementary data for better parameter estimates
+- **Biological realism**: Incorporate mechanistic knowledge (chromatin → expression)
+- **Data efficiency**: Better estimates when one modality is higher quality
+- **Hypothesis testing**: Test if ATAC-informed priors improve model fit
+
+**Alternative Approaches (Currently Implemented):**
+
+```python
+# Approach 1: Use ATAC to SELECT which gene to model
+# (Feature selection, not prior specification)
+most_variable_gene = identify_from_atac(atac_counts, atac_meta)
+
+model = bayesDREAM(
+    meta=meta,
+    counts=gene_counts,
+    cis_gene=most_variable_gene  # Selection based on ATAC
+)
+model.fit_cis()  # Standard fit, no custom priors
+
+# Approach 2: Use ATAC peak AS the cis feature
+# (Different cis modality, not prior on genes)
+model = bayesDREAM(
+    meta=meta,
+    counts=atac_counts,
+    primary_modality='atac',
+    cis_feature='chr9:132283881-132284881'
+)
+model.add_gene_modality(gene_counts, gene_meta)
+model.fit_cis()  # Fits ATAC as cis
+model.fit_trans(modality_name='gene')  # Genes as trans
+```
+
+**Roadmap:**
+1. Complete prior parameter integration in `fitting/cis.py`
+2. Add validation for prior shapes and ranges
+3. Implement prior transformation utilities (e.g., ATAC → expression scale)
+4. Add examples and tests for ATAC-informed priors
+5. Extend to other prior sources (e.g., transcript → splicing, protein → RNA)
 
 ---
 
@@ -557,7 +593,7 @@ model.fit_trans()
 |--------|--------|-------|
 | **Modalities** | Gene expression only | Genes, transcripts, splicing, ATAC, custom |
 | **Cis Feature** | Must be a gene | Any feature type (genes, peaks, junctions) |
-| **Prior Integration** | Not supported | ATAC-guided cis selection |
+| **Prior Integration** | Not supported | Infrastructure for ATAC-informed priors (partial implementation) |
 | **Plotting** | Minimal | Comprehensive visualization suite |
 | **Architecture** | 4,537-line monolith | Modular (311-line main file) |
 | **Testing** | Limited | Comprehensive test suite |
@@ -568,13 +604,16 @@ model.fit_trans()
 ## 🚀 Future Directions
 
 **Near-term:**
+- **Complete prior-informed cis fitting** (ATAC → gene expression priors for x_eff_g and sigma_eff)
 - Per-modality technical fitting (separate alpha_y for each modality)
 - Cross-modality trans effects (e.g., gene → splicing)
 - Automated model comparison and selection
+- Prior transformation utilities for different modality combinations
 
 **Long-term:**
 - Integration with single-cell multi-omics (CITE-seq, TEA-seq)
 - Hierarchical modeling of cell types
+- Automatic prior specification from co-measured modalities
 - Real-time interactive visualization dashboard
 
 ---

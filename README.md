@@ -18,10 +18,11 @@ Supports multiple molecular modalities including genes, transcripts, splicing, A
 
 ### Key Innovations
 
-**🧬 Flexible Cis Feature Selection**
+**🧬 Flexible Cis Feature Selection & Prior-Informed Fitting**
 - Cis feature can be any molecular measurement (gene, ATAC peak, junction, etc.)
 - Use `cis_gene='GFI1B'` for genes or `cis_feature='chr9:132283881-132284881'` for ATAC peaks
-- Leverage prior knowledge (e.g., ATAC data) to select regulatory elements as cis features
+- Infrastructure for using multi-modal data to inform Bayesian priors (e.g., ATAC → gene expression priors for guide mean `x_eff_g` and variance `sigma_eff`)
+- 🚧 Full prior integration coming soon - signature in place, Pyro model integration pending
 
 **🔬 Multi-Modal Integration**
 - Add transcripts, splicing, ATAC-seq, and custom modalities to any analysis
@@ -143,10 +144,10 @@ donor_mod = model.get_modality('splicing_donor')
 atac_mod = model.get_modality('atac')
 ```
 
-### ATAC-Guided Cis Selection
+### ATAC-Guided Analysis
 
 ```python
-# Use ATAC peak as cis feature (e.g., GFI1B promoter)
+# Approach 1: Use ATAC peak as cis feature
 model = bayesDREAM(
     meta=meta,
     counts=atac_counts,
@@ -162,6 +163,26 @@ model.add_gene_modality(gene_counts=gene_counts, gene_meta=gene_meta)
 # Fit: Models how ATAC accessibility drives gene expression
 model.fit_cis()  # Cis = ATAC peak
 model.fit_trans(modality_name='gene')  # Trans = Genes regulated by peak
+```
+
+```python
+# Approach 2: Use ATAC to inform priors on gene expression (🚧 coming soon)
+# Compute guide-level statistics from ATAC
+atac_peak = 'chr9:132283881-132284881'
+guide_atac_mean = meta.groupby('guide')[atac_counts.loc[atac_peak]].mean()
+guide_atac_var = meta.groupby('guide')[atac_counts.loc[atac_peak]].var()
+
+# Transform to expression scale
+prior_x_eff_g = np.log2(1 + guide_atac_mean * scaling_factor)
+prior_sigma_eff = np.sqrt(guide_atac_var) / guide_atac_mean
+
+# Fit with ATAC-informed priors (infrastructure in place)
+model = bayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B')
+model.fit_cis(
+    sum_factor_col='sum_factor',
+    prior_x_eff_g=prior_x_eff_g,      # Custom priors from ATAC
+    prior_sigma_eff=prior_sigma_eff   # Improves inference when GEX is noisy
+)
 ```
 
 ### Visualization
