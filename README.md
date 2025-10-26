@@ -16,37 +16,33 @@ bayesDREAM models how perturbations propagate through molecular layers using a t
 
 Supports multiple molecular modalities including genes, transcripts, splicing, ATAC-seq, and custom measurements.
 
-### Key Design: Separate 'cis' Modality
+### Key Innovations
 
-bayesDREAM uses a dedicated **'cis' modality** for modeling direct perturbation effects:
+**🧬 Flexible Cis Feature Selection**
+- Cis feature can be any molecular measurement (gene, ATAC peak, junction, etc.)
+- Use `cis_gene='GFI1B'` for genes or `cis_feature='chr9:132283881-132284881'` for ATAC peaks
+- Leverage prior knowledge (e.g., ATAC data) to select regulatory elements as cis features
 
-**Initialization Behavior:**
-- The 'cis' modality is extracted during `bayesDREAM()` initialization from your primary modality
-- The primary modality contains only **trans** features (cis feature excluded)
-- When you add additional modalities later (e.g., `add_atac_modality()`), NO cis extraction occurs
-- All modalities are automatically subset to cells present in the 'cis' modality
+**🔬 Multi-Modal Integration**
+- Add transcripts, splicing, ATAC-seq, and custom modalities to any analysis
+- Model cross-layer effects (e.g., chromatin accessibility → gene expression)
+- Unified interface across all data types
 
-**Fitting Behavior:**
-- `fit_technical()` on primary modality: Includes BOTH cis and trans features for cell-line effect estimation
-- `fit_cis()`: Always uses the 'cis' modality - consistent interface regardless of data type
-- `fit_trans()`: Uses the primary modality (trans features only)
-
-**Example**: If you specify `cis_gene='GFI1B'`, you get:
-- **'cis' modality**: Just GFI1B (for cis modeling)
-- **'gene' modality**: All other genes (for trans modeling)
-- **fit_technical**: Fits all 92 genes (including GFI1B), extracts alpha_x for GFI1B, stores alpha_y for remaining 91 genes
-
-**Parameters for Specifying Cis Feature:**
-- `cis_gene`: For gene modality (e.g., `cis_gene='GFI1B'`)
-- `cis_feature`: Generic parameter for any modality type (e.g., `cis_feature='chr9:132283881-132284881'` for ATAC)
-- Note: `cis_gene` is an alias for `cis_feature` when `primary_modality='gene'`
+**📊 Comprehensive Visualization**
+- Interactive x-y data plots with k-NN smoothing
+- Prior-posterior comparisons with distribution metrics
+- Model diagnostics and residual analysis
+- Trans function overlays for all function types
+- See [docs/PLOTTING_GUIDE.md](docs/PLOTTING_GUIDE.md) for complete guide
 
 ## Features
 
 - 🧬 **Gene expression modeling** with negative binomial likelihood
+- 🔬 **ATAC-seq integration** for chromatin accessibility and regulatory element analysis
 - 📊 **Transcript-level analysis** (isoform usage or independent counts)
-- ✂️ **Splicing analysis** (donor usage, acceptor usage, exon skipping)
+- ✂️ **Splicing analysis** (donor usage, acceptor usage, exon skipping, raw junction counts)
 - 📈 **Custom modalities** (SpliZ, SpliZVD, user-defined measurements)
+- 🎨 **Rich visualization suite** with interactive plots, prior-posterior comparisons, and model diagnostics
 - 🔄 **Multiple dose-response functions** (Hill equations, polynomials)
 - 🎯 **Guide-level inference** with technical variation modeling
 - 🔀 **Permutation testing** for statistical significance
@@ -114,11 +110,18 @@ model = bayesDREAM(
     cis_gene='GFI1B'
 )
 
+# Add ATAC-seq data
+model.add_atac_modality(
+    atac_counts=atac_counts,
+    atac_meta=atac_meta,
+    genes_to_peaks={'GFI1B': ['chr9:132283881-132284881']}
+)
+
 # Add splicing modalities
 model.add_splicing_modality(
     sj_counts=sj_counts,
     sj_meta=sj_meta,
-    splicing_types=['donor', 'acceptor', 'exon_skip']
+    splicing_types=['sj', 'donor', 'acceptor', 'exon_skip']
 )
 
 # Add custom modalities
@@ -126,6 +129,8 @@ model.add_custom_modality('spliz', spliz_scores, gene_meta, 'normal')
 
 # View all modalities
 print(model.list_modalities())
+# Output: ['cis', 'gene', 'atac', 'splicing_sj', 'splicing_donor',
+#          'splicing_acceptor', 'splicing_exon_skip', 'spliz']
 
 # Run pipeline (operates on primary gene modality)
 model.set_technical_groups(['cell_line'])
@@ -135,7 +140,58 @@ model.fit_trans(sum_factor_col='sum_factor_adj', function_type='additive_hill')
 
 # Access other modalities
 donor_mod = model.get_modality('splicing_donor')
+atac_mod = model.get_modality('atac')
 ```
+
+### ATAC-Guided Cis Selection
+
+```python
+# Use ATAC peak as cis feature (e.g., GFI1B promoter)
+model = bayesDREAM(
+    meta=meta,
+    counts=atac_counts,
+    atac_meta=atac_meta,
+    primary_modality='atac',
+    cis_feature='chr9:132283881-132284881',  # Regulatory region
+    output_dir='./output'
+)
+
+# Add genes to model chromatin → transcription effects
+model.add_gene_modality(gene_counts=gene_counts, gene_meta=gene_meta)
+
+# Fit: Models how ATAC accessibility drives gene expression
+model.fit_cis()  # Cis = ATAC peak
+model.fit_trans(modality_name='gene')  # Trans = Genes regulated by peak
+```
+
+### Visualization
+
+```python
+# Plot x-y data with trans function overlay
+model.plot_xy_data(
+    feature='TET2',
+    window=100,
+    show_correction='both',      # Side-by-side corrected/uncorrected
+    show_hill_function=True      # Overlay fitted trans function
+)
+
+# Plot ATAC peak
+model.plot_xy_data(
+    feature='chr9:132283881-132284881',
+    modality_name='atac',
+    show_ntc_gradient=True       # Color by NTC proportion
+)
+
+# Prior-posterior comparison
+from bayesDREAM.plotting import plot_prior_posterior
+plot_prior_posterior(
+    model,
+    features=['TET2', 'MYB', 'GAPDH'],
+    params=['A', 'alpha', 'beta']
+)
+```
+
+See **[docs/PLOTTING_GUIDE.md](docs/PLOTTING_GUIDE.md)** for complete visualization documentation.
 
 ### Staged Pipeline with Save/Load
 
@@ -204,11 +260,39 @@ See [docs/QUICKSTART_MULTIMODAL.md](docs/QUICKSTART_MULTIMODAL.md) for detailed 
 
 | Distribution | Use Case | Data Structure |
 |--------------|----------|----------------|
-| `negbinom` | Gene/transcript counts | 2D: (features, cells) |
+| `negbinom` | Gene/transcript counts, ATAC peaks | 2D: (features, cells) |
 | `multinomial` | Isoform/donor/acceptor usage | 3D: (features, cells, categories) |
-| `binomial` | Exon skipping PSI | 2D + denominator |
+| `binomial` | Exon skipping PSI, raw SJ counts | 2D + denominator |
 | `normal` | Continuous scores (SpliZ) | 2D: (features, cells) |
 | `mvnormal` | Multivariate scores (SpliZVD) | 3D: (features, cells, dims) |
+
+## Technical Notes
+
+### Cis Modality Design
+
+bayesDREAM uses a dedicated **'cis' modality** internally for modeling direct perturbation effects:
+
+**Initialization Behavior:**
+- The 'cis' modality is automatically extracted from your primary modality during initialization
+- The primary modality retains only **trans** features (cis feature excluded)
+- Additional modalities added later (e.g., via `add_atac_modality()`) do not undergo cis extraction
+- All modalities are automatically subset to cells present in the 'cis' modality
+
+**Fitting Behavior:**
+- `fit_technical()`: Uses primary modality with BOTH cis and trans features for cell-line effect estimation
+- `fit_cis()`: Always uses the 'cis' modality (consistent interface regardless of data type)
+- `fit_trans()`: Uses primary modality (trans features only)
+
+**Example**: Specifying `cis_gene='GFI1B'` with 92 genes creates:
+- **'cis' modality**: Just GFI1B (for cis modeling)
+- **'gene' modality**: Remaining 91 genes (for trans modeling)
+- **Technical fit**: Uses all 92 genes, extracts alpha_x for GFI1B, stores alpha_y for other 91
+
+**Parameters:**
+- `cis_gene`: For gene modality (e.g., `cis_gene='GFI1B'`)
+- `cis_feature`: Generic parameter for any modality (e.g., `cis_feature='chr9:132283881-132284881'` for ATAC)
+
+This design ensures consistent cis/trans separation across all data types while maintaining a unified user interface.
 
 ## Citation
 
@@ -256,8 +340,13 @@ bayesDREAM/
 │   ├── modalities/       # Modality-specific methods
 │   │   ├── transcript.py
 │   │   ├── splicing_modality.py
-│   │   ├── atac.py
+│   │   ├── atac.py       # ATAC-seq integration
 │   │   └── custom.py
+│   ├── plotting/         # Visualization infrastructure
+│   │   ├── xy_plots.py          # X-Y data plots (all distributions)
+│   │   ├── prior_posterior.py   # Prior-posterior comparisons
+│   │   ├── model_plots.py       # Model diagnostics
+│   │   └── utils.py             # Plotting utilities
 │   └── __init__.py       # Package exports
 ├── examples/             # Usage examples
 ├── tests/                # Test suite
@@ -265,7 +354,7 @@ bayesDREAM/
 └── toydata/              # Test datasets
 ```
 
-**Note**: The codebase was refactored from a single 4,537-line file into a modular structure (93% reduction in model.py). This improves maintainability while preserving complete backward compatibility. See [docs/archive/](docs/archive/) for refactoring history.
+**Note**: The codebase was refactored from a single 4,537-line file into a modular structure (93% reduction in model.py). This improves maintainability while preserving complete backward compatibility. See [docs/archive/](docs/archive/) for refactoring history and [CODEBASE_EVOLUTION.md](CODEBASE_EVOLUTION.md) for a detailed overview of enhancements.
 
 ## Contributing
 
