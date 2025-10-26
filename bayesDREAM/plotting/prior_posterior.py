@@ -136,6 +136,7 @@ def plot_1d_parameter(
     plot_type: str = 'auto',
     max_violin_features: int = 100,
     metric: str = 'posterior_coverage',
+    is_additive: bool = False,
     ax: Optional[plt.Axes] = None,
     figsize: Optional[Tuple[int, int]] = None,
     **kwargs
@@ -167,6 +168,9 @@ def plot_1d_parameter(
         Maximum features for violin plot before switching to scatter
     metric : str
         Comparison metric for scatter plots: 'overlap', 'kl_divergence', or 'posterior_coverage' (default)
+    is_additive : bool
+        If True, use difference (posterior - prior) for scatter plots.
+        If False, use log2 fold change. (default: False)
     ax : plt.Axes, optional
         Matplotlib axes to plot on
     figsize : tuple, optional
@@ -230,7 +234,7 @@ def plot_1d_parameter(
     elif plot_type == 'scatter':
         return _plot_1d_scatter(
             prior_samples, posterior_samples, feature_names, param_name,
-            max_violin_features, metric, ax, figsize, **kwargs
+            max_violin_features, metric, is_additive, ax, figsize, **kwargs
         )
     else:
         raise ValueError(f"Unknown plot_type: {plot_type}. Must be 'auto', 'violin', or 'scatter'")
@@ -325,19 +329,29 @@ def _plot_1d_scatter(
     param_name: str,
     max_features_for_subset: int = 100,
     metric: str = 'posterior_coverage',
+    is_additive: bool = False,
     ax: Optional[plt.Axes] = None,
     figsize: Tuple[int, int] = (10, 6),
     show_top_n: int = 10,
     **kwargs
 ) -> plt.Figure:
-    """Internal: Create scatter plot of log2FC vs metric."""
+    """Internal: Create scatter plot of mean shift vs metric."""
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize)
     else:
         fig = ax.figure
 
-    # Compute log2FC and chosen metric for all features
-    df = compute_log2fc_vs_overlap(prior_samples, posterior_samples, feature_names, metric=metric)
+    # Compute mean shift and chosen metric for all features
+    df = compute_log2fc_vs_overlap(prior_samples, posterior_samples, feature_names,
+                                    metric=metric, is_additive=is_additive)
+
+    # Determine shift column name and x-axis label
+    if is_additive:
+        shift_col = 'difference'
+        xlabel = 'Posterior mean - Prior mean'
+    else:
+        shift_col = 'log2fc'
+        xlabel = 'log2(Posterior mean / Prior mean)'
 
     # Determine metric column name and y-axis label
     if metric == 'overlap':
@@ -357,7 +371,7 @@ def _plot_1d_scatter(
     scatter_kwargs = {'alpha': 0.6, 's': 30}
     scatter_kwargs.update(kwargs)
 
-    ax.scatter(df['log2fc'], df[metric_col], **scatter_kwargs)
+    ax.scatter(df[shift_col], df[metric_col], **scatter_kwargs)
 
     # Annotate top mismatches
     if show_top_n > 0:
@@ -371,7 +385,7 @@ def _plot_1d_scatter(
         for _, row in top_mismatch.iterrows():
             ax.annotate(
                 row['feature'],
-                xy=(row['log2fc'], row[metric_col]),
+                xy=(row[shift_col], row[metric_col]),
                 xytext=(5, 5),
                 textcoords='offset points',
                 fontsize=8,
@@ -379,7 +393,7 @@ def _plot_1d_scatter(
             )
 
     ax.axvline(0, color='gray', linestyle='--', alpha=0.5)
-    ax.set_xlabel('log2(Posterior mean / Prior mean)')
+    ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     ax.set_title(f'{param_name} (Prior vs Posterior)\n'
                  f'{len(feature_names)} features')
@@ -403,6 +417,7 @@ def plot_2d_parameter(
     subset_features: Optional[List[str]] = None,
     max_violin_features: int = 100,
     metric: str = 'posterior_coverage',
+    is_additive: bool = False,
     figsize: Optional[Tuple[int, int]] = None,
     **kwargs
 ) -> Union[plt.Figure, List[plt.Figure]]:
@@ -437,6 +452,9 @@ def plot_2d_parameter(
         Max features for violin before switching to scatter
     metric : str
         Comparison metric for scatter plots: 'overlap', 'kl_divergence', or 'posterior_coverage' (default)
+    is_additive : bool
+        If True, use difference (posterior - prior) for scatter plots.
+        If False, use log2 fold change. (default: False)
     figsize : tuple, optional
         Figure size
     **kwargs
@@ -505,7 +523,7 @@ def plot_2d_parameter(
     elif plot_type == 'scatter':
         return _plot_2d_scatter(
             prior_samples, posterior_samples, feature_names, dimension_names,
-            param_name, color_by, separate_plots, metric, figsize, **kwargs
+            param_name, color_by, separate_plots, metric, is_additive, figsize, **kwargs
         )
     else:
         raise ValueError(f"Unknown plot_type: {plot_type}")
@@ -614,6 +632,7 @@ def _plot_2d_scatter(
     color_by: str,
     separate_plots: bool,
     metric: str,
+    is_additive: bool,
     figsize: Optional[Tuple[int, int]],
     **kwargs
 ) -> Union[plt.Figure, List[plt.Figure]]:
@@ -631,6 +650,7 @@ def _plot_2d_scatter(
                 f'{param_name} ({dim_name})',
                 max_features_for_subset=100,
                 metric=metric,
+                is_additive=is_additive,
                 figsize=figsize or (10, 6),
                 **kwargs
             )
@@ -644,6 +664,14 @@ def _plot_2d_scatter(
 
         fig, ax = plt.subplots(figsize=figsize)
 
+        # Determine shift column name and x-axis label
+        if is_additive:
+            shift_col = 'difference'
+            xlabel = 'Posterior mean - Prior mean'
+        else:
+            shift_col = 'log2fc'
+            xlabel = 'log2(Posterior mean / Prior mean)'
+
         # Determine metric column name and y-axis label
         if metric == 'overlap':
             metric_col = 'overlap'
@@ -655,14 +683,15 @@ def _plot_2d_scatter(
             metric_col = 'posterior_coverage'
             ylabel = 'Posterior Coverage (%)'
 
-        # Compute log2FC and metric for all features and dimensions
+        # Compute mean shift and metric for all features and dimensions
         all_data = []
         for dim_idx, dim_name in enumerate(dimension_names):
             df = compute_log2fc_vs_overlap(
                 prior_samples[:, :, dim_idx],
                 posterior_samples[:, :, dim_idx],
                 feature_names,
-                metric=metric
+                metric=metric,
+                is_additive=is_additive
             )
             df['dimension'] = dim_name
             all_data.append(df)
@@ -673,7 +702,7 @@ def _plot_2d_scatter(
         if color_by == 'dimension':
             for dim_name in dimension_names:
                 df_dim = df_all[df_all['dimension'] == dim_name]
-                ax.scatter(df_dim['log2fc'], df_dim[metric_col],
+                ax.scatter(df_dim[shift_col], df_dim[metric_col],
                           label=dim_name, alpha=0.6, s=30, **kwargs)
 
             # Use "Technical Group" for alpha parameters, "Dimension" for others
@@ -687,14 +716,14 @@ def _plot_2d_scatter(
 
             for feature in feature_names:
                 df_feat = df_all[df_all['feature'] == feature]
-                ax.scatter(df_feat['log2fc'], df_feat[metric_col],
+                ax.scatter(df_feat[shift_col], df_feat[metric_col],
                           label=feature, alpha=0.6, s=30, **kwargs)
 
             if len(feature_names) <= 20:
                 ax.legend(title='Feature', bbox_to_anchor=(1.05, 1), loc='upper left')
 
         ax.axvline(0, color='gray', linestyle='--', alpha=0.5)
-        ax.set_xlabel('log2(Posterior mean / Prior mean)')
+        ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
         ax.set_title(f'{param_name} (Prior vs Posterior)\n'
                      f'{len(feature_names)} features × {n_dims} dimensions')

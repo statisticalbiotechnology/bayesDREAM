@@ -233,6 +233,7 @@ class PlottingMixin:
             # Multiplicative (negbinom): plot log2(alpha_y_mult) - baseline is 0 in log2 space
             # Additive (normal, binomial, etc.): plot alpha_y_add (already in log2 space) - baseline is 0
             is_multiplicative = modality.distribution == 'negbinom'
+            is_additive = not is_multiplicative  # For scatter plot x-axis
 
             if is_multiplicative:
                 # For negbinom: use multiplicative and convert to log2
@@ -325,7 +326,7 @@ class PlottingMixin:
                 return plot_1d_parameter(
                     prior_samples, post_samples, feature_names, param_label,
                     order_by, subset_features=subset_features, plot_type=plot_type,
-                    metric=metric, **kwargs
+                    metric=metric, is_additive=is_additive, **kwargs
                 )
             elif post_samples.ndim == 3:
                 # (samples, technical_groups, genes)
@@ -369,7 +370,7 @@ class PlottingMixin:
                     return plot_1d_parameter(
                         prior_tg, post_tg, feature_names, f'{param_label} ({group_name})',
                         order_by, subset_features=subset_features, plot_type=plot_type,
-                        metric=metric, **kwargs
+                        metric=metric, is_additive=is_additive, **kwargs
                     )
                 else:
                     # Plot all technical groups (2D plot) - check shape compatibility
@@ -393,7 +394,7 @@ class PlottingMixin:
                     return plot_2d_parameter(
                         prior_samples, post_samples, feature_names, group_names, param_label,
                         order_by=order_by, subset_features=subset_features,
-                        plot_type=plot_type, metric=metric, **kwargs
+                        plot_type=plot_type, metric=metric, is_additive=is_additive, **kwargs
                     )
 
         else:

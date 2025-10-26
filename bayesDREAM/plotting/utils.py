@@ -374,10 +374,11 @@ def compute_log2fc_vs_overlap(
     prior_samples: np.ndarray,
     posterior_samples: np.ndarray,
     feature_names: List[str],
-    metric: str = 'posterior_coverage'
+    metric: str = 'posterior_coverage',
+    is_additive: bool = False
 ) -> pd.DataFrame:
     """
-    Compute log2 fold change in means vs prior/posterior comparison metric.
+    Compute mean shift (log2FC or difference) vs prior/posterior comparison metric.
 
     Parameters
     ----------
@@ -389,11 +390,14 @@ def compute_log2fc_vs_overlap(
         Feature names
     metric : str
         Comparison metric: 'overlap', 'kl_divergence', or 'posterior_coverage' (default)
+    is_additive : bool
+        If True, compute difference (posterior - prior) for additive parameters.
+        If False, compute log2 fold change for multiplicative parameters. (default: False)
 
     Returns
     -------
     pd.DataFrame
-        Dataframe with columns: feature, log2fc, <metric_name>
+        Dataframe with columns: feature, shift (log2fc or difference), <metric_name>
     """
     n_features = prior_samples.shape[1]
 
@@ -412,8 +416,15 @@ def compute_log2fc_vs_overlap(
         prior_mean = prior_samples[:, i].mean()
         post_mean = posterior_samples[:, i].mean()
 
-        # Compute log2FC (add small epsilon to avoid log(0))
-        log2fc = np.log2((post_mean + 1e-8) / (prior_mean + 1e-8))
+        # Compute shift based on scale type
+        if is_additive:
+            # Additive scale: compute difference
+            shift = post_mean - prior_mean
+            shift_col = 'difference'
+        else:
+            # Multiplicative scale: compute log2FC (add small epsilon to avoid log(0))
+            shift = np.log2((post_mean + 1e-8) / (prior_mean + 1e-8))
+            shift_col = 'log2fc'
 
         # Compute chosen metric
         if metric == 'overlap':
@@ -425,7 +436,7 @@ def compute_log2fc_vs_overlap(
 
         results.append({
             'feature': feature_names[i],
-            'log2fc': log2fc,
+            shift_col: shift,
             metric_col: metric_value
         })
 
