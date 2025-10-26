@@ -502,7 +502,7 @@ def plot_negbinom_xy(
     color_palette: Dict[str, str],
     show_hill_function: bool,
     show_ntc_gradient: bool = False,
-    xlabel: str,
+    xlabel: str = "log2(x_true)",
     ax: Optional[plt.Axes] = None,
     **kwargs
 ) -> plt.Axes:
@@ -687,7 +687,7 @@ def plot_binomial_xy(
     color_palette: Dict[str, str],
     show_trans_function: bool,
     show_ntc_gradient: bool = False,
-    xlabel: str,
+    xlabel: str = "log2(x_true)",
     ax: Optional[plt.Axes] = None,
     **kwargs
 ) -> plt.Axes:
@@ -834,7 +834,7 @@ def plot_multinomial_xy(
     color_palette: Dict[str, str],
     show_trans_function: bool,
     show_ntc_gradient: bool = False,
-    xlabel: str,
+    xlabel: str = "log2(x_true)",
     figsize: Optional[Tuple[int, int]] = None,
     **kwargs
 ) -> Union[plt.Figure, List[plt.Axes]]:
@@ -961,7 +961,7 @@ def plot_normal_xy(
     color_palette: Dict[str, str],
     show_trans_function: bool,
     show_ntc_gradient: bool = False,
-    xlabel: str,
+    xlabel: str = "log2(x_true)",
     ax: Optional[plt.Axes] = None,
     **kwargs
 ) -> plt.Axes:
@@ -1127,7 +1127,7 @@ def plot_mvnormal_xy(
     color_palette: Dict[str, str],
     show_trans_function: bool,
     show_ntc_gradient: bool = False,
-    xlabel: str,
+    xlabel: str = "log2(x_true)",
     figsize: Optional[Tuple[int, int]] = None,
     **kwargs
 ) -> Union[plt.Figure, List[plt.Axes]]:
