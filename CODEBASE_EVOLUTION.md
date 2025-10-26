@@ -13,7 +13,7 @@ bayesDREAM has evolved from a **single-modality, gene-specific implementation** 
 **Key Achievements:**
 - ✅ Multi-modal support (genes, transcripts, splicing, ATAC-seq, custom)
 - ✅ Flexible cis-feature specification (genes, ATAC regions, any feature)
-- 🚧 Prior-informed cis fitting (infrastructure for using ATAC to inform gene expression priors - partial implementation)
+- 🚧 Prior-informed cis fitting (infrastructure ~30% complete - see details below)
 - ✅ Comprehensive plotting infrastructure with interactive visualizations
 - ✅ Modular architecture (93% reduction in main file size)
 - ✅ Full backward compatibility with original API
@@ -43,7 +43,6 @@ model.fit_trans()
 - ❌ No integration with other molecular modalities
 - ❌ Limited visualization capabilities
 - ❌ Monolithic 4,537-line file (difficult to maintain)
-- ❌ Could not leverage prior knowledge (e.g., ATAC) for cis selection
 
 ---
 
@@ -148,105 +147,152 @@ model.fit_trans(modality_name='gene')  # Trans = Gene expression changes
 - Capture chromatin-mediated effects
 - Test hypotheses about regulatory architecture
 
-#### 2c. Prior-Informed Cis Fitting: ATAC + GEX Integration
+#### 2c. Prior-Informed Cis Fitting (🚧 In Development)
 
-**Major Innovation:** Use one modality to inform **Bayesian priors** on another modality's cis fit.
+**Major Innovation:** Use prior datasets to inform Bayesian priors on guide-level effects.
 
-**What This Means:**
-When fitting the cis model, bayesDREAM estimates guide-level effects with two key parameters:
-- **`x_eff_g`**: Guide mean (expected expression level for each guide)
-- **`sigma_eff`**: Guide variance (uncertainty in expression for each guide)
+**The Concept:**
 
-The framework allows you to **use prior knowledge** (e.g., from ATAC-seq) to inform these priors, improving inference when you have multi-modal data.
+When you have prior information about guide effects (e.g., from a previous GEX experiment on the same guides/cell line), you can use that to improve inference on a new dataset (e.g., ATAC-seq where signal is noisier).
 
-**Example: Using ATAC to Inform Gene Expression Priors**
+**Two Types of Priors:**
+
+1. **Guide-level priors**: Provide expected log2FC for each specific guide
+   - Use case: Prior GEX experiment → inform current ATAC fitting
+   - Example: "Guide X showed +2.5 log2FC in GEX, expect similar in ATAC"
+
+2. **Hyperparameter-level priors**: Inform the hierarchical distribution parameters
+   - Use case: Prior dataset statistics → improve current dataset's hierarchical priors
+   - Example: "Guides typically vary between -3 and +5 log2FC based on prior data"
+
+**Current Implementation Status (~30% complete):**
+
+**✅ What's Implemented** (in `bayesDREAM/fitting/cis.py`):
 
 ```python
-# Scenario: You have ATAC + GEX data for GFI1B perturbation
-# Goal: Use ATAC accessibility to inform priors on GFI1B expression levels
-
-# Step 1: Compute priors from ATAC data
-# Higher ATAC accessibility → expect higher gene expression
-atac_peak = 'chr9:132283881-132284881'  # GFI1B promoter
-atac_values = atac_counts.loc[atac_peak, :]  # Per-guide ATAC levels
-
-# Compute guide-level ATAC statistics
-guide_atac_mean = meta.groupby('guide')[atac_values].mean()
-guide_atac_var = meta.groupby('guide')[atac_values].var()
-
-# Transform to expression scale (e.g., log-linear relationship)
-prior_x_eff_g = np.log2(1 + guide_atac_mean * scaling_factor)
-prior_sigma_eff = np.sqrt(guide_atac_var) / guide_atac_mean
-
-# Step 2: Initialize model with gene expression as cis
-model = bayesDREAM(
-    meta=meta,
-    counts=gene_counts,
-    gene_meta=gene_meta,
-    cis_gene='GFI1B',
-    output_dir='./output'
-)
-
-# Step 3: Fit cis model with ATAC-informed priors
-# ⚠️ INFRASTRUCTURE SETUP - NOT YET FULLY IMPLEMENTED
-# The fit_cis method has parameters for custom priors, but full integration pending
-model.fit_cis(
-    sum_factor_col='sum_factor',
-    prior_x_eff_g=prior_x_eff_g,      # Custom mean priors from ATAC
-    prior_sigma_eff=prior_sigma_eff   # Custom variance priors from ATAC
-)
-
-# Benefits:
-# - Guides with high ATAC → prior expects high expression
-# - Guides with variable ATAC → prior allows more uncertainty
-# - Improves inference when GEX data is noisy or sparse
+# Lines 175-176: Parameters added to fit_cis()
+def fit_cis(
+    ...
+    manual_guide_effects: pd.DataFrame = None,  # Guide-level log2FC priors
+    prior_strength: float = 1.0,                # How much to trust the priors
+    ...
+):
 ```
 
-**Status:**
-- ✅ **Infrastructure set up**: `fit_cis()` signature supports `prior_x_eff_g` and `prior_sigma_eff` parameters
-- 🚧 **Full implementation pending**: Complete integration of custom priors into Pyro model
-- 📋 **Use case validated**: ATAC → GEX prior transformation tested conceptually
-- 🔜 **Coming soon**: Full support for cross-modality prior specification
+**Processing infrastructure:**
+- ✅ Validates `manual_guide_effects` format (requires columns: `guide`, `log2FC`)
+- ✅ Creates guide-to-log2FC mapping from DataFrame
+- ✅ Generates PyTorch tensors:
+  - `manual_guide_log2fc_tensor` (shape: G) - log2FC for each guide
+  - `manual_guide_mask_tensor` (shape: G) - indicates which guides have priors
+- ✅ Prints diagnostic info (how many guides have priors, prior strength value)
+- ✅ Design documented with pseudocode (lines 204-228)
 
-**Why This Matters:**
-- **Improved inference**: Leverage complementary data for better parameter estimates
-- **Biological realism**: Incorporate mechanistic knowledge (chromatin → expression)
-- **Data efficiency**: Better estimates when one modality is higher quality
-- **Hypothesis testing**: Test if ATAC-informed priors improve model fit
+**❌ Not Yet Implemented:**
 
-**Alternative Approaches (Currently Implemented):**
+1. **Pyro model integration**: Tensors are created but not passed to `_model_x()`
+   - Need to modify lines 116-120 to use manual priors when available
+   - Need to decide: override hierarchical prior or combine them?
+
+2. **Hyperparameter-level priors** (main use case): No infrastructure yet
+   - Need parameters: `prior_mu_x_mean`, `prior_mu_x_sd`, `prior_sigma_eff_mean`, `prior_sigma_eff_sd`
+   - Currently lines 277-295 always compute from current data
+   - Need weighted combination of prior + current statistics
+
+3. **Prior transformation utilities**: No cross-modality scaling functions
+   - Need: GEX scale → ATAC scale transformations
+   - Need: Validation that prior and current datasets are comparable
+
+**Example Usage (Once Complete):**
 
 ```python
-# Approach 1: Use ATAC to SELECT which gene to model
-# (Feature selection, not prior specification)
-most_variable_gene = identify_from_atac(atac_counts, atac_meta)
+# Scenario: Prior GEX experiment → inform current ATAC experiment
+# Same guides, same cell line, different modality
 
-model = bayesDREAM(
-    meta=meta,
-    counts=gene_counts,
-    cis_gene=most_variable_gene  # Selection based on ATAC
-)
-model.fit_cis()  # Standard fit, no custom priors
+# Step 1: Extract guide effects from prior GEX dataset
+prior_gex_model = bayesDREAM(meta=prior_meta, counts=prior_gex_counts, cis_gene='GFI1B')
+prior_gex_model.fit_cis()
 
-# Approach 2: Use ATAC peak AS the cis feature
-# (Different cis modality, not prior on genes)
-model = bayesDREAM(
-    meta=meta,
-    counts=atac_counts,
+# Get guide-level statistics
+prior_guide_effects = pd.DataFrame({
+    'guide': guide_names,
+    'log2FC': prior_gex_model.posterior_samples_cis['x_eff_g'].mean(dim=0).cpu().numpy()
+})
+
+# Step 2: Use as priors for current ATAC dataset
+current_atac_model = bayesDREAM(
+    meta=current_meta,
+    counts=current_atac_counts,
     primary_modality='atac',
     cis_feature='chr9:132283881-132284881'
 )
-model.add_gene_modality(gene_counts, gene_meta)
-model.fit_cis()  # Fits ATAC as cis
-model.fit_trans(modality_name='gene')  # Genes as trans
+
+# Fit with guide-level priors (🚧 WHEN IMPLEMENTED)
+current_atac_model.fit_cis(
+    sum_factor_col='sum_factor',
+    manual_guide_effects=prior_guide_effects,  # From prior GEX
+    prior_strength=2.0  # Trust prior moderately
+)
+
+# Benefits:
+# - Guides with strong prior info → more stable ATAC estimates
+# - Guides with weak ATAC signal → informed by GEX priors
+# - Overall: Better parameter estimates in noisy modality
 ```
 
-**Roadmap:**
-1. Complete prior parameter integration in `fitting/cis.py`
-2. Add validation for prior shapes and ranges
-3. Implement prior transformation utilities (e.g., ATAC → expression scale)
-4. Add examples and tests for ATAC-informed priors
-5. Extend to other prior sources (e.g., transcript → splicing, protein → RNA)
+**Alternative: Hyperparameter-level priors (🚧 PLANNED)**
+
+```python
+# Use prior dataset to inform hierarchical hyperparameters
+# (Not guide-specific, but population-level)
+
+# From prior dataset
+prior_mu_mean = 2.5    # Average log2FC across all guides
+prior_mu_sd = 1.8      # Typical spread of guide effects
+prior_sigma_mean = 0.4 # Typical within-guide variability
+prior_sigma_sd = 0.2   # Uncertainty in within-guide variability
+
+# Fit current dataset with informed hyperparameters
+current_model.fit_cis(
+    sum_factor_col='sum_factor',
+    prior_mu_x_mean=prior_mu_mean,          # 🚧 NOT YET IMPLEMENTED
+    prior_mu_x_sd=prior_mu_sd,              # 🚧 NOT YET IMPLEMENTED
+    prior_sigma_eff_mean=prior_sigma_mean,  # 🚧 NOT YET IMPLEMENTED
+    prior_sigma_eff_sd=prior_sigma_sd,      # 🚧 NOT YET IMPLEMENTED
+    prior_weight=0.5  # 50% prior, 50% current data
+)
+```
+
+**Why This Matters:**
+
+- **Improved inference**: Leverage high-quality data to inform analysis of noisier modalities
+- **Biological realism**: Incorporate mechanistic knowledge (e.g., chromatin accessibility affects expression)
+- **Data efficiency**: Better estimates when one dataset has stronger signal
+- **Hypothesis testing**: Test if prior-informed models improve fit quality
+
+**Implementation Roadmap:**
+
+**Phase 1: Complete guide-level priors** (Immediate - ~1-2 weeks)
+- [ ] Pass `manual_guide_log2fc_tensor` and `manual_guide_mask_tensor` to `_model_x()`
+- [ ] Modify Pyro model to use manual priors for specific guides
+- [ ] Decide on prior combination strategy (override vs. weighted)
+- [ ] Add tests and validation
+
+**Phase 2: Add hyperparameter-level priors** (Primary use case - ~2-3 weeks)
+- [ ] Add `prior_mu_x_mean`, `prior_mu_x_sd`, `prior_sigma_eff_mean`, `prior_sigma_eff_sd` parameters
+- [ ] Implement weighted combination of prior + current statistics
+- [ ] Add prior transformation utilities for cross-modality priors
+- [ ] Validate with simulated data
+
+**Phase 3: Polish and document** (~1 week)
+- [ ] Add comprehensive examples
+- [ ] Create diagnostic plots showing prior influence
+- [ ] Document best practices for prior specification
+- [ ] Add tests with real multi-modal data
+
+**Current Code Location:**
+- Infrastructure: `bayesDREAM/fitting/cis.py`, lines 164-228
+- Pyro model to modify: `bayesDREAM/fitting/cis.py`, lines 37-167
 
 ---
 
@@ -593,7 +639,7 @@ model.fit_trans()
 |--------|--------|-------|
 | **Modalities** | Gene expression only | Genes, transcripts, splicing, ATAC, custom |
 | **Cis Feature** | Must be a gene | Any feature type (genes, peaks, junctions) |
-| **Prior Integration** | Not supported | Infrastructure for ATAC-informed priors (partial implementation) |
+| **Prior-Informed Fitting** | Not supported | Infrastructure ~30% complete (guide-level priors) |
 | **Plotting** | Minimal | Comprehensive visualization suite |
 | **Architecture** | 4,537-line monolith | Modular (311-line main file) |
 | **Testing** | Limited | Comprehensive test suite |
@@ -603,12 +649,26 @@ model.fit_trans()
 
 ## 🚀 Future Directions
 
+**Immediate (In Progress):**
+- **Complete prior-informed cis fitting** (Infrastructure ~30% complete):
+  - **Phase 1** (1-2 weeks): Integrate guide-level priors into Pyro model
+    - Pass `manual_guide_log2fc_tensor` and `manual_guide_mask_tensor` to `_model_x()`
+    - Modify prior sampling to use manual priors when available
+    - Add validation and tests
+  - **Phase 2** (2-3 weeks): Add hyperparameter-level priors (main use case)
+    - Add `prior_mu_x_mean`, `prior_mu_x_sd`, `prior_sigma_eff_mean`, `prior_sigma_eff_sd` parameters
+    - Implement weighted combination of prior + current statistics
+    - Add cross-modality transformation utilities (GEX ↔ ATAC scale)
+  - **Phase 3** (1 week): Documentation and examples
+    - Add comprehensive examples with real multi-modal data
+    - Create diagnostic plots showing prior influence
+    - Document best practices
+
 **Near-term:**
-- **Complete prior-informed cis fitting** (ATAC → gene expression priors for x_eff_g and sigma_eff)
 - Per-modality technical fitting (separate alpha_y for each modality)
 - Cross-modality trans effects (e.g., gene → splicing)
 - Automated model comparison and selection
-- Prior transformation utilities for different modality combinations
+- Prior transformation utilities for different modality pairs
 
 **Long-term:**
 - Integration with single-cell multi-omics (CITE-seq, TEA-seq)
@@ -622,10 +682,10 @@ model.fit_trans()
 
 The refactored bayesDREAM framework transforms a gene-specific tool into a **flexible platform for multi-modal perturbation analysis**. Key innovations include:
 
-1. **Scientific Flexibility**: Model any molecular layer as cis or trans
-2. **Prior Integration**: Leverage ATAC or other data for hypothesis-driven cis selection
-3. **Comprehensive Visualization**: Publication-ready plots for all modalities
-4. **Maintainable Architecture**: Modular design enabling rapid feature development
+1. **Scientific Flexibility**: Model any molecular layer (genes, ATAC peaks, junctions) as cis or trans
+2. **Multi-Modal Integration**: Comprehensive support for genes, transcripts, splicing, ATAC-seq, and custom modalities
+3. **Comprehensive Visualization**: Publication-ready plots for all modalities with interactive features
+4. **Maintainable Architecture**: Modular design enabling rapid feature development (93% reduction in main file)
 5. **Backward Compatibility**: Zero disruption to existing workflows
 
 This positions bayesDREAM as a **mature, production-ready framework** for multi-modal CRISPR screens and perturbation studies.

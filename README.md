@@ -18,11 +18,17 @@ Supports multiple molecular modalities including genes, transcripts, splicing, A
 
 ### Key Innovations
 
-**🧬 Flexible Cis Feature Selection & Prior-Informed Fitting**
+**🧬 Flexible Cis Feature Selection**
 - Cis feature can be any molecular measurement (gene, ATAC peak, junction, etc.)
 - Use `cis_gene='GFI1B'` for genes or `cis_feature='chr9:132283881-132284881'` for ATAC peaks
-- Infrastructure for using multi-modal data to inform Bayesian priors (e.g., ATAC → gene expression priors for guide mean `x_eff_g` and variance `sigma_eff`)
-- 🚧 Full prior integration coming soon - signature in place, Pyro model integration pending
+- Model chromatin accessibility, regulatory elements, or any feature as the direct perturbation target
+
+**🔬 Prior-Informed Fitting** (🚧 In Development - ~30% complete)
+- Use prior datasets to inform Bayesian priors on guide effects
+- Guide-level priors: Provide expected log2FC for specific guides from prior experiments
+- Hyperparameter-level priors: Use prior dataset statistics to inform hierarchical parameters
+- Main use case: Prior GEX data → improve ATAC inference (or vice versa)
+- See [CODEBASE_EVOLUTION.md](CODEBASE_EVOLUTION.md#2c-prior-informed-cis-fitting--in-development) for implementation status
 
 **🔬 Multi-Modal Integration**
 - Add transcripts, splicing, ATAC-seq, and custom modalities to any analysis
@@ -147,7 +153,7 @@ atac_mod = model.get_modality('atac')
 ### ATAC-Guided Analysis
 
 ```python
-# Approach 1: Use ATAC peak as cis feature
+# Use ATAC peak as cis feature to model regulatory elements
 model = bayesDREAM(
     meta=meta,
     counts=atac_counts,
@@ -161,29 +167,54 @@ model = bayesDREAM(
 model.add_gene_modality(gene_counts=gene_counts, gene_meta=gene_meta)
 
 # Fit: Models how ATAC accessibility drives gene expression
-model.fit_cis()  # Cis = ATAC peak
+model.fit_cis()  # Cis = ATAC peak accessibility
 model.fit_trans(modality_name='gene')  # Trans = Genes regulated by peak
 ```
 
+### Prior-Informed Fitting (🚧 In Development)
+
+**Use Case:** You have prior information about guide effects (e.g., from a previous GEX experiment) and want to use that to improve inference on a new dataset (e.g., ATAC-seq).
+
+**Current Status:** Infrastructure ~30% complete. Parameters exist but not yet integrated into Pyro model.
+
 ```python
-# Approach 2: Use ATAC to inform priors on gene expression (🚧 coming soon)
-# Compute guide-level statistics from ATAC
-atac_peak = 'chr9:132283881-132284881'
-guide_atac_mean = meta.groupby('guide')[atac_counts.loc[atac_peak]].mean()
-guide_atac_var = meta.groupby('guide')[atac_counts.loc[atac_peak]].var()
+# Scenario: Prior GEX experiment → inform current ATAC experiment
+# Same guides, same cell line, different modality
 
-# Transform to expression scale
-prior_x_eff_g = np.log2(1 + guide_atac_mean * scaling_factor)
-prior_sigma_eff = np.sqrt(guide_atac_var) / guide_atac_mean
+# Step 1: Extract guide effects from prior GEX dataset
+prior_gex_model = bayesDREAM(meta=prior_meta, counts=prior_gex_counts, cis_gene='GFI1B')
+prior_gex_model.fit_cis()
 
-# Fit with ATAC-informed priors (infrastructure in place)
-model = bayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B')
-model.fit_cis(
-    sum_factor_col='sum_factor',
-    prior_x_eff_g=prior_x_eff_g,      # Custom priors from ATAC
-    prior_sigma_eff=prior_sigma_eff   # Improves inference when GEX is noisy
+# Get guide-level statistics
+prior_guide_effects = pd.DataFrame({
+    'guide': guide_names,
+    'log2FC': prior_gex_model.posterior_samples_cis['x_eff_g'].mean(dim=0).cpu().numpy()
+})
+
+# Step 2: Use as priors for current ATAC dataset
+current_atac_model = bayesDREAM(
+    meta=current_meta,
+    counts=current_atac_counts,
+    primary_modality='atac',
+    cis_feature='chr9:132283881-132284881'
 )
+
+# Fit with guide-level priors (🚧 NOT YET FUNCTIONAL)
+current_atac_model.fit_cis(
+    sum_factor_col='sum_factor',
+    manual_guide_effects=prior_guide_effects,  # Parameter exists
+    prior_strength=2.0  # Parameter exists
+)
+# NOTE: Parameters are accepted but priors not yet integrated into Pyro model
 ```
+
+**Implementation Status:**
+- ✅ Parameters added to `fit_cis()`: `manual_guide_effects`, `prior_strength`
+- ✅ Tensor preparation and validation
+- ❌ Integration into Pyro model (in progress)
+- ❌ Hyperparameter-level priors (planned)
+
+See [CODEBASE_EVOLUTION.md](CODEBASE_EVOLUTION.md#2c-prior-informed-cis-fitting--in-development) for detailed roadmap.
 
 ### Visualization
 
