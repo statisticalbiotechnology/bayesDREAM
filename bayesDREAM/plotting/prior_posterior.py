@@ -60,15 +60,15 @@ def plot_scalar_parameter(
     else:
         fig = ax.figure
 
-    # Check for extreme prior values and clip if needed
-    prior_max = np.max(prior_samples)
-    post_max = np.max(posterior_samples)
+    # Check for extreme prior values and clip symmetrically if needed
+    prior_max = np.max(np.abs(prior_samples))
+    post_max = np.max(np.abs(posterior_samples))
     if prior_max > 1e10 or prior_max > 1000 * post_max:
-        # Clip prior to reasonable range for visualization
-        clip_upper = np.percentile(posterior_samples, 99.9) * 10
-        prior_samples = np.clip(prior_samples, None, clip_upper)
-        warnings.warn(f"Prior samples contain extreme values (max={prior_max:.2e}). "
-                     f"Clipping to {clip_upper:.2e} for visualization. "
+        # Clip prior to reasonable range for visualization (symmetric bounds)
+        clip_bound = np.percentile(np.abs(posterior_samples), 99.9) * 10
+        prior_samples = np.clip(prior_samples, -clip_bound, clip_bound)
+        warnings.warn(f"Prior samples contain extreme values (max abs={prior_max:.2e}). "
+                     f"Clipping to ±{clip_bound:.2e} for visualization. "
                      f"This does not affect the actual model fitting.")
 
     # Default KDE kwargs
@@ -483,15 +483,15 @@ def _plot_2d_violin(
     n_dims = len(dimension_names)
     n_features = len(feature_names)
 
-    # Check for extreme prior values and clip if needed
-    prior_max = np.max(prior_samples)
-    post_max = np.max(posterior_samples)
+    # Check for extreme prior values and clip symmetrically if needed
+    prior_max = np.max(np.abs(prior_samples))
+    post_max = np.max(np.abs(posterior_samples))
     if prior_max > 1e10 or prior_max > 1000 * post_max:
-        # Clip prior to reasonable range for visualization
-        clip_upper = np.percentile(posterior_samples, 99.9) * 10
-        prior_samples = np.clip(prior_samples, None, clip_upper)
-        warnings.warn(f"Prior samples contain extreme values (max={prior_max:.2e}). "
-                     f"Clipping to {clip_upper:.2e} for visualization. "
+        # Clip prior to reasonable range for visualization (symmetric bounds)
+        clip_bound = np.percentile(np.abs(posterior_samples), 99.9) * 10
+        prior_samples = np.clip(prior_samples, -clip_bound, clip_bound)
+        warnings.warn(f"Prior samples contain extreme values (max abs={prior_max:.2e}). "
+                     f"Clipping to ±{clip_bound:.2e} for visualization. "
                      f"This does not affect the actual model fitting.")
 
     # Auto-compute figure size
