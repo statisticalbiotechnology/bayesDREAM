@@ -172,6 +172,76 @@ def reorder_xtrue_by_barcode(
 
 
 # ============================================================================
+# Feature Lookup Utilities
+# ============================================================================
+
+def _get_feature_index(feature: str, modality) -> Optional[int]:
+    """
+    Robustly find feature index, checking multiple locations.
+
+    Checks feature_meta.index, feature_meta columns, and feature_names attribute.
+
+    Parameters
+    ----------
+    feature : str
+        Feature name to find
+    modality : Modality
+        Modality object to search in
+
+    Returns
+    -------
+    int or None
+        Feature index if found, None otherwise
+    """
+    # Check index first
+    if feature in modality.feature_meta.index:
+        return modality.feature_meta.index.get_loc(feature)
+
+    # Check common column names
+    for col in ['gene', 'junction', 'feature', 'name', 'coord.intron']:
+        if col in modality.feature_meta.columns:
+            mask = modality.feature_meta[col] == feature
+            if mask.sum() > 0:
+                return mask.idxmax()
+
+    # Check feature_names attribute
+    if hasattr(modality, 'feature_names'):
+        feature_names = modality.feature_names
+        if isinstance(feature_names, (list, np.ndarray)):
+            feature_names_list = list(feature_names)
+            if feature in feature_names_list:
+                return feature_names_list.index(feature)
+
+    return None
+
+
+def _to_scalar(val):
+    """
+    Convert value to Python scalar.
+
+    Handles PyTorch tensors, numpy arrays, and Python scalars.
+
+    Parameters
+    ----------
+    val : tensor, array, or scalar
+        Value to convert
+
+    Returns
+    -------
+    float
+        Python scalar
+    """
+    # PyTorch tensor
+    if hasattr(val, 'item'):
+        return val.item()
+    # Numpy array
+    if isinstance(val, np.ndarray):
+        return float(val)
+    # Already scalar
+    return float(val)
+
+
+# ============================================================================
 # Technical Group Utilities
 # ============================================================================
 
@@ -519,15 +589,9 @@ def plot_negbinom_xy(
         Only applies to uncorrected plots
     """
     # Get data
-    feature_idx = modality.feature_meta.index.get_loc(feature) if feature in modality.feature_meta.index else None
+    feature_idx = _get_feature_index(feature, modality)
     if feature_idx is None:
-        # Try by gene name
-        if 'gene' in modality.feature_meta.columns:
-            mask = modality.feature_meta['gene'] == feature
-            if mask.sum() > 0:
-                feature_idx = mask.idxmax()
-        if feature_idx is None:
-            raise ValueError(f"Feature '{feature}' not found in modality")
+        raise ValueError(f"Feature '{feature}' not found in modality")
 
     # Get counts for this feature
     if modality.cells_axis == 1:
@@ -583,9 +647,9 @@ def plot_negbinom_xy(
                 # Apply alpha_y correction
                 alpha_y_full = modality.alpha_y_prefit  # [S or 1, C, T]
                 if alpha_y_full.ndim == 3:
-                    alpha_y_val = alpha_y_full[:, group_code, feature_idx].mean()
+                    alpha_y_val = _to_scalar(alpha_y_full[:, group_code, feature_idx].mean())
                 else:
-                    alpha_y_val = alpha_y_full[group_code, feature_idx]
+                    alpha_y_val = _to_scalar(alpha_y_full[group_code, feature_idx])
                 y_expr = df_group['y_obs'] / (df_group['sum_factor'] * alpha_y_val)
             else:
                 y_expr = df_group['y_obs'] / df_group['sum_factor']
@@ -704,7 +768,7 @@ def plot_binomial_xy(
         Lighter colors = more NTC cells, Darker colors = fewer NTC cells
     """
     # Get data
-    feature_idx = modality.feature_meta.index.get_loc(feature) if feature in modality.feature_meta.index else None
+    feature_idx = _get_feature_index(feature, modality)
     if feature_idx is None:
         raise ValueError(f"Feature '{feature}' not found in modality")
 
@@ -854,7 +918,7 @@ def plot_multinomial_xy(
     if show_ntc_gradient:
         warnings.warn("NTC gradient coloring not yet implemented for multinomial distributions - using standard colors")
     # Get data
-    feature_idx = modality.feature_meta.index.get_loc(feature) if feature in modality.feature_meta.index else None
+    feature_idx = _get_feature_index(feature, modality)
     if feature_idx is None:
         raise ValueError(f"Feature '{feature}' not found in modality")
 
@@ -978,7 +1042,7 @@ def plot_normal_xy(
         Only applies to uncorrected plots
     """
     # Get data
-    feature_idx = modality.feature_meta.index.get_loc(feature) if feature in modality.feature_meta.index else None
+    feature_idx = _get_feature_index(feature, modality)
     if feature_idx is None:
         raise ValueError(f"Feature '{feature}' not found in modality")
 
@@ -1044,9 +1108,9 @@ def plot_normal_xy(
                 if hasattr(modality, 'alpha_y_prefit_add'):
                     alpha_y_add = modality.alpha_y_prefit_add
                     if alpha_y_add.ndim == 3:
-                        correction = alpha_y_add[:, group_code, feature_idx].mean()
+                        correction = _to_scalar(alpha_y_add[:, group_code, feature_idx].mean())
                     else:
-                        correction = alpha_y_add[group_code, feature_idx]
+                        correction = _to_scalar(alpha_y_add[group_code, feature_idx])
                     y_plot = y_plot - correction
 
             # Get is_ntc for this group
@@ -1147,7 +1211,7 @@ def plot_mvnormal_xy(
     if show_ntc_gradient:
         warnings.warn("NTC gradient coloring not yet implemented for mvnormal distributions - using standard colors")
     # Get data
-    feature_idx = modality.feature_meta.index.get_loc(feature) if feature in modality.feature_meta.index else None
+    feature_idx = _get_feature_index(feature, modality)
     if feature_idx is None:
         raise ValueError(f"Feature '{feature}' not found in modality")
 
@@ -1217,9 +1281,9 @@ def plot_mvnormal_xy(
                         # alpha_y_add shape: [S or 1, C, T, D] or [C, T, D]
                         # Need to extract [group_code, feature_idx, d]
                         if alpha_y_add.ndim == 4:
-                            correction = alpha_y_add[:, group_code, feature_idx, d].mean()
+                            correction = _to_scalar(alpha_y_add[:, group_code, feature_idx, d].mean())
                         elif alpha_y_add.ndim == 3:
-                            correction = alpha_y_add[group_code, feature_idx, d]
+                            correction = _to_scalar(alpha_y_add[group_code, feature_idx, d])
                         else:
                             correction = 0  # Fallback
                         y_plot = y_plot - correction
