@@ -11,6 +11,9 @@ import warnings
 
 from .utils import (
     compute_distribution_overlap,
+    compute_kl_divergence,
+    compute_posterior_coverage,
+    compute_all_metrics,
     prepare_violin_data,
     compute_log2fc_vs_overlap,
     subset_features_by_mismatch
@@ -23,6 +26,7 @@ def plot_scalar_parameter(
     param_name: str,
     ax: Optional[plt.Axes] = None,
     figsize: Tuple[int, int] = (8, 5),
+    metric: str = 'posterior_coverage',
     **kwargs
 ) -> plt.Figure:
     """
@@ -40,6 +44,8 @@ def plot_scalar_parameter(
         Matplotlib axes to plot on
     figsize : tuple
         Figure size if creating new figure
+    metric : str
+        Comparison metric: 'overlap', 'kl_divergence', or 'posterior_coverage' (default)
     **kwargs
         Additional arguments passed to sns.kdeplot
 
@@ -90,8 +96,18 @@ def plot_scalar_parameter(
         warnings.warn(f"KDE failed for posterior samples ({str(e)}), using histogram instead")
         ax.hist(posterior_samples, bins=30, alpha=0.5, color='#ff7f0e', label='Posterior', density=True)
 
-    # Compute overlap
-    overlap = compute_distribution_overlap(prior_samples, posterior_samples)
+    # Compute chosen metric
+    if metric == 'overlap':
+        metric_value = compute_distribution_overlap(prior_samples, posterior_samples)
+        metric_label = f'{metric_value:.1f}% overlap'
+    elif metric == 'kl_divergence':
+        metric_value = compute_kl_divergence(posterior_samples, prior_samples)
+        metric_label = f'KL divergence: {metric_value:.3f} nats'
+    elif metric == 'posterior_coverage':
+        metric_value = compute_posterior_coverage(posterior_samples, prior_samples)
+        metric_label = f'{metric_value:.1f}% posterior coverage'
+    else:
+        raise ValueError(f"Unknown metric: {metric}. Must be 'overlap', 'kl_divergence', or 'posterior_coverage'")
 
     # Add vertical lines for means
     ax.axvline(prior_samples.mean(), color='#1f77b4', linestyle='--', alpha=0.7,
@@ -101,7 +117,7 @@ def plot_scalar_parameter(
 
     ax.set_xlabel('Value')
     ax.set_ylabel('Density')
-    ax.set_title(f'{param_name}\n({overlap:.1f}% overlap)')
+    ax.set_title(f'{param_name}\n({metric_label})')
     ax.legend()
     ax.grid(True, alpha=0.3)
 
@@ -119,6 +135,7 @@ def plot_1d_parameter(
     subset_features: Optional[List[str]] = None,
     plot_type: str = 'auto',
     max_violin_features: int = 100,
+    metric: str = 'posterior_coverage',
     ax: Optional[plt.Axes] = None,
     figsize: Optional[Tuple[int, int]] = None,
     **kwargs
@@ -148,6 +165,8 @@ def plot_1d_parameter(
         'auto', 'violin', or 'scatter'
     max_violin_features : int
         Maximum features for violin plot before switching to scatter
+    metric : str
+        Comparison metric for scatter plots: 'overlap', 'kl_divergence', or 'posterior_coverage' (default)
     ax : plt.Axes, optional
         Matplotlib axes to plot on
     figsize : tuple, optional
@@ -211,7 +230,7 @@ def plot_1d_parameter(
     elif plot_type == 'scatter':
         return _plot_1d_scatter(
             prior_samples, posterior_samples, feature_names, param_name,
-            max_violin_features, ax, figsize, **kwargs
+            max_violin_features, metric, ax, figsize, **kwargs
         )
     else:
         raise ValueError(f"Unknown plot_type: {plot_type}. Must be 'auto', 'violin', or 'scatter'")
@@ -305,33 +324,54 @@ def _plot_1d_scatter(
     feature_names: List[str],
     param_name: str,
     max_features_for_subset: int = 100,
+    metric: str = 'posterior_coverage',
     ax: Optional[plt.Axes] = None,
     figsize: Tuple[int, int] = (10, 6),
     show_top_n: int = 10,
     **kwargs
 ) -> plt.Figure:
-    """Internal: Create scatter plot of log2FC vs overlap."""
+    """Internal: Create scatter plot of log2FC vs metric."""
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize)
     else:
         fig = ax.figure
 
-    # Compute log2FC and overlap for all features
-    df = compute_log2fc_vs_overlap(prior_samples, posterior_samples, feature_names)
+    # Compute log2FC and chosen metric for all features
+    df = compute_log2fc_vs_overlap(prior_samples, posterior_samples, feature_names, metric=metric)
+
+    # Determine metric column name and y-axis label
+    if metric == 'overlap':
+        metric_col = 'overlap'
+        ylabel = 'Distribution Overlap (%)'
+        ascending = True  # Lower is more different
+    elif metric == 'kl_divergence':
+        metric_col = 'kl_divergence'
+        ylabel = 'KL Divergence (nats)'
+        ascending = False  # Higher is more different
+    elif metric == 'posterior_coverage':
+        metric_col = 'posterior_coverage'
+        ylabel = 'Posterior Coverage (%)'
+        ascending = True  # Lower indicates prior-posterior mismatch
 
     # Plot scatter
     scatter_kwargs = {'alpha': 0.6, 's': 30}
     scatter_kwargs.update(kwargs)
 
-    ax.scatter(df['log2fc'], df['overlap'], **scatter_kwargs)
+    ax.scatter(df['log2fc'], df[metric_col], **scatter_kwargs)
 
-    # Annotate top mismatches (lowest overlap)
+    # Annotate top mismatches
     if show_top_n > 0:
-        top_mismatch = df.nsmallest(show_top_n, 'overlap')
+        if ascending:
+            # For overlap/coverage: lower is more different
+            top_mismatch = df.nsmallest(show_top_n, metric_col)
+        else:
+            # For KL divergence: higher is more different
+            top_mismatch = df.nlargest(show_top_n, metric_col)
+
         for _, row in top_mismatch.iterrows():
             ax.annotate(
                 row['feature'],
-                xy=(row['log2fc'], row['overlap']),
+                xy=(row['log2fc'], row[metric_col]),
                 xytext=(5, 5),
                 textcoords='offset points',
                 fontsize=8,
@@ -340,7 +380,7 @@ def _plot_1d_scatter(
 
     ax.axvline(0, color='gray', linestyle='--', alpha=0.5)
     ax.set_xlabel('log2(Posterior mean / Prior mean)')
-    ax.set_ylabel('Distribution Overlap (%)')
+    ax.set_ylabel(ylabel)
     ax.set_title(f'{param_name} (Prior vs Posterior)\n'
                  f'{len(feature_names)} features')
     ax.grid(True, alpha=0.3)
@@ -362,6 +402,7 @@ def plot_2d_parameter(
     custom_order: Optional[List[str]] = None,
     subset_features: Optional[List[str]] = None,
     max_violin_features: int = 100,
+    metric: str = 'posterior_coverage',
     figsize: Optional[Tuple[int, int]] = None,
     **kwargs
 ) -> Union[plt.Figure, List[plt.Figure]]:
@@ -394,6 +435,8 @@ def plot_2d_parameter(
         Subset to specific features
     max_violin_features : int
         Max features for violin before switching to scatter
+    metric : str
+        Comparison metric for scatter plots: 'overlap', 'kl_divergence', or 'posterior_coverage' (default)
     figsize : tuple, optional
         Figure size
     **kwargs
@@ -462,7 +505,7 @@ def plot_2d_parameter(
     elif plot_type == 'scatter':
         return _plot_2d_scatter(
             prior_samples, posterior_samples, feature_names, dimension_names,
-            param_name, color_by, separate_plots, figsize, **kwargs
+            param_name, color_by, separate_plots, metric, figsize, **kwargs
         )
     else:
         raise ValueError(f"Unknown plot_type: {plot_type}")
@@ -570,6 +613,7 @@ def _plot_2d_scatter(
     param_name: str,
     color_by: str,
     separate_plots: bool,
+    metric: str,
     figsize: Optional[Tuple[int, int]],
     **kwargs
 ) -> Union[plt.Figure, List[plt.Figure]]:
@@ -585,6 +629,8 @@ def _plot_2d_scatter(
                 posterior_samples[:, :, dim_idx],
                 feature_names,
                 f'{param_name} ({dim_name})',
+                max_features_for_subset=100,
+                metric=metric,
                 figsize=figsize or (10, 6),
                 **kwargs
             )
@@ -598,13 +644,25 @@ def _plot_2d_scatter(
 
         fig, ax = plt.subplots(figsize=figsize)
 
-        # Compute log2FC and overlap for all features and dimensions
+        # Determine metric column name and y-axis label
+        if metric == 'overlap':
+            metric_col = 'overlap'
+            ylabel = 'Distribution Overlap (%)'
+        elif metric == 'kl_divergence':
+            metric_col = 'kl_divergence'
+            ylabel = 'KL Divergence (nats)'
+        elif metric == 'posterior_coverage':
+            metric_col = 'posterior_coverage'
+            ylabel = 'Posterior Coverage (%)'
+
+        # Compute log2FC and metric for all features and dimensions
         all_data = []
         for dim_idx, dim_name in enumerate(dimension_names):
             df = compute_log2fc_vs_overlap(
                 prior_samples[:, :, dim_idx],
                 posterior_samples[:, :, dim_idx],
-                feature_names
+                feature_names,
+                metric=metric
             )
             df['dimension'] = dim_name
             all_data.append(df)
@@ -615,7 +673,7 @@ def _plot_2d_scatter(
         if color_by == 'dimension':
             for dim_name in dimension_names:
                 df_dim = df_all[df_all['dimension'] == dim_name]
-                ax.scatter(df_dim['log2fc'], df_dim['overlap'],
+                ax.scatter(df_dim['log2fc'], df_dim[metric_col],
                           label=dim_name, alpha=0.6, s=30, **kwargs)
 
             # Use "Technical Group" for alpha parameters, "Dimension" for others
@@ -629,7 +687,7 @@ def _plot_2d_scatter(
 
             for feature in feature_names:
                 df_feat = df_all[df_all['feature'] == feature]
-                ax.scatter(df_feat['log2fc'], df_feat['overlap'],
+                ax.scatter(df_feat['log2fc'], df_feat[metric_col],
                           label=feature, alpha=0.6, s=30, **kwargs)
 
             if len(feature_names) <= 20:
@@ -637,7 +695,7 @@ def _plot_2d_scatter(
 
         ax.axvline(0, color='gray', linestyle='--', alpha=0.5)
         ax.set_xlabel('log2(Posterior mean / Prior mean)')
-        ax.set_ylabel('Distribution Overlap (%)')
+        ax.set_ylabel(ylabel)
         ax.set_title(f'{param_name} (Prior vs Posterior)\n'
                      f'{len(feature_names)} features × {n_dims} dimensions')
         ax.grid(True, alpha=0.3)

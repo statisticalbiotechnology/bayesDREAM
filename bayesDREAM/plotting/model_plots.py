@@ -62,6 +62,7 @@ class PlottingMixin:
         order_by: str = 'mean',
         subset_features: Optional[List[str]] = None,
         plot_type: str = 'auto',
+        metric: str = 'posterior_coverage',
         cell_line_index: Optional[int] = None,  # Deprecated, backward compatibility
         **kwargs
     ) -> plt.Figure:
@@ -83,6 +84,8 @@ class PlottingMixin:
             Subset to specific features
         plot_type : str
             'auto', 'violin', or 'scatter'
+        metric : str
+            Prior/posterior comparison metric: 'overlap', 'kl_divergence', or 'posterior_coverage' (default)
         **kwargs
             Additional plotting arguments
 
@@ -162,7 +165,7 @@ class PlottingMixin:
             post_samples = np.squeeze(post_samples)
             prior_samples = np.squeeze(prior_samples)
 
-            return plot_scalar_parameter(prior_samples, post_samples, 'beta_o', **kwargs)
+            return plot_scalar_parameter(prior_samples, post_samples, 'beta_o', metric=metric, **kwargs)
 
         elif param == 'alpha_x':
             # 1D or 2D parameter (per technical group)
@@ -190,7 +193,7 @@ class PlottingMixin:
             # Handle different dimensionalities
             if post_samples.ndim == 1:
                 # (samples,) - single value across all groups
-                return plot_scalar_parameter(prior_samples, post_samples, 'alpha_x', **kwargs)
+                return plot_scalar_parameter(prior_samples, post_samples, 'alpha_x', metric=metric, **kwargs)
             elif post_samples.ndim == 2:
                 # (samples, technical_groups) - one value per group
                 if technical_group_index is not None:
@@ -205,7 +208,7 @@ class PlottingMixin:
                     group_name = group_names[technical_group_index]
 
                     return plot_scalar_parameter(
-                        prior_tg, post_tg, f'alpha_x ({group_name})', **kwargs
+                        prior_tg, post_tg, f'alpha_x ({group_name})', metric=metric, **kwargs
                     )
                 else:
                     # Plot all technical groups - treat as separate features
@@ -218,7 +221,7 @@ class PlottingMixin:
 
                     return plot_1d_parameter(
                         prior_samples, post_samples, group_names, 'alpha_x',
-                        order_by='input', plot_type='violin', **kwargs
+                        order_by='input', plot_type='violin', metric=metric, **kwargs
                     )
             else:
                 raise ValueError(f"Unexpected alpha_x shape: {post_samples.shape}")
@@ -322,7 +325,7 @@ class PlottingMixin:
                 return plot_1d_parameter(
                     prior_samples, post_samples, feature_names, param_label,
                     order_by, subset_features=subset_features, plot_type=plot_type,
-                    **kwargs
+                    metric=metric, **kwargs
                 )
             elif post_samples.ndim == 3:
                 # (samples, technical_groups, genes)
@@ -366,7 +369,7 @@ class PlottingMixin:
                     return plot_1d_parameter(
                         prior_tg, post_tg, feature_names, f'{param_label} ({group_name})',
                         order_by, subset_features=subset_features, plot_type=plot_type,
-                        **kwargs
+                        metric=metric, **kwargs
                     )
                 else:
                     # Plot all technical groups (2D plot) - check shape compatibility
@@ -390,7 +393,7 @@ class PlottingMixin:
                     return plot_2d_parameter(
                         prior_samples, post_samples, feature_names, group_names, param_label,
                         order_by=order_by, subset_features=subset_features,
-                        plot_type=plot_type, **kwargs
+                        plot_type=plot_type, metric=metric, **kwargs
                     )
 
         else:
@@ -401,6 +404,7 @@ class PlottingMixin:
         self,
         param: str = 'x_true',
         order_by: str = 'mean',
+        metric: str = 'posterior_coverage',
         **kwargs
     ) -> plt.Figure:
         """
@@ -412,6 +416,8 @@ class PlottingMixin:
             Parameter to plot: 'x_true', 'mu_x', 'log2_x_eff'
         order_by : str
             Guide ordering: 'mean', 'difference', 'alphabetical', 'input'
+        metric : str
+            Prior/posterior comparison metric: 'overlap', 'kl_divergence', or 'posterior_coverage' (default)
         **kwargs
             Additional plotting arguments
 
@@ -456,7 +462,7 @@ class PlottingMixin:
 
             return plot_1d_parameter(
                 prior_samples, post_samples, guide_names, 'x_true',
-                order_by, plot_type='violin', **kwargs
+                order_by, plot_type='violin', metric=metric, **kwargs
             )
 
         else:
@@ -470,6 +476,7 @@ class PlottingMixin:
         order_by: str = 'mean',
         plot_type: str = 'auto',
         function_type: str = 'additive_hill',
+        metric: str = 'posterior_coverage',
         **kwargs
     ) -> plt.Figure:
         """
@@ -489,6 +496,8 @@ class PlottingMixin:
             'auto', 'violin', or 'scatter'
         function_type : str
             Function type used in fit: 'additive_hill', 'single_hill', 'polynomial'
+        metric : str
+            Prior/posterior comparison metric: 'overlap', 'kl_divergence', or 'posterior_coverage' (default)
         **kwargs
             Additional plotting arguments
 
@@ -550,14 +559,14 @@ class PlottingMixin:
                 return plot_2d_parameter(
                     prior_samples, post_samples, feature_names, param_names, 'theta',
                     order_by=order_by, subset_features=subset_features,
-                    plot_type=plot_type, **kwargs
+                    plot_type=plot_type, metric=metric, **kwargs
                 )
             elif post_samples.ndim == 2:
                 # Single parameter per gene
                 return plot_1d_parameter(
                     prior_samples, post_samples, feature_names, 'theta',
                     order_by, subset_features=subset_features, plot_type=plot_type,
-                    **kwargs
+                    metric=metric, **kwargs
                 )
 
         else:

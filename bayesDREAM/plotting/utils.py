@@ -12,6 +12,9 @@ def compute_distribution_overlap(prior_samples: np.ndarray, posterior_samples: n
     """
     Compute percentage overlap between two distributions using KDE.
 
+    This is a symmetric metric that measures the intersection area between distributions.
+    Low overlap indicates the data was informative and concentrated the posterior.
+
     Parameters
     ----------
     prior_samples : np.ndarray
@@ -49,6 +52,126 @@ def compute_distribution_overlap(prior_samples: np.ndarray, posterior_samples: n
         # Return 0 overlap if KDE fails (e.g., singular covariance, constant data)
         warnings.warn(f"KDE failed for overlap computation ({str(e)}), returning 0% overlap")
         return 0.0
+
+
+def compute_kl_divergence(posterior_samples: np.ndarray, prior_samples: np.ndarray) -> float:
+    """
+    Compute KL divergence KL(posterior || prior) using KDE estimates.
+
+    Measures information gained from prior to posterior. Higher values indicate
+    more information gained from the data.
+
+    Parameters
+    ----------
+    posterior_samples : np.ndarray
+        Samples from posterior distribution
+    prior_samples : np.ndarray
+        Samples from prior distribution
+
+    Returns
+    -------
+    float
+        KL divergence in nats, or NaN if computation fails
+    """
+    from scipy.stats import gaussian_kde
+
+    try:
+        # Combine samples to get common evaluation points
+        all_samples = np.concatenate([prior_samples, posterior_samples])
+        x_eval = np.linspace(all_samples.min(), all_samples.max(), 500)
+
+        # Compute KDEs
+        kde_prior = gaussian_kde(prior_samples)
+        kde_post = gaussian_kde(posterior_samples)
+
+        # Evaluate densities
+        prior_density = kde_prior(x_eval)
+        post_density = kde_post(x_eval)
+
+        # Add small epsilon to avoid log(0)
+        eps = 1e-10
+        prior_density = np.maximum(prior_density, eps)
+        post_density = np.maximum(post_density, eps)
+
+        # KL(P||Q) = ∫ P(x) log(P(x)/Q(x)) dx
+        kl = np.trapz(post_density * np.log(post_density / prior_density), x_eval)
+
+        return max(0.0, kl)  # KL should be non-negative
+
+    except (np.linalg.LinAlgError, ValueError, RuntimeWarning) as e:
+        warnings.warn(f"KL divergence computation failed ({str(e)}), returning NaN")
+        return np.nan
+
+
+def compute_posterior_coverage(posterior_samples: np.ndarray, prior_samples: np.ndarray,
+                               ci_level: float = 0.95) -> float:
+    """
+    Compute what percentage of posterior mass is covered by the prior's credible interval.
+
+    This answers: "What fraction of the posterior is within the prior's plausible range?"
+    High coverage (>90%) indicates the prior was reasonable and covered the posterior support.
+    Low coverage (<50%) suggests prior-data conflict or that the prior was too narrow.
+
+    Parameters
+    ----------
+    posterior_samples : np.ndarray
+        Samples from posterior distribution
+    prior_samples : np.ndarray
+        Samples from prior distribution
+    ci_level : float
+        Credible interval level for prior (default: 0.95)
+
+    Returns
+    -------
+    float
+        Percentage of posterior samples within prior CI, between 0 and 100
+    """
+    try:
+        # Compute prior credible interval
+        alpha = (1 - ci_level) / 2
+        prior_lower = np.percentile(prior_samples, alpha * 100)
+        prior_upper = np.percentile(prior_samples, (1 - alpha) * 100)
+
+        # Check what fraction of posterior is within prior CI
+        within_prior_ci = np.sum((posterior_samples >= prior_lower) &
+                                 (posterior_samples <= prior_upper))
+        coverage = (within_prior_ci / len(posterior_samples)) * 100
+
+        return coverage
+
+    except (ValueError, RuntimeWarning) as e:
+        warnings.warn(f"Posterior coverage computation failed ({str(e)}), returning NaN")
+        return np.nan
+
+
+def compute_all_metrics(prior_samples: np.ndarray, posterior_samples: np.ndarray,
+                       ci_level: float = 0.95) -> dict:
+    """
+    Compute all available prior/posterior comparison metrics.
+
+    Parameters
+    ----------
+    prior_samples : np.ndarray
+        Samples from prior distribution
+    posterior_samples : np.ndarray
+        Samples from posterior distribution
+    ci_level : float
+        Credible interval level for coverage metric (default: 0.95)
+
+    Returns
+    -------
+    dict
+        Dictionary with keys:
+        - 'overlap': Symmetric intersection percentage (0-100)
+        - 'kl_divergence': KL(posterior || prior) in nats
+        - 'posterior_coverage': % of posterior within prior CI (0-100)
+    """
+    metrics = {
+        'overlap': compute_distribution_overlap(prior_samples, posterior_samples),
+        'kl_divergence': compute_kl_divergence(posterior_samples, prior_samples),
+        'posterior_coverage': compute_posterior_coverage(posterior_samples, prior_samples, ci_level)
+    }
+    return metrics
 
 
 def get_feature_ordering(
@@ -250,10 +373,11 @@ def prepare_violin_data(
 def compute_log2fc_vs_overlap(
     prior_samples: np.ndarray,
     posterior_samples: np.ndarray,
-    feature_names: List[str]
+    feature_names: List[str],
+    metric: str = 'posterior_coverage'
 ) -> pd.DataFrame:
     """
-    Compute log2 fold change in means vs distribution overlap.
+    Compute log2 fold change in means vs prior/posterior comparison metric.
 
     Parameters
     ----------
@@ -263,13 +387,25 @@ def compute_log2fc_vs_overlap(
         Posterior samples, shape (n_samples, n_features)
     feature_names : List[str]
         Feature names
+    metric : str
+        Comparison metric: 'overlap', 'kl_divergence', or 'posterior_coverage' (default)
 
     Returns
     -------
     pd.DataFrame
-        Dataframe with columns: feature, log2fc, overlap
+        Dataframe with columns: feature, log2fc, <metric_name>
     """
     n_features = prior_samples.shape[1]
+
+    # Determine metric column name
+    if metric == 'overlap':
+        metric_col = 'overlap'
+    elif metric == 'kl_divergence':
+        metric_col = 'kl_divergence'
+    elif metric == 'posterior_coverage':
+        metric_col = 'posterior_coverage'
+    else:
+        raise ValueError(f"Unknown metric: {metric}. Must be 'overlap', 'kl_divergence', or 'posterior_coverage'")
 
     results = []
     for i in range(n_features):
@@ -279,13 +415,18 @@ def compute_log2fc_vs_overlap(
         # Compute log2FC (add small epsilon to avoid log(0))
         log2fc = np.log2((post_mean + 1e-8) / (prior_mean + 1e-8))
 
-        # Compute overlap
-        overlap = compute_distribution_overlap(prior_samples[:, i], posterior_samples[:, i])
+        # Compute chosen metric
+        if metric == 'overlap':
+            metric_value = compute_distribution_overlap(prior_samples[:, i], posterior_samples[:, i])
+        elif metric == 'kl_divergence':
+            metric_value = compute_kl_divergence(posterior_samples[:, i], prior_samples[:, i])
+        elif metric == 'posterior_coverage':
+            metric_value = compute_posterior_coverage(posterior_samples[:, i], prior_samples[:, i])
 
         results.append({
             'feature': feature_names[i],
             'log2fc': log2fc,
-            'overlap': overlap
+            metric_col: metric_value
         })
 
     return pd.DataFrame(results)
