@@ -175,11 +175,79 @@ def reorder_xtrue_by_barcode(
 # Feature Lookup Utilities
 # ============================================================================
 
+def _resolve_features(feature_or_gene: str, modality) -> Tuple[List[int], List[str], bool]:
+    """
+    Resolve input to feature index(es) and name(s).
+
+    Returns
+    -------
+    feature_indices : List[int]
+        Integer positions of features
+    feature_names : List[str]
+        Feature names
+    is_gene : bool
+        True if input was a gene name (multiple features), False if single feature
+
+    Raises
+    ------
+    ValueError
+        If feature/gene not found or modality doesn't have gene information
+    """
+    # First, try as a direct feature match
+    feature_idx = _get_feature_index(feature_or_gene, modality)
+    if feature_idx is not None:
+        # Found as a feature - get the actual feature name
+        if hasattr(modality, 'feature_names') and modality.feature_names is not None:
+            feature_name = modality.feature_names[feature_idx]
+        else:
+            feature_name = feature_or_gene
+        return [feature_idx], [feature_name], False
+
+    # Not found as feature - try as gene
+    # Check if modality has gene information
+    gene_cols = ['gene', 'gene_name', 'gene_id']
+    available_gene_cols = [col for col in gene_cols if col in modality.feature_meta.columns]
+
+    if not available_gene_cols:
+        raise ValueError(
+            f"'{feature_or_gene}' not found as a feature, and modality '{modality.name}' "
+            f"has no gene information (no 'gene', 'gene_name', or 'gene_id' columns in feature_meta). "
+            f"Cannot search by gene name."
+        )
+
+    # Search for gene across all gene columns
+    matching_features = []
+    for gene_col in available_gene_cols:
+        mask = modality.feature_meta[gene_col] == feature_or_gene
+        if mask.sum() > 0:
+            # Found matches
+            indices = mask.values.nonzero()[0].tolist()
+
+            # Get feature names for matched indices
+            if hasattr(modality, 'feature_names') and modality.feature_names is not None:
+                names = [modality.feature_names[i] for i in indices]
+            elif modality.feature_meta.index.name:
+                names = modality.feature_meta.iloc[indices].index.tolist()
+            else:
+                names = [str(i) for i in indices]
+
+            return indices, names, True
+
+    # Not found as feature or gene
+    raise ValueError(
+        f"'{feature_or_gene}' not found as a feature or gene in modality '{modality.name}'. "
+        f"Checked: feature names/index and gene columns {available_gene_cols}"
+    )
+
+
 def _get_feature_index(feature: str, modality) -> Optional[int]:
     """
     Robustly find feature index, checking multiple locations.
 
     Checks feature_meta.index, feature_meta columns, and feature_names attribute.
+
+    IMPORTANT: Does NOT check 'gene', 'gene_name', or 'gene_id' columns -
+    those are reserved for gene-level searches in _resolve_features().
 
     Parameters
     ----------
@@ -197,12 +265,13 @@ def _get_feature_index(feature: str, modality) -> Optional[int]:
     if feature in modality.feature_meta.index:
         return modality.feature_meta.index.get_loc(feature)
 
-    # Check common column names
-    for col in ['gene', 'junction', 'feature', 'name', 'coord.intron']:
+    # Check common column names (EXCLUDING gene columns)
+    for col in ['junction', 'feature', 'name', 'coord.intron', 'SJ']:
         if col in modality.feature_meta.columns:
             mask = modality.feature_meta[col] == feature
             if mask.sum() > 0:
-                return mask.idxmax()
+                # Use argmax to get integer position, not index label
+                return mask.values.argmax()
 
     # Check feature_names attribute
     if hasattr(modality, 'feature_names'):
@@ -572,6 +641,7 @@ def plot_negbinom_xy(
     color_palette: Dict[str, str],
     show_hill_function: bool,
     show_ntc_gradient: bool = False,
+    sum_factor_col: str = 'sum_factor',
     xlabel: str = "log2(x_true)",
     ax: Optional[plt.Axes] = None,
     **kwargs
@@ -587,6 +657,9 @@ def plot_negbinom_xy(
         If True, color lines by NTC proportion in k-NN window (default: False)
         Lighter colors = more NTC cells, Darker colors = fewer NTC cells
         Only applies to uncorrected plots
+    sum_factor_col : str
+        Column name in model.meta for sum factors (default: 'sum_factor')
+        Can be 'sum_factor', 'sum_factor_adj', or any other sum factor column
     """
     # Get data
     feature_idx = _get_feature_index(feature, modality)
@@ -600,12 +673,17 @@ def plot_negbinom_xy(
         y_obs = modality.counts[:, feature_idx]
 
     # Build dataframe
+    # Check if sum_factor_col exists
+    if sum_factor_col not in model.meta.columns:
+        raise ValueError(f"Sum factor column '{sum_factor_col}' not found in model.meta. "
+                        f"Available columns: {list(model.meta.columns)}")
+
     df = pd.DataFrame({
         'x_true': x_true,
         'y_obs': y_obs,
         'technical_group_code': model.meta['technical_group_code'].values,
         'target': model.meta['target'].values,
-        'sum_factor': model.meta['sum_factor'].values if 'sum_factor' in model.meta.columns else 1.0
+        'sum_factor': model.meta[sum_factor_col].values
     })
 
     # Technical correction
@@ -686,6 +764,10 @@ def plot_negbinom_xy(
                     linewidth=2
                 )
 
+                # Add dummy invisible line for legend label
+                color = color_palette.get(group_label, f'C{group_code}')
+                ax_plot.plot([], [], color=color, linewidth=2, label=group_label)
+
                 # Add colorbar (once per axis)
                 if not colorbar_added:
                     fig = ax_plot.get_figure()
@@ -751,6 +833,7 @@ def plot_binomial_xy(
     color_palette: Dict[str, str],
     show_trans_function: bool,
     show_ntc_gradient: bool = False,
+    show_correction: str = 'uncorrected',
     xlabel: str = "log2(x_true)",
     ax: Optional[plt.Axes] = None,
     **kwargs
@@ -758,7 +841,7 @@ def plot_binomial_xy(
     """
     Plot binomial (PSI - percent spliced in).
 
-    Y-axis: PSI = counts / denominator
+    Y-axis: PSI (%) = (counts / denominator) * 100  (percentage scale: 0-100)
     Filter: min_counts on denominator
 
     Parameters
@@ -766,7 +849,23 @@ def plot_binomial_xy(
     show_ntc_gradient : bool
         If True, color lines by NTC proportion in k-NN window (default: False)
         Lighter colors = more NTC cells, Darker colors = fewer NTC cells
+    show_correction : str
+        Technical correction parameter (for API consistency)
+        Note: Technical correction not yet implemented for binomial/PSI
+        Currently only 'uncorrected' is supported
+
+    Notes
+    -----
+    Technical correction (alpha_y) is not yet implemented for binomial distributions.
+    PSI is already a ratio (counts/denominator), making standard correction approaches
+    less straightforward. Currently always plots uncorrected data.
     """
+    # Check show_correction parameter
+    if show_correction != 'uncorrected':
+        warnings.warn(
+            f"Technical correction not implemented for binomial distributions. "
+            f"Ignoring show_correction='{show_correction}' and plotting uncorrected only."
+        )
     # Get data
     feature_idx = _get_feature_index(feature, modality)
     if feature_idx is None:
@@ -792,8 +891,8 @@ def plot_binomial_xy(
         'target': model.meta['target'].values[valid_mask]
     })
 
-    # Compute PSI
-    df['PSI'] = df['counts'] / df['denominator']
+    # Compute PSI (as percentage: 0-100 scale)
+    df['PSI'] = (df['counts'] / df['denominator']) * 100.0
 
     # Filter valid
     valid = (df['x_true'] > 0) & np.isfinite(df['PSI'])
@@ -850,6 +949,10 @@ def plot_binomial_xy(
                 linewidth=2
             )
 
+            # Add dummy invisible line for legend label
+            color = color_palette.get(group_label, f'C{group_code}')
+            ax.plot([], [], color=color, linewidth=2, label=group_label)
+
             # Add colorbar (once per axis)
             if not colorbar_added:
                 fig = ax.get_figure()
@@ -872,16 +975,16 @@ def plot_binomial_xy(
         y_pred = predict_trans_function(model, feature, x_range, modality_name=modality.name)
 
         if y_pred is not None:
-            # For binomial, PSI is in [0, 1], so clip predictions
-            y_pred_clipped = np.clip(y_pred, 0, 1)
+            # For binomial, PSI is in percentage scale [0, 100], so scale and clip predictions
+            y_pred_pct = y_pred * 100.0
+            y_pred_clipped = np.clip(y_pred_pct, 0, 100)
             ax.plot(np.log2(x_range), y_pred_clipped,
                    color='blue', linestyle='--', linewidth=2,
                    label='Fitted Trans Function')
 
-    ax.axhline(0.0, linestyle='--', linewidth=1, alpha=0.6, color='gray')
     ax.set_xlabel(xlabel)
-    ax.set_ylabel('PSI (Percent Spliced In)')
-    ax.set_title(f"{model.cis_gene} → {feature} (min_counts={min_counts})")
+    ax.set_ylabel('PSI (%)')
+    ax.set_title(f"{model.cis_gene} → {feature} (min_counts={min_counts}, uncorrected)")
     ax.legend(frameon=False)
 
     return ax
@@ -1137,6 +1240,10 @@ def plot_normal_xy(
                     linewidth=2
                 )
 
+                # Add dummy invisible line for legend label
+                color = color_palette.get(group_label, f'C{group_code}')
+                ax_plot.plot([], [], color=color, linewidth=2, label=group_label)
+
                 # Add colorbar (once per axis)
                 if not colorbar_added:
                     fig = ax_plot.get_figure()
@@ -1330,11 +1437,12 @@ def plot_xy_data(
     feature: str,
     modality_name: Optional[str] = None,
     window: int = 100,
-    show_correction: str = 'corrected',
+    show_correction: str = 'both',
     min_counts: int = 3,
     color_palette: Optional[Dict[str, str]] = None,
     show_hill_function: bool = True,
     show_ntc_gradient: bool = False,
+    sum_factor_col: str = 'sum_factor',
     xlabel: str = "log2(x_true)",
     figsize: Optional[Tuple[int, int]] = None,
     src_barcodes: Optional[np.ndarray] = None,
@@ -1350,15 +1458,18 @@ def plot_xy_data(
     model : bayesDREAM
         Fitted bayesDREAM model with x_true set
     feature : str
-        Feature name (gene, junction, donor, etc.)
+        Feature name (junction, donor, etc.) OR gene name.
+        - If a specific feature name (e.g., 'chr1:999788:999865'), plots that feature
+        - If a gene name (e.g., 'HES4'), plots all features for that gene in subplots
+        - Requires modality to have gene information ('gene', 'gene_name', or 'gene_id' columns)
     modality_name : str, optional
         Modality name (default: primary modality)
     window : int
         k-NN window size for smoothing (default: 100 cells)
     show_correction : str
         'uncorrected': no technical correction
-        'corrected': apply alpha_y technical correction (default)
-        'both': show both side-by-side
+        'corrected': apply alpha_y technical correction
+        'both': show both side-by-side (default)
     min_counts : int
         Minimum denominator for binomial (default: 3)
         Minimum total counts for multinomial (default: 3)
@@ -1375,6 +1486,10 @@ def plot_xy_data(
         Only applies to uncorrected plots
         Fully implemented for: negbinom, binomial, normal
         Not yet implemented for: multinomial, mvnormal (will issue warning)
+    sum_factor_col : str
+        Column name in model.meta for sum factors (default: 'sum_factor')
+        Can be 'sum_factor', 'sum_factor_adj', or any other sum factor column
+        Only used for negbinom distribution (gene expression)
     xlabel : str
         X-axis label (default: "log2(x_true)")
     figsize : tuple, optional
@@ -1403,21 +1518,24 @@ def plot_xy_data(
 
     Examples
     --------
-    >>> # Plot gene counts with Hill function
+    >>> # Plot single gene with Hill function
     >>> model.plot_xy_data('TET2', window=100, show_hill_function=True)
     >>>
-    >>> # Plot splice junction with min_counts filter
+    >>> # Plot specific splice junction with min_counts filter
     >>> model.plot_xy_data('chr1:12345:67890:+', modality_name='splicing_sj',
     ...                     min_counts=5)
+    >>>
+    >>> # Plot all splice junctions for a gene (creates multi-panel figure)
+    >>> model.plot_xy_data('HES4', modality_name='splicing_sj')
     >>>
     >>> # Plot with custom colors
     >>> model.plot_xy_data('GFI1B', color_palette={'CRISPRa': 'red', 'CRISPRi': 'blue'})
     >>>
-    >>> # Show both corrected and uncorrected
+    >>> # Show both corrected and uncorrected (default)
     >>> model.plot_xy_data('TET2', show_correction='both')
     >>>
     >>> # Plot with NTC gradient coloring
-    >>> model.plot_xy_data('TET2', show_ntc_gradient=True)
+    >>> model.plot_xy_data('TET2', show_ntc_gradient=True, show_correction='uncorrected')
     """
     # Check x_true is set
     if not hasattr(model, 'x_true') or model.x_true is None:
@@ -1452,6 +1570,66 @@ def plot_xy_data(
         group_labels = get_technical_group_labels(model)
         color_palette = get_default_color_palette(group_labels)
 
+    # Resolve feature(s) - could be single feature or gene name
+    feature_indices, feature_names_resolved, is_gene = _resolve_features(feature, modality)
+
+    # If multiple features (gene input), create multi-panel figure
+    if is_gene and len(feature_indices) > 1:
+        n_features = len(feature_indices)
+        n_cols = min(3, n_features)  # Max 3 columns
+        n_rows = int(np.ceil(n_features / n_cols))
+
+        if figsize is None:
+            figsize = (6 * n_cols, 5 * n_rows)
+
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, squeeze=False)
+        axes_flat = axes.flatten()
+
+        # Plot each feature
+        for i, (feat_idx, feat_name) in enumerate(zip(feature_indices, feature_names_resolved)):
+            ax = axes_flat[i]
+
+            # Call distribution-specific plot with this feature and ax
+            distribution = modality.distribution
+
+            if distribution == 'negbinom':
+                plot_negbinom_xy(
+                    model=model, feature=feat_name, modality=modality,
+                    x_true=x_true, window=window, show_correction=show_correction,
+                    color_palette=color_palette, show_hill_function=show_hill_function,
+                    show_ntc_gradient=show_ntc_gradient, sum_factor_col=sum_factor_col,
+                    xlabel=xlabel, ax=ax, **kwargs
+                )
+            elif distribution == 'binomial':
+                plot_binomial_xy(
+                    model=model, feature=feat_name, modality=modality,
+                    x_true=x_true, window=window, min_counts=min_counts,
+                    color_palette=color_palette, show_trans_function=show_hill_function,
+                    show_ntc_gradient=show_ntc_gradient, xlabel=xlabel, ax=ax, **kwargs
+                )
+            elif distribution == 'normal':
+                plot_normal_xy(
+                    model=model, feature=feat_name, modality=modality,
+                    x_true=x_true, window=window, show_correction=show_correction,
+                    color_palette=color_palette, show_trans_function=show_hill_function,
+                    show_ntc_gradient=show_ntc_gradient, xlabel=xlabel, ax=ax, **kwargs
+                )
+            else:
+                # Multinomial and mvnormal return their own figures, so skip
+                ax.text(0.5, 0.5, f"Multi-panel not supported for {distribution}",
+                       ha='center', va='center', transform=ax.transAxes)
+
+        # Hide unused subplots
+        for i in range(n_features, len(axes_flat)):
+            axes_flat[i].set_visible(False)
+
+        plt.suptitle(f"{model.cis_gene} → {feature} (gene, n={n_features} features)")
+        plt.tight_layout()
+        return fig
+
+    # Single feature - use original code path
+    feature = feature_names_resolved[0]  # Use resolved feature name
+
     # Route to distribution-specific plotting function
     distribution = modality.distribution
 
@@ -1466,6 +1644,7 @@ def plot_xy_data(
             color_palette=color_palette,
             show_hill_function=show_hill_function,
             show_ntc_gradient=show_ntc_gradient,
+            sum_factor_col=sum_factor_col,
             xlabel=xlabel,
             **kwargs
         )
