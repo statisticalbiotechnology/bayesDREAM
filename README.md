@@ -376,30 +376,35 @@ See [tests/README.md](tests/README.md) for complete testing documentation.
 ```
 bayesDREAM/
 ├── bayesDREAM/           # Core package
+│   ├── __init__.py       # Package exports
 │   ├── model.py          # Main bayesDREAM class (~311 lines)
 │   ├── core.py           # _BayesDREAMCore base class (~909 lines)
-│   ├── modality.py       # Modality data structure
-│   ├── distributions.py  # Distribution-specific samplers
-│   ├── splicing.py       # Splicing processing (pure Python)
+│   ├── modality.py       # Modality data structure for multi-modal support
+│   ├── distributions.py  # Distribution-specific observation samplers
+│   ├── splicing.py       # Splicing processing (pure Python, no R dependencies)
+│   ├── utils.py          # General utility functions
 │   ├── fitting/          # Modular fitting methods
-│   │   ├── helpers.py    # Helper functions
-│   │   ├── technical.py  # TechnicalFitter
-│   │   ├── cis.py        # CisFitter
-│   │   └── trans.py      # TransFitter
+│   │   ├── __init__.py
+│   │   ├── technical.py  # TechnicalFitter class
+│   │   ├── cis.py        # CisFitter class (includes prior-informed fitting infrastructure)
+│   │   └── trans.py      # TransFitter class
 │   ├── io/               # Save/load functionality
-│   │   ├── save.py       # ModelSaver
-│   │   └── load.py       # ModelLoader
+│   │   ├── __init__.py
+│   │   ├── save.py       # ModelSaver class
+│   │   └── load.py       # ModelLoader class
 │   ├── modalities/       # Modality-specific methods
-│   │   ├── transcript.py
-│   │   ├── splicing_modality.py
-│   │   ├── atac.py       # ATAC-seq integration
-│   │   └── custom.py
-│   ├── plotting/         # Visualization infrastructure
-│   │   ├── xy_plots.py          # X-Y data plots (all distributions)
-│   │   ├── prior_posterior.py   # Prior-posterior comparisons
-│   │   ├── model_plots.py       # Model diagnostics
-│   │   └── utils.py             # Plotting utilities
-│   └── __init__.py       # Package exports
+│   │   ├── __init__.py
+│   │   ├── transcript.py     # Transcript modality methods
+│   │   ├── splicing_modality.py  # Splicing modality methods
+│   │   ├── atac.py       # ATAC-seq integration methods
+│   │   └── custom.py     # Custom modality methods
+│   └── plotting/         # Comprehensive plotting infrastructure
+│       ├── __init__.py
+│       ├── xy_plots.py       # X-Y data plots (all distributions, k-NN smoothing)
+│       ├── prior_posterior.py # Prior-posterior comparison plots
+│       ├── prior_sampling.py # Prior sampling utilities
+│       ├── model_plots.py    # Model diagnostics and residual plots
+│       └── utils.py          # Plotting helper functions
 ├── examples/             # Usage examples
 ├── tests/                # Test suite
 ├── docs/                 # Documentation

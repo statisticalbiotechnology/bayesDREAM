@@ -96,59 +96,37 @@ def sample_negbinom_trans(
 #######################################
 
 def sample_multinomial_trans(
-    y_obs_tensor,
-    mu_y,
-    N,
-    T,
-    K
+    y_obs_tensor,         # [N, T, K] integer counts
+    mu_y,                 # [N, T, K] baseline probs (will be renormalized)
+    alpha_y_full,         # [C, T, K] additive logits (centered across K)
+    groups_tensor,        # [N]
+    N, T, K, C=None
 ):
-    """
-    Sample observations from multinomial likelihood for trans model.
-
-    Cell-line effects: NOT SUPPORTED YET (too complex).
-
-    Parameters
-    ----------
-    y_obs_tensor : torch.Tensor
-        Observed counts, shape [N, T, K] where K is number of categories
-    mu_y : torch.Tensor
-        Expected probabilities from f(x), shape [N, T, K]
-        These should sum to 1 over K dimension
-    N : int
-        Number of guides/observations
-    T : int
-        Number of features
-    K : int
-        Number of categories per feature
-
-    Notes
-    -----
-    For multinomial data, mu_y should already be normalized probabilities.
-    Cell-line effects are not yet supported due to complexity of maintaining
-    probability simplex constraints.
-
-    We use a single plate for the N*T observations to avoid issues with
-    nested plates and varying total_count.
-    """
-    # Compute total counts per feature per observation
+    # Totals per (obs, feature)
     total_counts = y_obs_tensor.sum(dim=-1)  # [N, T]
 
-    # Ensure probabilities sum to 1
-    probs = mu_y / (mu_y.sum(dim=-1, keepdim=True) + 1e-8)  # [N, T, K]
+    # Base logits & group shifts
+    mu_y = mu_y / (mu_y.sum(dim=-1, keepdim=True).clamp_min(1e-12))  # safety renorm
+    base_logits = torch.log(mu_y.clamp_min(1e-12))                    # [N, T, K]
+    if alpha_y_full is not None and groups_tensor is not None:
+        alpha_used = alpha_y_full[groups_tensor, :, :]                # [N, T, K]
+        logits = base_logits + alpha_used
+        probs = torch.softmax(logits, dim=-1)                         # [N, T, K]
+    else:
+        probs = mu_y
 
-    # Flatten to treat each (observation, feature) pair independently
-    # Reshape from [N, T, K] to [N*T, K]
-    total_counts_flat = total_counts.reshape(-1)  # [N*T]
-    probs_flat = probs.reshape(-1, K)  # [N*T, K]
-    y_obs_flat = y_obs_tensor.reshape(-1, K)  # [N*T, K]
+    # Multinomial log-likelihood (vectorized)
+    y = y_obs_tensor
+    log_probs = torch.log(probs.clamp_min(1e-12))                     # [N, T, K]
+    ll = (
+        torch.lgamma(total_counts + 1.0)
+        - torch.lgamma(y + 1.0).sum(dim=-1)
+        + (y * log_probs).sum(dim=-1)
+    )  # [N, T]
 
-    # Sample observations with single plate
+    # Contribute to the model log-density
     with pyro.plate("obs_plate", N * T):
-        pyro.sample(
-            "y_obs",
-            dist.Multinomial(total_count=total_counts_flat, probs=probs_flat),
-            obs=y_obs_flat
-        )
+        pyro.factor("y_obs", ll.reshape(-1))
 
 
 #######################################
@@ -359,8 +337,8 @@ DISTRIBUTION_REGISTRY = {
         'requires_denominator': False,
         'requires_sum_factor': False,
         'is_3d': True,
-        'supports_cell_line': False,  # Not yet implemented
-        'cell_line_type': None
+        'supports_cell_line': True,     # <- change to True
+        'cell_line_type': 'logit'
     },
     'binomial': {
         'trans': sample_binomial_trans,

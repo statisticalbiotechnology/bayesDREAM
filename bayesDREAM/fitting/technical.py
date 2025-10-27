@@ -54,7 +54,7 @@ class TechnicalFitter:
         - negbinom: multiplicative effects on mu (alpha_full_mul), NB dispersion phi_y
         - normal/binomial: additive or logit-scale effects (alpha_full_add)
         - mvnormal: additive effects per (feature, dim), diagonal covariance
-        - multinomial: Dirichlet probabilities per (feature, category); no cell-line effects yet
+        - multinomial: Dirichlet probabilities per (feature, category); additive or logit-scale effects (alpha_full_add)
         """
     
         # ----------------------------
@@ -64,43 +64,84 @@ class TechnicalFitter:
         f_plate  = pyro.plate("feature_plate_technical", T, dim=-1)
     
         # ----------------------------
-        # Cell-line effects (group × T)
+        # Cell-line effects (group × T [× K])
         # We sample a single latent matrix log2_alpha_y and
         # expose two parameterizations:
         #   multiplicative: alpha_full_mul  (baseline=1)
         #   additive/logit: alpha_full_add  (baseline=0)
         # ----------------------------
-        with pyro.plate("trans_plate", T, dim=-1):
-            with c_plate:  # [C-1, T]
-                log2_alpha_y = pyro.sample(
-                    "log2_alpha_y",
-                    dist.StudentT(df=3, loc=0.0, scale=20.0)
-                )
-                alpha_y_mul = pyro.deterministic("alpha_y_mul", 2.0 ** log2_alpha_y)   # multiplicative
-                delta_y_add = pyro.deterministic("delta_y_add", log2_alpha_y)          # additive/logit
-    
-        # Build full [C, T] by adding the baseline row
-        if alpha_y_mul.ndim == 2:  # [C-1, T]
-            alpha_full_mul = torch.cat(
-                [torch.ones(1, T, device=self.model.device), alpha_y_mul.to(self.model.device)],
-                dim=0
-            )  # [C, T]
-            alpha_full_add = torch.cat(
-                [torch.zeros(1, T, device=self.model.device), delta_y_add.to(self.model.device)],
-                dim=0
-            )  # [C, T]
-        elif alpha_y_mul.ndim == 3:  # [S, C-1, T]
-            S = alpha_y_mul.size(0)
-            alpha_full_mul = torch.cat(
-                [torch.ones(S, 1, T, device=self.model.device), alpha_y_mul.to(self.model.device)],
-                dim=1
-            )  # [S, C, T]
-            alpha_full_add = torch.cat(
-                [torch.zeros(S, 1, T, device=self.model.device), delta_y_add.to(self.model.device)],
-                dim=1
-            )  # [S, C, T]
+        if distribution == "multinomial":
+            assert K is not None, "multinomial requires K"
+        
+            # Multinomial-specific plates:
+            # batch dims (from left):  ... , [C-1], [T], event [K]
+            c_mult_plate = pyro.plate("c_mult_plate", C - 1, dim=-3)
+            t_mult_plate = pyro.plate("t_mult_plate", T,     dim=-2)
+        
+            # ---- Cell-line logits α (centered across K) ----
+            with c_mult_plate:       # [C-1, ...]
+                with t_mult_plate:   # [..., T]
+                    raw_alpha_logits = pyro.sample(
+                        "alpha_logits_y_raw",
+                        dist.StudentT(df=3, loc=0.0, scale=20.0)
+                            .expand([K])        # event length K
+                            .to_event(1)        # make last axis the event
+                    )  # [C-1, T, K]
+                    centered = raw_alpha_logits - raw_alpha_logits.mean(dim=-1, keepdim=True)
+                    alpha_logits_y = pyro.deterministic("alpha_logits_y", centered)  # [C-1, T, K]
+        
+            # Build full [C, T, K] with baseline=0
+            if alpha_logits_y.ndim == 3:  # [C-1, T, K]
+                alpha_full_add_logits = torch.cat(
+                    [torch.zeros(1, T, K, device=self.model.device), alpha_logits_y.to(self.model.device)],
+                    dim=0
+                )  # [C, T, K]
+            elif alpha_logits_y.ndim == 4:  # [S, C-1, T, K]
+                S = alpha_logits_y.size(0)
+                alpha_full_add_logits = torch.cat(
+                    [torch.zeros(S, 1, T, K, device=self.model.device), alpha_logits_y.to(self.model.device)],
+                    dim=1
+                )  # [S, C, T, K]
+            else:
+                raise ValueError(f"Unexpected alpha_logits_y shape: {alpha_logits_y.shape}")
+        
+            alpha_full_mul = None
+            alpha_full_add = alpha_full_add_logits
+
+            alpha_full_add = alpha_full_add_logits
         else:
-            raise ValueError(f"Unexpected alpha/log2 shapes: {alpha_y_mul.shape}, {delta_y_add.shape}")
+            # reuse f_plate instead of a new trans_plate
+            with f_plate:
+                with c_plate:  # [C-1, T]
+                    log2_alpha_y = pyro.sample(
+                        "log2_alpha_y",
+                        dist.StudentT(df=3, loc=0.0, scale=20.0)
+                    )
+                    alpha_y_mul = pyro.deterministic("alpha_y_mul", 2.0 ** log2_alpha_y)
+                    delta_y_add = pyro.deterministic("delta_y_add", log2_alpha_y)
+
+            if alpha_y_mul.ndim == 2:
+                alpha_full_mul = torch.cat(
+                    [torch.ones(1, T, device=self.model.device), alpha_y_mul.to(self.model.device)],
+                    dim=0
+                )
+                alpha_full_add = torch.cat(
+                    [torch.zeros(1, T, device=self.model.device), delta_y_add.to(self.model.device)],
+                    dim=0
+                )
+            elif alpha_y_mul.ndim == 3:
+                S = alpha_y_mul.size(0)
+                alpha_full_mul = torch.cat(
+                    [torch.ones(S, 1, T, device=self.model.device), alpha_y_mul.to(self.model.device)],
+                    dim=1
+                )
+                alpha_full_add = torch.cat(
+                    [torch.zeros(S, 1, T, device=self.model.device), delta_y_add.to(self.model.device)],
+                    dim=1
+                )
+            else:
+                raise ValueError(f"Unexpected alpha/log2 shapes: {alpha_y_mul.shape}, {delta_y_add.shape}")
+
     
         # --------------------------------
         # Dispersion / variance priors
@@ -170,16 +211,16 @@ class TechnicalFitter:
             a = p_hat * kappa + 1e-3
             b = (1.0 - p_hat) * kappa + 1e-3
 
-            with pyro.plate("feature_plate_technical", T, dim=-1):
+            with f_plate:
                 mu_ntc = pyro.sample("mu_ntc", dist.Beta(a, b))  # [T]
             mu_y = mu_ntc
     
         elif distribution == 'multinomial':
-            with f_plate:
-                total_counts_per_feature = y_obs_ntc_tensor.sum(dim=0)  # [T, K]
-                concentration = total_counts_per_feature + 1.0
-                probs_baseline = pyro.sample("probs_baseline", dist.Dirichlet(concentration))  # [T, K]
-            mu_y = probs_baseline  # [T, K]
+            total_counts_per_feature = y_obs_ntc_tensor.sum(dim=0)  # [T, K]
+            concentration = total_counts_per_feature + 1.0          # [T, K]
+            # Each feature (T) has its own Dirichlet over K categories.
+            probs_baseline = pyro.sample("probs_baseline", dist.Dirichlet(concentration))  # [T, K]
+            mu_y = probs_baseline
     
         else:
             raise ValueError(f"Unknown distribution: {distribution}")
@@ -222,11 +263,14 @@ class TechnicalFitter:
             )
     
         elif distribution == 'multinomial':
-            mu_y_multi = mu_y.unsqueeze(0).expand(N, T, K)  # [N, T, K]
+            # mu_y is [T, K] baseline; expand to [N, T, K]
+            mu_y_multi = mu_y.unsqueeze(0).expand(N, T, K)
             observation_sampler(
                 y_obs_tensor=y_obs_ntc_tensor,
                 mu_y=mu_y_multi,
-                N=N, T=T, K=K
+                alpha_y_full=alpha_full_add,     # <— ADD THIS
+                groups_tensor=groups_ntc_tensor, # <— ADD THIS
+                N=N, T=T, K=K, C=C
             )
     
         elif distribution == 'mvnormal':
@@ -312,6 +356,20 @@ class TechnicalFitter:
 
         if denominator is None and modality.denominator is not None:
             denominator = modality.denominator
+
+        # Before attempting cis extraction:
+        if (
+            modality_name == self.model.primary_modality
+            and hasattr(self.model, 'counts')
+            and self.model.cis_gene is not None
+            and 'cis' in self.model.modalities
+        ):
+            if distribution == 'multinomial':
+                raise ValueError(
+                    "Primary modality is multinomial, but cis effect extraction "
+                    "is undefined for multinomial. Set a non-multinomial primary "
+                    "modality when cis is present."
+                )
 
         # For primary modality, use original counts (includes cis gene)
         # For other modalities, use modality counts
@@ -583,8 +641,8 @@ class TechnicalFitter:
         # Guide (init) for log2_alpha_y
         # ---------------------------
         def init_loc_fn(site):
-            if site["name"] == "log2_alpha_y":
-                # Sensible init:
+            name = site["name"]
+            if name == "log2_alpha_y":
                 if distribution == 'negbinom':
                     group_codes = meta_ntc["technical_group_code"].values
                     group_labels = np.array(sorted(set(group_codes) - {0}))
@@ -596,13 +654,16 @@ class TechnicalFitter:
                     init_arr = np.stack(init_values) if len(init_values) else np.zeros((0, T_fit), dtype=np.float32)
                     return torch.tensor(init_arr, dtype=torch.float32, device=self.model.device)
                 else:
-                    # neutral init for additive/logit models
                     return torch.zeros((C - 1, T_fit), dtype=torch.float32, device=self.model.device)
-            else:
-                return pyro.infer.autoguide.initialization.init_to_median(site)
 
-        # Guide choice: calmer for binomial, IAF for others
-        if distribution == 'binomial':
+            if name == "alpha_logits_y_raw":
+                # start at zero logits (i.e., no shift)
+                return torch.zeros((C - 1, T_fit, K), dtype=torch.float32, device=self.model.device)
+
+            return pyro.infer.autoguide.initialization.init_to_median(site)
+
+        # Guide choice: calmer for binomial & multinomial, IAF for others
+        if distribution in ('binomial', 'multinomial'):
             guide_cellline = pyro.infer.autoguide.AutoNormal(self._model_technical, init_loc_fn=init_loc_fn)
         else:
             guide_cellline = pyro.infer.autoguide.AutoIAFNormal(self._model_technical, init_loc_fn=init_loc_fn)
@@ -728,34 +789,59 @@ class TechnicalFitter:
         if "alpha_y" not in posterior_samples and "alpha_y_mul" in posterior_samples:
             posterior_samples["alpha_y"] = posterior_samples["alpha_y_mul"]
     
-        def _reconstruct_full(alpha_fit, baseline_value, fit_mask_bool):
+        def _reconstruct_full_2d(alpha_fit, baseline_value, fit_mask_bool):
             fit_idx = np.where(fit_mask_bool)[0]
-            if alpha_fit.dim() == 3:
-                S, Cminus1, T_fit_local = alpha_fit.shape
+            if alpha_fit.dim() == 3:           # [S, C-1, T_fit]
+                S, Cminus1, _ = alpha_fit.shape
                 full = torch.full((S, Cminus1 + 1, len(fit_mask_bool)),
                                   baseline_value, dtype=alpha_fit.dtype, device=alpha_fit.device)
                 full[:, 1:, fit_idx] = alpha_fit
-            elif alpha_fit.dim() == 2:
-                Cminus1, T_fit_local = alpha_fit.shape
+            elif alpha_fit.dim() == 2:         # [C-1, T_fit]
+                Cminus1, _ = alpha_fit.shape
                 full = torch.full((Cminus1 + 1, len(fit_mask_bool)),
                                   baseline_value, dtype=alpha_fit.dtype, device=alpha_fit.device)
                 full[1:, fit_idx] = alpha_fit
             else:
                 raise ValueError(f"Unexpected alpha shape: {alpha_fit.shape}")
             return full
+
+        def _reconstruct_full_3d(alpha_fit, baseline_value, fit_mask_bool):
+            # alpha_fit: [S?, C-1, T_fit, K] -> full: [S?, C, T_all, K]
+            fit_idx = np.where(fit_mask_bool)[0]
+            if alpha_fit.dim() == 4:
+                S, Cminus1, Tfit, K_ = alpha_fit.shape
+                full = torch.full((S, Cminus1 + 1, len(fit_mask_bool), K_),
+                                  baseline_value, dtype=alpha_fit.dtype, device=alpha_fit.device)
+                full[:, 1:, fit_idx, :] = alpha_fit
+            elif alpha_fit.dim() == 3:
+                Cminus1, Tfit, K_ = alpha_fit.shape
+                full = torch.full((Cminus1 + 1, len(fit_mask_bool), K_),
+                                  baseline_value, dtype=alpha_fit.dtype, device=alpha_fit.device)
+                full[1:, fit_idx, :] = alpha_fit
+            else:
+                raise ValueError(f"Unexpected 3D alpha shape: {alpha_fit.shape}")
+            return full
     
-        # multiplicative
-        alpha_y_mult_fit = posterior_samples["alpha_y"]                 # [S?, C-1, T_fit]
-        alpha_y_mult_full = _reconstruct_full(alpha_y_mult_fit, baseline_value=1.0, fit_mask_bool=fit_mask)
-    
-        # additive/logit (log2_alpha_y)
-        log2_alpha_fit = posterior_samples["log2_alpha_y"]              # [S?, C-1, T_fit]
-        alpha_y_add_full = _reconstruct_full(log2_alpha_fit, baseline_value=0.0, fit_mask_bool=fit_mask)
-    
-        # Store in posterior dict
-        posterior_samples["alpha_y"]       = alpha_y_mult_full   # back-compat
-        posterior_samples["alpha_y_mult"]  = alpha_y_mult_full
-        posterior_samples["alpha_y_add"]   = alpha_y_add_full
+        if distribution == "multinomial":
+            # additive logits only
+            alpha_logits_fit = posterior_samples["alpha_logits_y"]       # [S?, C-1, T_fit, K]
+            alpha_add_full   = _reconstruct_full_3d(alpha_logits_fit, baseline_value=0.0, fit_mask_bool=fit_mask)
+
+            # store under consistent keys
+            posterior_samples["alpha_y_add"]   = alpha_add_full          # [S?, C, T_all, K]
+            posterior_samples["alpha_y_mult"]  = None
+            posterior_samples["alpha_y"]       = alpha_add_full          # canonical
+
+        else:
+            # existing path for 2D α
+            alpha_y_mult_fit = posterior_samples["alpha_y"]
+            alpha_y_mult_full = _reconstruct_full_2d(alpha_y_mult_fit, baseline_value=1.0, fit_mask_bool=fit_mask)
+            log2_alpha_fit = posterior_samples["log2_alpha_y"]
+            alpha_y_add_full = _reconstruct_full_2d(log2_alpha_fit, baseline_value=0.0, fit_mask_bool=fit_mask)
+
+            posterior_samples["alpha_y"]       = alpha_y_mult_full
+            posterior_samples["alpha_y_mult"]  = alpha_y_mult_full
+            posterior_samples["alpha_y_add"]   = alpha_y_add_full
     
         # ----------------------------------------
         # Feature metadata flags
@@ -782,53 +868,129 @@ class TechnicalFitter:
         # Persist results at modality level
         # ----------------------------------------
         # For primary modality fitted with original counts (includes cis gene),
-        # we need to extract alpha_x for the cis gene and exclude it from modality alpha_y
+        # we need to extract alpha_x for the cis gene and exclude it from modality alpha_y.
         if modality_name == self.model.primary_modality and hasattr(self.model, 'counts') and \
            self.model.cis_gene is not None and 'cis' in self.model.modalities:
+
+            # Enforce: cis effect must NOT be multinomial
+            if distribution == 'multinomial':
+                raise ValueError(
+                    "Primary modality uses a multinomial distribution, "
+                    "but cis effect extraction is undefined for multinomial. "
+                    "Ensure the primary modality is not multinomial when cis is present."
+                )
 
             # Check if cis gene is in the original counts
             if isinstance(self.model.counts, pd.DataFrame) and self.model.cis_gene in self.model.counts.index:
                 all_genes_orig = self.model.counts.index.tolist()
                 cis_idx_orig = all_genes_orig.index(self.model.cis_gene)
 
-                # Full alpha includes all genes from original counts (92 features)
-                full_alpha_y_mult = posterior_samples["alpha_y_mult"]  # (S, C, T_all)
-                full_alpha_y_add = posterior_samples["alpha_y_add"]
+                # Expect alpha_y_mult and alpha_y_add to be [S?, C, T_all] for non-multinomial primary
+                full_alpha_y_mult = posterior_samples["alpha_y_mult"]
+                full_alpha_y_add  = posterior_samples["alpha_y_add"]
+
+                if full_alpha_y_mult is None:
+                    raise RuntimeError(
+                        "alpha_y_mult is None while attempting cis extraction. "
+                        "This can happen if the distribution is multinomial; "
+                        "check distribution handling earlier."
+                    )
 
                 if cis_idx_orig < full_alpha_y_mult.shape[-1]:
                     # Extract cis gene alpha
                     self.model.alpha_x_prefit = full_alpha_y_mult[..., cis_idx_orig]
                     self.model.alpha_x_type = 'posterior'
 
-                    # For modality alpha_y, exclude cis gene (91 features)
+                    # Exclude cis from modality alpha_y
                     all_idx = list(range(full_alpha_y_mult.shape[-1]))
                     trans_idx = [i for i in all_idx if i != cis_idx_orig]
 
-                    modality.alpha_y_prefit = full_alpha_y_mult[..., trans_idx]
+                    modality.alpha_y_prefit      = full_alpha_y_mult[..., trans_idx]
                     modality.alpha_y_prefit_mult = full_alpha_y_mult[..., trans_idx]
-                    modality.alpha_y_prefit_add = full_alpha_y_add[..., trans_idx]
+                    modality.alpha_y_prefit_add  = full_alpha_y_add[..., trans_idx]
 
-                    # Also update posterior_samples to match modality features
-                    posterior_samples["alpha_y"] = modality.alpha_y_prefit
+                    # ========================================
+                    # Extract cis gene posterior samples and store in cis modality
+                    # ========================================
+                    cis_modality = self.model.get_modality('cis')
+                    cis_posterior = {}
+
+                    # Extract raw sampled parameters for cis gene
+                    if 'log2_alpha_y' in posterior_samples:
+                        cis_posterior['log2_alpha_x'] = posterior_samples['log2_alpha_y'][..., cis_idx_orig:cis_idx_orig+1]
+
+                    if 'alpha_y_mul' in posterior_samples:
+                        cis_posterior['alpha_x_mul'] = posterior_samples['alpha_y_mul'][..., cis_idx_orig:cis_idx_orig+1]
+
+                    if 'delta_y_add' in posterior_samples:
+                        cis_posterior['delta_x_add'] = posterior_samples['delta_y_add'][..., cis_idx_orig:cis_idx_orig+1]
+
+                    if 'o_y' in posterior_samples:
+                        cis_posterior['o_x'] = posterior_samples['o_y'][..., cis_idx_orig:cis_idx_orig+1]
+
+                    if 'mu_ntc' in posterior_samples:
+                        cis_posterior['mu_ntc'] = posterior_samples['mu_ntc'][..., cis_idx_orig:cis_idx_orig+1]
+
+                    # Create reconstructed alpha with baseline (matching what we do for alpha_y)
+                    # These already have shape [S, C-1, 1] from the extraction above
+                    if 'alpha_x_mul' in cis_posterior:
+                        alpha_x_mul_raw = cis_posterior['alpha_x_mul']  # [S, C-1, 1]
+                        # Add baseline (C=1) dimension
+                        if alpha_x_mul_raw.dim() == 3:
+                            S, Cminus1, _ = alpha_x_mul_raw.shape
+                            cis_posterior['alpha_x_mult'] = torch.cat(
+                                [torch.ones(S, 1, 1, device=alpha_x_mul_raw.device), alpha_x_mul_raw],
+                                dim=1
+                            )  # [S, C, 1]
+                        cis_posterior['alpha_x'] = cis_posterior['alpha_x_mult']  # alias
+
+                    if 'delta_x_add' in cis_posterior:
+                        delta_x_add_raw = cis_posterior['delta_x_add']  # [S, C-1, 1]
+                        # Add baseline (C=0) dimension
+                        if delta_x_add_raw.dim() == 3:
+                            S, Cminus1, _ = delta_x_add_raw.shape
+                            cis_posterior['alpha_x_add'] = torch.cat(
+                                [torch.zeros(S, 1, 1, device=delta_x_add_raw.device), delta_x_add_raw],
+                                dim=1
+                            )  # [S, C, 1]
+
+                    # Store in cis modality
+                    cis_modality.posterior_samples_technical = cis_posterior
+                    print(f"[INFO] Stored cis gene posterior samples in 'cis' modality: {list(cis_posterior.keys())}")
+
+                    # ========================================
+                    # Exclude cis gene from ALL primary modality posterior samples
+                    # ========================================
+                    posterior_samples["alpha_y"]      = modality.alpha_y_prefit
                     posterior_samples["alpha_y_mult"] = modality.alpha_y_prefit_mult
-                    posterior_samples["alpha_y_add"] = modality.alpha_y_prefit_add
+                    posterior_samples["alpha_y_add"]  = modality.alpha_y_prefit_add
 
-                    print(f"[INFO] Extracted alpha_x for cis '{self.model.cis_gene}' and excluded it from modality alpha_y")
+                    # CRITICAL: Also exclude cis gene from ALL raw posterior samples
+                    # These raw samples are used for analysis/diagnostics, so they must match gene modality
+                    for key in ['log2_alpha_y', 'alpha_y_mul', 'delta_y_add', 'o_y', 'mu_ntc']:
+                        if key in posterior_samples:
+                            raw_sample = posterior_samples[key]
+                            # These are typically [S, C-1, T] or [S, 1, T] depending on the parameter
+                            if raw_sample is not None and raw_sample.shape[-1] == len(all_genes_orig):
+                                posterior_samples[key] = raw_sample[..., trans_idx]
+                                print(f"[INFO] Excluded cis gene from '{key}': {raw_sample.shape} -> {posterior_samples[key].shape}")
+
+                    print(f"[INFO] Extracted alpha_x for cis '{self.model.cis_gene}' and excluded it from ALL primary modality posterior samples")
                 else:
-                    # Cis gene was filtered out, just store as-is
-                    modality.alpha_y_prefit = posterior_samples["alpha_y"]
+                    # Cis gene not present after filtering; store as-is
+                    modality.alpha_y_prefit      = posterior_samples["alpha_y"]
                     modality.alpha_y_prefit_mult = posterior_samples["alpha_y_mult"]
-                    modality.alpha_y_prefit_add = posterior_samples["alpha_y_add"]
+                    modality.alpha_y_prefit_add  = posterior_samples["alpha_y_add"]
             else:
-                # Cis gene not in counts, store as-is
-                modality.alpha_y_prefit = posterior_samples["alpha_y"]
+                # Cis gene not in counts; store as-is
+                modality.alpha_y_prefit      = posterior_samples["alpha_y"]
                 modality.alpha_y_prefit_mult = posterior_samples["alpha_y_mult"]
-                modality.alpha_y_prefit_add = posterior_samples["alpha_y_add"]
+                modality.alpha_y_prefit_add  = posterior_samples["alpha_y_add"]
         else:
             # Not primary modality or no cis gene, store as-is
-            modality.alpha_y_prefit = posterior_samples["alpha_y"]
+            modality.alpha_y_prefit      = posterior_samples["alpha_y"]
             modality.alpha_y_prefit_mult = posterior_samples["alpha_y_mult"]
-            modality.alpha_y_prefit_add = posterior_samples["alpha_y_add"]
+            modality.alpha_y_prefit_add  = posterior_samples["alpha_y_add"]
 
         modality.posterior_samples_technical = posterior_samples
 
