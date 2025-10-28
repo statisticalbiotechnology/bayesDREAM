@@ -87,21 +87,49 @@ class ModelLoader:
 
         # Load per-modality alpha_y_prefit and posterior_samples_technical
         for mod_name in modalities_to_load:
+            mod = self.model.modalities[mod_name]
+
             mod_path = os.path.join(input_dir, f'alpha_y_prefit_{mod_name}.pt')
             if os.path.exists(mod_path):
                 alpha_y_mod = torch.load(mod_path)
                 if use_posterior:
-                    self.model.modalities[mod_name].alpha_y_prefit = alpha_y_mod
+                    alpha_y_to_set = alpha_y_mod
                 else:
-                    self.model.modalities[mod_name].alpha_y_prefit = alpha_y_mod.mean(dim=0)
-                loaded[f'alpha_y_prefit_{mod_name}'] = self.model.modalities[mod_name].alpha_y_prefit
+                    alpha_y_to_set = alpha_y_mod.mean(dim=0)
+
+                # Set generic alpha_y_prefit
+                mod.alpha_y_prefit = alpha_y_to_set
+
+                # Also set distribution-specific attribute
+                if mod.distribution == 'negbinom':
+                    # For negbinom, saved value is multiplicative
+                    mod.alpha_y_prefit_mult = alpha_y_to_set
+                else:
+                    # For normal, binomial, mvnormal, multinomial: additive
+                    mod.alpha_y_prefit_add = alpha_y_to_set
+
+                loaded[f'alpha_y_prefit_{mod_name}'] = mod.alpha_y_prefit
                 print(f"[LOAD] {mod_name}.alpha_y_prefit ← {mod_path}")
 
             # Load modality-specific posterior_samples_technical
             posterior_path = os.path.join(input_dir, f'posterior_samples_technical_{mod_name}.pt')
             if os.path.exists(posterior_path):
-                self.model.modalities[mod_name].posterior_samples_technical = torch.load(posterior_path)
-                loaded[f'posterior_samples_technical_{mod_name}'] = self.model.modalities[mod_name].posterior_samples_technical
+                mod.posterior_samples_technical = torch.load(posterior_path)
+
+                # Also extract and set specific alpha attributes from posterior_samples
+                # This ensures backward compatibility even if files were saved without the specific attributes
+                if 'alpha_y_add' in mod.posterior_samples_technical:
+                    if not hasattr(mod, 'alpha_y_prefit_add') or mod.alpha_y_prefit_add is None:
+                        mod.alpha_y_prefit_add = mod.posterior_samples_technical['alpha_y_add']
+                        print(f"[LOAD] {mod_name}.alpha_y_prefit_add ← extracted from posterior_samples_technical")
+
+                if 'alpha_y_mult' in mod.posterior_samples_technical or 'alpha_y' in mod.posterior_samples_technical:
+                    alpha_y_mult_key = 'alpha_y_mult' if 'alpha_y_mult' in mod.posterior_samples_technical else 'alpha_y'
+                    if not hasattr(mod, 'alpha_y_prefit_mult') or mod.alpha_y_prefit_mult is None:
+                        mod.alpha_y_prefit_mult = mod.posterior_samples_technical[alpha_y_mult_key]
+                        print(f"[LOAD] {mod_name}.alpha_y_prefit_mult ← extracted from posterior_samples_technical")
+
+                loaded[f'posterior_samples_technical_{mod_name}'] = mod.posterior_samples_technical
                 print(f"[LOAD] {mod_name}.posterior_samples_technical ← {posterior_path}")
 
         print(f"[LOAD] Technical fit loaded from {input_dir}")

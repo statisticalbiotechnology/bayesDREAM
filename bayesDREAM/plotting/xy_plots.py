@@ -701,6 +701,10 @@ def plot_negbinom_xy(
             fig, ax = plt.subplots(1, 1, figsize=(8, 5))
             axes = [ax]
     else:
+        # Single axis provided - cannot show both corrected and uncorrected
+        if show_correction == 'both':
+            warnings.warn("show_correction='both' not supported when ax is provided (multi-panel mode). Showing uncorrected only.")
+            show_correction = 'uncorrected'
         axes = [ax]
 
     # Get technical group labels
@@ -710,9 +714,17 @@ def plot_negbinom_xy(
     # Detect NTC cells for gradient coloring
     is_ntc = df['target'].str.lower() == 'ntc'
 
-    # Create colormap for gradient if needed
+    # Create colormaps for NTC gradient (per technical group)
+    # Each group gets white → group_color gradient
+    group_cmaps = {}
     if show_ntc_gradient:
-        cmap = plt.cm.viridis_r  # Reversed: darker = fewer NTCs
+        for group_label in group_labels:
+            base_color = color_palette.get(group_label, f'C0')
+            # Create colormap: white (low color value) → group color (high color value)
+            group_cmaps[group_label] = LinearSegmentedColormap.from_list(
+                f"white_{group_label}",
+                ["white", base_color]
+            )
 
     # Plot function
     def _plot_one(ax_plot, corrected):
@@ -733,7 +745,7 @@ def plot_negbinom_xy(
                 y_expr = df_group['y_obs'] / df_group['sum_factor']
 
             # Filter valid
-            valid = (df_group['x_true'] > 0) & np.isfinite(y_expr) & (y_expr > 0)
+            valid = (df_group['x_true'] > 0) & np.isfinite(y_expr)
             df_group = df_group[valid].copy()
             y_expr = y_expr[valid]
 
@@ -745,7 +757,7 @@ def plot_negbinom_xy(
 
             # k-NN smoothing
             k = _knn_k(len(df_group), window)
-            if show_ntc_gradient and not corrected:
+            if show_ntc_gradient:
                 # Smoothing with NTC tracking
                 x_smooth, y_smooth, ntc_prop = _smooth_knn(
                     df_group['x_true'].values,
@@ -754,24 +766,27 @@ def plot_negbinom_xy(
                     is_ntc=is_ntc_group
                 )
 
-                # Use gradient coloring
+                # Use per-group gradient coloring (white → group color)
+                # Color value = 1 - ntc_prop: high NTC → 0 → white, low NTC → 1 → group color
+                group_cmap = group_cmaps.get(group_label, plt.cm.gray)
                 plot_colored_line(
                     x=np.log2(x_smooth),
                     y=np.log2(y_smooth),
-                    color_values=1 - ntc_prop,  # Darker = fewer NTCs
-                    cmap=cmap,
+                    color_values=1 - ntc_prop,  # Darker (group color) = fewer NTCs
+                    cmap=group_cmap,
                     ax=ax_plot,
                     linewidth=2
                 )
 
-                # Add dummy invisible line for legend label
+                # Add dummy invisible line for legend label (using base group color)
                 color = color_palette.get(group_label, f'C{group_code}')
                 ax_plot.plot([], [], color=color, linewidth=2, label=group_label)
 
-                # Add colorbar (once per axis)
+                # Add colorbar (once per axis) - use grayscale to show NTC gradient
                 if not colorbar_added:
                     fig = ax_plot.get_figure()
-                    sm = ScalarMappable(cmap=cmap, norm=Normalize(0, 1))
+                    cmap_gray = LinearSegmentedColormap.from_list("gray_gradient", ["white", "black"])
+                    sm = ScalarMappable(cmap=cmap_gray, norm=Normalize(0, 1))
                     sm.set_array([])
                     cbar = fig.colorbar(sm, ax=ax_plot)
                     cbar.set_label('1 - Proportion NTC (darker = fewer NTCs)')
@@ -833,7 +848,7 @@ def plot_binomial_xy(
     color_palette: Dict[str, str],
     show_trans_function: bool,
     show_ntc_gradient: bool = False,
-    show_correction: str = 'uncorrected',
+    show_correction: str = 'both',
     xlabel: str = "log2(x_true)",
     ax: Optional[plt.Axes] = None,
     **kwargs
@@ -850,22 +865,17 @@ def plot_binomial_xy(
         If True, color lines by NTC proportion in k-NN window (default: False)
         Lighter colors = more NTC cells, Darker colors = fewer NTC cells
     show_correction : str
-        Technical correction parameter (for API consistency)
-        Note: Technical correction not yet implemented for binomial/PSI
-        Currently only 'uncorrected' is supported
+        'uncorrected': no technical correction
+        'corrected': apply alpha_y_add additive correction (PSI - alpha_y_add)
+        'both': show both side-by-side
 
     Notes
     -----
-    Technical correction (alpha_y) is not yet implemented for binomial distributions.
-    PSI is already a ratio (counts/denominator), making standard correction approaches
-    less straightforward. Currently always plots uncorrected data.
+    Technical correction for binomial uses alpha_y_add (additive correction on LOGIT scale).
+    logit(PSI) = log(PSI / (1 - PSI))
+    logit_corrected = logit(PSI) - alpha_y_add
+    PSI_corrected = 1 / (1 + exp(-logit_corrected))
     """
-    # Check show_correction parameter
-    if show_correction != 'uncorrected':
-        warnings.warn(
-            f"Technical correction not implemented for binomial distributions. "
-            f"Ignoring show_correction='{show_correction}' and plotting uncorrected only."
-        )
     # Get data
     feature_idx = _get_feature_index(feature, modality)
     if feature_idx is None:
@@ -901,9 +911,35 @@ def plot_binomial_xy(
     if len(df) == 0:
         raise ValueError(f"No data remaining after filtering (min_counts={min_counts})")
 
+    # Check technical correction availability
+    # First check attribute, then fall back to posterior_samples_technical dict
+    has_technical_fit = False
+    if hasattr(modality, 'alpha_y_prefit_add') and modality.alpha_y_prefit_add is not None:
+        has_technical_fit = True
+    elif hasattr(modality, 'posterior_samples_technical') and modality.posterior_samples_technical is not None:
+        if 'alpha_y_add' in modality.posterior_samples_technical:
+            has_technical_fit = True
+            # Set the attribute for future use
+            modality.alpha_y_prefit_add = modality.posterior_samples_technical['alpha_y_add']
+            print(f"[INFO] Set alpha_y_prefit_add from posterior_samples_technical for modality '{modality.name}'")
+
+    if show_correction == 'corrected' and not has_technical_fit:
+        warnings.warn(f"Technical fit not available for modality '{modality.name}' - showing uncorrected only")
+        show_correction = 'uncorrected'
+
     # Create axes
     if ax is None:
-        fig, ax = plt.subplots(1, 1, figsize=(8, 5))
+        if show_correction == 'both':
+            fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        else:
+            fig, ax = plt.subplots(1, 1, figsize=(8, 5))
+            axes = [ax]
+    else:
+        # Single axis provided - cannot show both corrected and uncorrected
+        if show_correction == 'both':
+            warnings.warn("show_correction='both' not supported when ax is provided (multi-panel mode). Showing uncorrected only.")
+            show_correction = 'uncorrected'
+        axes = [ax]
 
     # Get technical group labels
     group_labels = get_technical_group_labels(model)
@@ -912,82 +948,129 @@ def plot_binomial_xy(
     # Detect NTC cells for gradient coloring
     is_ntc = df['target'].str.lower() == 'ntc'
 
-    # Create colormap for gradient if needed
+    # Create colormaps for NTC gradient (per technical group)
+    # Each group gets white → group_color gradient
+    group_cmaps = {}
     if show_ntc_gradient:
-        cmap = plt.cm.viridis_r  # Reversed: darker = fewer NTCs
+        for group_label in group_labels:
+            base_color = color_palette.get(group_label, f'C0')
+            # Create colormap: white (low color value) → group color (high color value)
+            group_cmaps[group_label] = LinearSegmentedColormap.from_list(
+                f"white_{group_label}",
+                ["white", base_color]
+            )
+
+    # Plot function
+    def _plot_one(ax_plot, corrected):
+        colorbar_added = False  # Track if colorbar added
+
+        for group_code, group_label in zip(group_codes, group_labels):
+            df_group = df[df['technical_group_code'] == group_code].copy()
+
+            if len(df_group) == 0:
+                continue
+
+            y_plot = df_group['PSI'].values
+
+            if corrected and has_technical_fit:
+                # Apply additive correction on LOGIT scale
+                # 1. Convert PSI (percentage) to proportion [0, 1]
+                epsilon = 1e-6  # Small constant to avoid log(0)
+                p = np.clip(y_plot / 100.0, epsilon, 1 - epsilon)
+
+                # 2. Calculate logit
+                logit_p = np.log(p / (1 - p))
+
+                # 3. Apply correction on logit scale
+                alpha_y_add = modality.alpha_y_prefit_add
+                if alpha_y_add.ndim == 3:
+                    correction = _to_scalar(alpha_y_add[:, group_code, feature_idx].mean())
+                else:
+                    correction = _to_scalar(alpha_y_add[group_code, feature_idx])
+                logit_corrected = logit_p - correction
+
+                # 4. Convert back to proportion
+                p_corrected = 1.0 / (1.0 + np.exp(-logit_corrected))
+
+                # 5. Convert back to percentage
+                y_plot = p_corrected * 100.0
+
+            # Get is_ntc for this group
+            is_ntc_group = is_ntc[df_group.index].values
+
+            # k-NN smoothing
+            k = _knn_k(len(df_group), window)
+            if show_ntc_gradient:
+                # Smoothing with NTC tracking
+                x_smooth, y_smooth, ntc_prop = _smooth_knn(
+                    df_group['x_true'].values,
+                    y_plot,
+                    k,
+                    is_ntc=is_ntc_group
+                )
+
+                # Use per-group gradient coloring (white → group color)
+                # Color value = 1 - ntc_prop: high NTC → 0 → white, low NTC → 1 → group color
+                group_cmap = group_cmaps.get(group_label, plt.cm.gray)
+                plot_colored_line(
+                    x=np.log2(x_smooth),
+                    y=y_smooth,
+                    color_values=1 - ntc_prop,  # Darker (group color) = fewer NTCs
+                    cmap=group_cmap,
+                    ax=ax_plot,
+                    linewidth=2
+                )
+
+                # Add dummy invisible line for legend label (using base group color)
+                color = color_palette.get(group_label, f'C{group_code}')
+                ax_plot.plot([], [], color=color, linewidth=2, label=group_label)
+
+                # Add colorbar (once per axis) - use grayscale to show NTC gradient
+                if not colorbar_added:
+                    fig = ax_plot.get_figure()
+                    cmap_gray = LinearSegmentedColormap.from_list("gray_gradient", ["white", "black"])
+                    sm = ScalarMappable(cmap=cmap_gray, norm=Normalize(0, 1))
+                    sm.set_array([])
+                    cbar = fig.colorbar(sm, ax=ax_plot)
+                    cbar.set_label('1 - Proportion NTC (darker = fewer NTCs)')
+                    colorbar_added = True
+            else:
+                # Standard smoothing without NTC tracking
+                x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, y_plot, k)
+
+                # Use standard coloring
+                color = color_palette.get(group_label, f'C{group_code}')
+                ax_plot.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2, label=group_label)
+
+        # Trans function overlay (if trans model fitted)
+        if show_trans_function and not corrected:
+            x_range = np.linspace(x_true.min(), x_true.max(), 100)
+            y_pred = predict_trans_function(model, feature, x_range, modality_name=modality.name)
+
+            if y_pred is not None:
+                # For binomial, PSI is in percentage scale [0, 100], so scale and clip predictions
+                y_pred_pct = y_pred * 100.0
+                y_pred_clipped = np.clip(y_pred_pct, 0, 100)
+                ax_plot.plot(np.log2(x_range), y_pred_clipped,
+                           color='blue', linestyle='--', linewidth=2,
+                           label='Fitted Trans Function')
+
+        ax_plot.set_xlabel(xlabel)
+        ax_plot.set_ylabel('PSI (%)')
+        title_suffix = ' (corrected)' if corrected else ' (uncorrected)'
+        ax_plot.set_title(f"{model.cis_gene} → {feature} (min_counts={min_counts}{title_suffix})")
+        ax_plot.legend(frameon=False)
 
     # Plot
-    colorbar_added = False  # Track if colorbar added
+    if show_correction == 'both':
+        _plot_one(axes[0], corrected=False)
+        _plot_one(axes[1], corrected=True)
+    elif show_correction == 'corrected':
+        _plot_one(axes[0], corrected=True)
+    else:
+        _plot_one(axes[0], corrected=False)
 
-    for group_code, group_label in zip(group_codes, group_labels):
-        df_group = df[df['technical_group_code'] == group_code].copy()
-
-        if len(df_group) == 0:
-            continue
-
-        # Get is_ntc for this group
-        is_ntc_group = is_ntc[df_group.index].values
-
-        # k-NN smoothing
-        k = _knn_k(len(df_group), window)
-        if show_ntc_gradient:
-            # Smoothing with NTC tracking
-            x_smooth, y_smooth, ntc_prop = _smooth_knn(
-                df_group['x_true'].values,
-                df_group['PSI'].values,
-                k,
-                is_ntc=is_ntc_group
-            )
-
-            # Use gradient coloring
-            plot_colored_line(
-                x=np.log2(x_smooth),
-                y=y_smooth,
-                color_values=1 - ntc_prop,  # Darker = fewer NTCs
-                cmap=cmap,
-                ax=ax,
-                linewidth=2
-            )
-
-            # Add dummy invisible line for legend label
-            color = color_palette.get(group_label, f'C{group_code}')
-            ax.plot([], [], color=color, linewidth=2, label=group_label)
-
-            # Add colorbar (once per axis)
-            if not colorbar_added:
-                fig = ax.get_figure()
-                sm = ScalarMappable(cmap=cmap, norm=Normalize(0, 1))
-                sm.set_array([])
-                cbar = fig.colorbar(sm, ax=ax)
-                cbar.set_label('1 - Proportion NTC (darker = fewer NTCs)')
-                colorbar_added = True
-        else:
-            # Standard smoothing without NTC tracking
-            x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, df_group['PSI'].values, k)
-
-            # Use standard coloring
-            color = color_palette.get(group_label, f'C{group_code}')
-            ax.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2, label=group_label)
-
-    # Trans function overlay (if trans model fitted)
-    if show_trans_function:
-        x_range = np.linspace(x_true.min(), x_true.max(), 100)
-        y_pred = predict_trans_function(model, feature, x_range, modality_name=modality.name)
-
-        if y_pred is not None:
-            # For binomial, PSI is in percentage scale [0, 100], so scale and clip predictions
-            y_pred_pct = y_pred * 100.0
-            y_pred_clipped = np.clip(y_pred_pct, 0, 100)
-            ax.plot(np.log2(x_range), y_pred_clipped,
-                   color='blue', linestyle='--', linewidth=2,
-                   label='Fitted Trans Function')
-
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel('PSI (%)')
-    ax.set_title(f"{model.cis_gene} → {feature} (min_counts={min_counts}, uncorrected)")
-    ax.legend(frameon=False)
-
-    return ax
+    return axes[0] if len(axes) == 1 else axes
 
 
 def plot_multinomial_xy(
@@ -1009,17 +1092,25 @@ def plot_multinomial_xy(
     Plot multinomial (e.g., donor/acceptor usage) - one subplot per category.
 
     Y-axis: Proportion for each category
-    Layout: One row with K subplots (one per category)
-    If show_correction='both': Two rows × K subplots
+    Layout:
+    - If show_correction='uncorrected' or 'corrected': K columns (one per category), 1 row
+    - If show_correction='both': 2 columns (uncorrected left, corrected right), K rows (one per category)
 
     Parameters
     ----------
     show_ntc_gradient : bool
         If True, color lines by NTC proportion in k-NN window (default: False)
         **Note**: Not yet fully implemented for multinomial - will issue warning
+
+    Notes
+    -----
+    Technical correction for multinomial uses alpha_y_add (additive on LOGIT scale).
+    logits_corrected = logits - alpha_y_add
+    proportions_corrected = softmax(logits_corrected)
     """
     if show_ntc_gradient:
         warnings.warn("NTC gradient coloring not yet implemented for multinomial distributions - using standard colors")
+
     # Get data
     feature_idx = _get_feature_index(feature, modality)
     if feature_idx is None:
@@ -1044,36 +1135,54 @@ def plot_multinomial_xy(
         'target': model.meta['target'].values[valid_mask]
     })
 
-    # Add proportions for each category
+    # Store raw counts for each category (needed for correction)
+    counts_filtered = counts_3d[valid_mask, :]  # (n_cells_filtered, K)
+
+    # Compute raw proportions
+    total_filtered = total_counts[valid_mask]
+    with np.errstate(divide='ignore', invalid='ignore'):
+        props_raw = np.where(total_filtered[:, None] > 0,
+                             counts_filtered / total_filtered[:, None],
+                             1.0 / K)  # Uniform if no counts
+
+    # Add raw proportions for each category
     for k in range(K):
-        df[f'cat_{k}'] = counts_3d[valid_mask, k] / total_counts[valid_mask]
+        df[f'cat_{k}'] = props_raw[:, k]
 
     # Filter valid x_true
     valid = df['x_true'] > 0
     df = df[valid].copy()
+    props_raw = props_raw[valid, :]
 
     if len(df) == 0:
         raise ValueError(f"No data remaining after filtering (min_counts={min_counts})")
 
     # Check technical correction availability
-    has_technical_fit = modality.alpha_y_prefit is not None
+    has_technical_fit = False
+    if hasattr(modality, 'alpha_y_prefit_add') and modality.alpha_y_prefit_add is not None:
+        has_technical_fit = True
+    elif hasattr(modality, 'posterior_samples_technical') and modality.posterior_samples_technical is not None:
+        if 'alpha_y_add' in modality.posterior_samples_technical:
+            has_technical_fit = True
+            # Set the attribute for future use
+            modality.alpha_y_prefit_add = modality.posterior_samples_technical['alpha_y_add']
+            print(f"[INFO] Set alpha_y_prefit_add from posterior_samples_technical for modality '{modality.name}'")
+
     if show_correction == 'corrected' and not has_technical_fit:
         warnings.warn(f"Technical fit not available for modality '{modality.name}' - showing uncorrected only")
         show_correction = 'uncorrected'
 
-    # Note: Multinomial technical correction is complex and may not be implemented yet
-    if show_correction != 'uncorrected' and has_technical_fit:
-        warnings.warn("Technical correction for multinomial not yet fully implemented - showing uncorrected")
-        show_correction = 'uncorrected'
-
     # Create figure
-    if figsize is None:
-        figsize = (4 * K, 5) if show_correction != 'both' else (4 * K, 10)
-
+    # Layout: if show_correction='both', then K rows × 2 columns, else 1 row × K columns
     if show_correction == 'both':
-        fig, axes = plt.subplots(2, K, figsize=figsize, squeeze=False)
+        if figsize is None:
+            figsize = (12, 4 * K)  # 2 columns, K rows
+        fig, axes = plt.subplots(K, 2, figsize=figsize, squeeze=False)
     else:
-        fig, axes = plt.subplots(1, K, figsize=figsize, squeeze=False)
+        if figsize is None:
+            figsize = (4 * K, 5)  # K columns, 1 row
+        fig, axes_row = plt.subplots(1, K, figsize=figsize, squeeze=False)
+        axes = axes_row  # Shape: (1, K)
 
     # Get technical group labels
     group_labels = get_technical_group_labels(model)
@@ -1081,11 +1190,75 @@ def plot_multinomial_xy(
 
     # Plot each category
     for k in range(K):
-        row_idx = 0 if show_correction != 'both' else (0, 1)
-        rows = [row_idx] if isinstance(row_idx, int) else row_idx
+        if show_correction == 'both':
+            # Row k, columns 0 (uncorrected) and 1 (corrected)
+            for col_idx, corrected in enumerate([False, True]):
+                ax = axes[k, col_idx]
 
-        for row in rows:
-            ax = axes[row, k]
+                for group_code, group_label in zip(group_codes, group_labels):
+                    df_group = df[df['technical_group_code'] == group_code].copy()
+
+                    if len(df_group) == 0:
+                        continue
+
+                    # Get proportions for this group and category
+                    group_mask = df['technical_group_code'] == group_code
+                    props_group = props_raw[group_mask, :]  # Shape: (n_cells_in_group, K)
+
+                    if corrected and has_technical_fit:
+                        # Apply technical correction on logit scale
+                        epsilon = 1e-6
+                        props_clipped = np.clip(props_group, epsilon, 1 - epsilon)
+
+                        # Convert to logits
+                        logits = np.log(props_clipped)  # Log of each proportion
+
+                        # Get alpha_y_add for this group and feature
+                        alpha_y_add = modality.alpha_y_prefit_add
+                        if alpha_y_add.ndim == 4:
+                            # [S, C, T, K] - take mean over samples
+                            alpha_correction = alpha_y_add[:, group_code, feature_idx, :].mean(axis=0)  # [K]
+                        elif alpha_y_add.ndim == 3:
+                            # [C, T, K]
+                            alpha_correction = alpha_y_add[group_code, feature_idx, :]  # [K]
+                        else:
+                            raise ValueError(f"Unexpected alpha_y_add shape: {alpha_y_add.shape}")
+
+                        # Convert to numpy if tensor
+                        if hasattr(alpha_correction, 'detach'):
+                            alpha_correction = alpha_correction.detach().cpu().numpy()
+
+                        # Apply correction
+                        logits_corrected = logits - alpha_correction  # Broadcast: (n_cells, K) - (K,)
+
+                        # Softmax to get corrected proportions
+                        logits_max = logits_corrected.max(axis=1, keepdims=True)
+                        exp_logits = np.exp(logits_corrected - logits_max)
+                        props_corrected = exp_logits / exp_logits.sum(axis=1, keepdims=True)
+
+                        y_data = props_corrected[:, k]
+                    else:
+                        y_data = df_group[f'cat_{k}'].values
+
+                    # k-NN smoothing
+                    knn = _knn_k(len(df_group), window)
+                    x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, y_data, knn)
+
+                    # Plot
+                    color = color_palette.get(group_label, f'C{group_code}')
+                    ax.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2,
+                           label=group_label if k == 0 else None)
+
+                ax.set_xlabel(xlabel)
+                ax.set_ylabel(f'Proportion (Category {k})')
+                title_suffix = ' (corrected)' if corrected else ' (uncorrected)'
+                ax.set_title(f"Category {k}{title_suffix}")
+                if k == 0:
+                    ax.legend(frameon=False, loc='upper right')
+        else:
+            # Single row, column k
+            ax = axes[0, k]
+            corrected = (show_correction == 'corrected')
 
             for group_code, group_label in zip(group_codes, group_labels):
                 df_group = df[df['technical_group_code'] == group_code].copy()
@@ -1093,23 +1266,57 @@ def plot_multinomial_xy(
                 if len(df_group) == 0:
                     continue
 
+                # Get proportions for this group and category
+                group_mask = df['technical_group_code'] == group_code
+                props_group = props_raw[group_mask, :]  # Shape: (n_cells_in_group, K)
+
+                if corrected and has_technical_fit:
+                    # Apply technical correction on logit scale
+                    epsilon = 1e-6
+                    props_clipped = np.clip(props_group, epsilon, 1 - epsilon)
+
+                    # Convert to logits
+                    logits = np.log(props_clipped)
+
+                    # Get alpha_y_add for this group and feature
+                    alpha_y_add = modality.alpha_y_prefit_add
+                    if alpha_y_add.ndim == 4:
+                        alpha_correction = alpha_y_add[:, group_code, feature_idx, :].mean(axis=0)  # [K]
+                    elif alpha_y_add.ndim == 3:
+                        alpha_correction = alpha_y_add[group_code, feature_idx, :]  # [K]
+                    else:
+                        raise ValueError(f"Unexpected alpha_y_add shape: {alpha_y_add.shape}")
+
+                    # Convert to numpy if tensor
+                    if hasattr(alpha_correction, 'detach'):
+                        alpha_correction = alpha_correction.detach().cpu().numpy()
+
+                    # Apply correction
+                    logits_corrected = logits - alpha_correction
+
+                    # Softmax to get corrected proportions
+                    logits_max = logits_corrected.max(axis=1, keepdims=True)
+                    exp_logits = np.exp(logits_corrected - logits_max)
+                    props_corrected = exp_logits / exp_logits.sum(axis=1, keepdims=True)
+
+                    y_data = props_corrected[:, k]
+                else:
+                    y_data = df_group[f'cat_{k}'].values
+
                 # k-NN smoothing
                 knn = _knn_k(len(df_group), window)
-                x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, df_group[f'cat_{k}'].values, knn)
+                x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, y_data, knn)
 
                 # Plot
                 color = color_palette.get(group_label, f'C{group_code}')
-                ax.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2, label=group_label if k == 0 else None)
-
-            # Trans function overlay (note: not fully supported for multinomial)
-            if show_trans_function and k == 0 and row == 0:
-                warnings.warn("Trans function overlay for multinomial not yet fully implemented - "
-                             "prediction would require modeling all K proportions simultaneously")
+                ax.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2,
+                       label=group_label if k == 0 else None)
 
             ax.set_xlabel(xlabel)
             ax.set_ylabel(f'Proportion (Category {k})')
-            ax.set_title(f"Category {k}")
-            if k == 0 and row == 0:
+            title_suffix = ' (corrected)' if corrected else ' (uncorrected)'
+            ax.set_title(f"Category {k}{title_suffix}")
+            if k == 0:
                 ax.legend(frameon=False, loc='upper right')
 
     plt.suptitle(f"{model.cis_gene} → {feature} (min_counts={min_counts})")
@@ -1168,7 +1375,17 @@ def plot_normal_xy(
     df = df[valid].copy()
 
     # Check technical correction
-    has_technical_fit = modality.alpha_y_prefit is not None
+    # For normal distribution, check alpha_y_prefit_add (additive correction)
+    has_technical_fit = False
+    if hasattr(modality, 'alpha_y_prefit_add') and modality.alpha_y_prefit_add is not None:
+        has_technical_fit = True
+    elif hasattr(modality, 'posterior_samples_technical') and modality.posterior_samples_technical is not None:
+        if 'alpha_y_add' in modality.posterior_samples_technical:
+            has_technical_fit = True
+            # Set the attribute for future use
+            modality.alpha_y_prefit_add = modality.posterior_samples_technical['alpha_y_add']
+            print(f"[INFO] Set alpha_y_prefit_add from poster ior_samples_technical for modality '{modality.name}'")
+
     if show_correction == 'corrected' and not has_technical_fit:
         warnings.warn(f"Technical fit not available for modality '{modality.name}' - showing uncorrected only")
         show_correction = 'uncorrected'
@@ -1181,6 +1398,10 @@ def plot_normal_xy(
             fig, ax = plt.subplots(1, 1, figsize=(8, 5))
             axes = [ax]
     else:
+        # Single axis provided - cannot show both corrected and uncorrected
+        if show_correction == 'both':
+            warnings.warn("show_correction='both' not supported when ax is provided (multi-panel mode). Showing uncorrected only.")
+            show_correction = 'uncorrected'
         axes = [ax]
 
     # Get technical group labels
@@ -1190,9 +1411,17 @@ def plot_normal_xy(
     # Detect NTC cells for gradient coloring
     is_ntc = df['target'].str.lower() == 'ntc'
 
-    # Create colormap for gradient if needed
+    # Create colormaps for NTC gradient (per technical group)
+    # Each group gets white → group_color gradient
+    group_cmaps = {}
     if show_ntc_gradient:
-        cmap = plt.cm.viridis_r  # Reversed: darker = fewer NTCs
+        for group_label in group_labels:
+            base_color = color_palette.get(group_label, f'C0')
+            # Create colormap: white (low color value) → group color (high color value)
+            group_cmaps[group_label] = LinearSegmentedColormap.from_list(
+                f"white_{group_label}",
+                ["white", base_color]
+            )
 
     # Plot function
     def _plot_one(ax_plot, corrected):
@@ -1230,24 +1459,27 @@ def plot_normal_xy(
                     is_ntc=is_ntc_group
                 )
 
-                # Use gradient coloring
+                # Use per-group gradient coloring (white → group color)
+                # Color value = 1 - ntc_prop: high NTC → 0 → white, low NTC → 1 → group color
+                group_cmap = group_cmaps.get(group_label, plt.cm.gray)
                 plot_colored_line(
                     x=np.log2(x_smooth),
                     y=y_smooth,
-                    color_values=1 - ntc_prop,  # Darker = fewer NTCs
-                    cmap=cmap,
+                    color_values=1 - ntc_prop,  # Darker (group color) = fewer NTCs
+                    cmap=group_cmap,
                     ax=ax_plot,
                     linewidth=2
                 )
 
-                # Add dummy invisible line for legend label
+                # Add dummy invisible line for legend label (using base group color)
                 color = color_palette.get(group_label, f'C{group_code}')
                 ax_plot.plot([], [], color=color, linewidth=2, label=group_label)
 
-                # Add colorbar (once per axis)
+                # Add colorbar (once per axis) - use grayscale to show NTC gradient
                 if not colorbar_added:
                     fig = ax_plot.get_figure()
-                    sm = ScalarMappable(cmap=cmap, norm=Normalize(0, 1))
+                    cmap_gray = LinearSegmentedColormap.from_list("gray_gradient", ["white", "black"])
+                    sm = ScalarMappable(cmap=cmap_gray, norm=Normalize(0, 1))
                     sm.set_array([])
                     cbar = fig.colorbar(sm, ax=ax_plot)
                     cbar.set_label('1 - Proportion NTC (darker = fewer NTCs)')
@@ -1429,6 +1661,282 @@ def plot_mvnormal_xy(
 
 
 # ============================================================================
+# Multi-feature multinomial plotting
+# ============================================================================
+
+def _plot_multinomial_multifeature(
+    model,
+    feature_indices: List[int],
+    feature_names: List[str],
+    gene_name: str,
+    modality,
+    x_true: np.ndarray,
+    window: int,
+    min_counts: int,
+    show_correction: str,
+    color_palette: Dict[str, str],
+    xlabel: str,
+    figsize: Optional[Tuple[int, int]] = None,
+    **kwargs
+) -> plt.Figure:
+    """
+    Plot multiple multinomial features (e.g., multiple donor sites for one gene).
+
+    Layout:
+    - Single correction: n_features rows × K columns (dimensions as columns, features as rows)
+    - Both corrections: (n_features × K) rows × 2 columns (dimensions in rows, corrections as columns)
+
+    Parameters
+    ----------
+    model : bayesDREAM
+        Fitted model
+    feature_indices : List[int]
+        Integer indices of features to plot
+    feature_names : List[str]
+        Names of features to plot
+    gene_name : str
+        Gene name (for title)
+    modality : Modality
+        Multinomial modality
+    x_true : np.ndarray
+        Cis expression values
+    window : int
+        k-NN window size
+    min_counts : int
+        Minimum total counts filter
+    show_correction : str
+        'uncorrected', 'corrected', or 'both'
+    color_palette : Dict[str, str]
+        Technical group colors
+    xlabel : str
+        X-axis label
+    figsize : tuple, optional
+        Figure size
+    **kwargs
+        Additional arguments
+
+    Returns
+    -------
+    plt.Figure
+        Matplotlib figure
+    """
+    n_features = len(feature_indices)
+
+    # Get number of categories (K) for each feature
+    Ks = []
+    for feat_idx in feature_indices:
+        if modality.counts.ndim == 3:
+            K = modality.counts[feat_idx, :, :].shape[1]
+            Ks.append(K)
+        else:
+            raise ValueError(f"Expected 3D counts for multinomial, got {modality.counts.ndim}D")
+
+    max_K = max(Ks)
+
+    # Check technical correction
+    has_technical_fit = False
+    if hasattr(modality, 'alpha_y_prefit_add') and modality.alpha_y_prefit_add is not None:
+        has_technical_fit = True
+    elif hasattr(modality, 'posterior_samples_technical') and modality.posterior_samples_technical is not None:
+        if 'alpha_y_add' in modality.posterior_samples_technical:
+            has_technical_fit = True
+            modality.alpha_y_prefit_add = modality.posterior_samples_technical['alpha_y_add']
+            print(f"[INFO] Set alpha_y_prefit_add from posterior_samples_technical for modality '{modality.name}'")
+
+    if show_correction == 'corrected' and not has_technical_fit:
+        warnings.warn(f"Technical fit not available for modality '{modality.name}' - showing uncorrected only")
+        show_correction = 'uncorrected'
+
+    # Create figure layout
+    if show_correction == 'both':
+        # Layout: (n_features × max_K) rows × 2 columns
+        n_rows = n_features * max_K
+        n_cols = 2
+        if figsize is None:
+            figsize = (12, 3 * n_rows)  # 3 inches per row
+    else:
+        # Layout: n_features rows × max_K columns
+        n_rows = n_features
+        n_cols = max_K
+        if figsize is None:
+            figsize = (4 * n_cols, 3 * n_rows)  # 4 inches per column, 3 inches per row
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, squeeze=False)
+
+    # Get technical group labels
+    group_labels = get_technical_group_labels(model)
+    group_codes = sorted(model.meta['technical_group_code'].unique())
+
+    # Plot each feature
+    for feat_i, (feat_idx, feat_name) in enumerate(zip(feature_indices, feature_names)):
+        K = Ks[feat_i]
+
+        # Get counts for this feature
+        counts_3d = modality.counts[feat_idx, :, :]  # (cells, K)
+
+        # Filter by min_counts
+        total_counts = counts_3d.sum(axis=1)
+        valid_mask = total_counts >= min_counts
+
+        # Build dataframe
+        df = pd.DataFrame({
+            'x_true': x_true[valid_mask],
+            'technical_group_code': model.meta['technical_group_code'].values[valid_mask],
+            'target': model.meta['target'].values[valid_mask]
+        })
+
+        counts_filtered = counts_3d[valid_mask, :]
+        total_filtered = total_counts[valid_mask]
+
+        # Compute raw proportions
+        with np.errstate(divide='ignore', invalid='ignore'):
+            props_raw = np.where(total_filtered[:, None] > 0,
+                                 counts_filtered / total_filtered[:, None],
+                                 1.0 / K)
+
+        for k in range(K):
+            df[f'cat_{k}'] = props_raw[:, k]
+
+        # Filter valid x_true
+        valid = df['x_true'] > 0
+        df = df[valid].copy()
+        props_raw = props_raw[valid, :]
+
+        if len(df) == 0:
+            continue
+
+        # Plot each category
+        for k in range(K):
+            if show_correction == 'both':
+                # Row: feat_i * max_K + k, Columns: 0 (uncorrected), 1 (corrected)
+                row = feat_i * max_K + k
+                for col_idx, corrected in enumerate([False, True]):
+                    ax = axes[row, col_idx]
+
+                    for group_code, group_label in zip(group_codes, group_labels):
+                        df_group = df[df['technical_group_code'] == group_code].copy()
+
+                        if len(df_group) == 0:
+                            continue
+
+                        # Get proportions for this group
+                        group_mask = df['technical_group_code'] == group_code
+                        props_group = props_raw[group_mask, :]
+
+                        if corrected and has_technical_fit:
+                            # Apply logit-scale correction
+                            epsilon = 1e-6
+                            props_clipped = np.clip(props_group, epsilon, 1 - epsilon)
+                            logits = np.log(props_clipped)
+
+                            # Get correction
+                            alpha_y_add = modality.alpha_y_prefit_add
+                            if alpha_y_add.ndim == 4:
+                                alpha_correction = alpha_y_add[:, group_code, feat_idx, :].mean(axis=0)
+                            elif alpha_y_add.ndim == 3:
+                                alpha_correction = alpha_y_add[group_code, feat_idx, :]
+                            else:
+                                raise ValueError(f"Unexpected alpha_y_add shape: {alpha_y_add.shape}")
+
+                            if hasattr(alpha_correction, 'detach'):
+                                alpha_correction = alpha_correction.detach().cpu().numpy()
+
+                            # Apply correction and softmax
+                            logits_corrected = logits - alpha_correction
+                            logits_max = logits_corrected.max(axis=1, keepdims=True)
+                            exp_logits = np.exp(logits_corrected - logits_max)
+                            props_corrected = exp_logits / exp_logits.sum(axis=1, keepdims=True)
+
+                            y_data = props_corrected[:, k]
+                        else:
+                            y_data = df_group[f'cat_{k}'].values
+
+                        # k-NN smoothing
+                        knn = _knn_k(len(df_group), window)
+                        x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, y_data, knn)
+
+                        # Plot
+                        color = color_palette.get(group_label, f'C{group_code}')
+                        ax.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2,
+                               label=group_label if k == 0 and feat_i == 0 else None)
+
+                    ax.set_xlabel(xlabel)
+                    ax.set_ylabel(f'Proportion')
+                    title_suffix = ' (corrected)' if corrected else ' (uncorrected)'
+                    ax.set_title(f"{feat_name[:20]}... Cat{k}{title_suffix}", fontsize=9)
+                    if k == 0 and feat_i == 0:
+                        ax.legend(frameon=False, loc='upper right', fontsize=8)
+            else:
+                # Row: feat_i, Column: k
+                ax = axes[feat_i, k]
+                corrected = (show_correction == 'corrected')
+
+                for group_code, group_label in zip(group_codes, group_labels):
+                    df_group = df[df['technical_group_code'] == group_code].copy()
+
+                    if len(df_group) == 0:
+                        continue
+
+                    # Get proportions for this group
+                    group_mask = df['technical_group_code'] == group_code
+                    props_group = props_raw[group_mask, :]
+
+                    if corrected and has_technical_fit:
+                        # Apply logit-scale correction
+                        epsilon = 1e-6
+                        props_clipped = np.clip(props_group, epsilon, 1 - epsilon)
+                        logits = np.log(props_clipped)
+
+                        # Get correction
+                        alpha_y_add = modality.alpha_y_prefit_add
+                        if alpha_y_add.ndim == 4:
+                            alpha_correction = alpha_y_add[:, group_code, feat_idx, :].mean(axis=0)
+                        elif alpha_y_add.ndim == 3:
+                            alpha_correction = alpha_y_add[group_code, feat_idx, :]
+                        else:
+                            raise ValueError(f"Unexpected alpha_y_add shape: {alpha_y_add.shape}")
+
+                        if hasattr(alpha_correction, 'detach'):
+                            alpha_correction = alpha_correction.detach().cpu().numpy()
+
+                        # Apply correction and softmax
+                        logits_corrected = logits - alpha_correction
+                        logits_max = logits_corrected.max(axis=1, keepdims=True)
+                        exp_logits = np.exp(logits_corrected - logits_max)
+                        props_corrected = exp_logits / exp_logits.sum(axis=1, keepdims=True)
+
+                        y_data = props_corrected[:, k]
+                    else:
+                        y_data = df_group[f'cat_{k}'].values
+
+                    # k-NN smoothing
+                    knn = _knn_k(len(df_group), window)
+                    x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, y_data, knn)
+
+                    # Plot
+                    color = color_palette.get(group_label, f'C{group_code}')
+                    ax.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2,
+                           label=group_label if k == 0 and feat_i == 0 else None)
+
+                ax.set_xlabel(xlabel)
+                ax.set_ylabel(f'Proportion')
+                title_suffix = ' (corrected)' if corrected else ' (uncorrected)'
+                ax.set_title(f"{feat_name[:20]}... Cat{k}{title_suffix}", fontsize=9)
+                if k == 0 and feat_i == 0:
+                    ax.legend(frameon=False, loc='upper right', fontsize=8)
+
+        # Hide unused subplots (if K < max_K for this feature)
+        if show_correction != 'both':
+            for k in range(K, max_K):
+                axes[feat_i, k].axis('off')
+
+    plt.suptitle(f"{model.cis_gene} → {gene_name} (gene, n={n_features} features, min_counts={min_counts})")
+    plt.tight_layout()
+
+    return fig
+
+
+# ============================================================================
 # Unified plot_xy_data function
 # ============================================================================
 
@@ -1576,52 +2084,95 @@ def plot_xy_data(
     # If multiple features (gene input), create multi-panel figure
     if is_gene and len(feature_indices) > 1:
         n_features = len(feature_indices)
-        n_cols = min(3, n_features)  # Max 3 columns
-        n_rows = int(np.ceil(n_features / n_cols))
+        distribution = modality.distribution
+
+        # Special handling for multinomial - needs K subplots per feature
+        if distribution == 'multinomial':
+            return _plot_multinomial_multifeature(
+                model=model,
+                feature_indices=feature_indices,
+                feature_names=feature_names_resolved,
+                gene_name=feature,
+                modality=modality,
+                x_true=x_true,
+                window=window,
+                min_counts=min_counts,
+                show_correction=show_correction,
+                color_palette=color_palette,
+                xlabel=xlabel,
+                figsize=figsize,
+                **kwargs
+            )
+
+        # Standard multi-feature plotting for 2D distributions
+        # Layout: features in rows, uncorrected (left) and corrected (right) columns
+        n_rows = n_features
+        n_cols = 2  # Left = uncorrected, Right = corrected
 
         if figsize is None:
-            figsize = (6 * n_cols, 5 * n_rows)
+            figsize = (12, 4 * n_rows)  # 12 inches wide (6 per subplot), 4 inches per row
 
         fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, squeeze=False)
-        axes_flat = axes.flatten()
 
-        # Plot each feature
+        # Plot each feature (one row per feature)
         for i, (feat_idx, feat_name) in enumerate(zip(feature_indices, feature_names_resolved)):
-            ax = axes_flat[i]
-
-            # Call distribution-specific plot with this feature and ax
-            distribution = modality.distribution
-
+            # Plot uncorrected (left column)
             if distribution == 'negbinom':
                 plot_negbinom_xy(
                     model=model, feature=feat_name, modality=modality,
-                    x_true=x_true, window=window, show_correction=show_correction,
+                    x_true=x_true, window=window, show_correction='uncorrected',
                     color_palette=color_palette, show_hill_function=show_hill_function,
                     show_ntc_gradient=show_ntc_gradient, sum_factor_col=sum_factor_col,
-                    xlabel=xlabel, ax=ax, **kwargs
+                    xlabel=xlabel, ax=axes[i, 0], **kwargs
                 )
             elif distribution == 'binomial':
                 plot_binomial_xy(
                     model=model, feature=feat_name, modality=modality,
-                    x_true=x_true, window=window, min_counts=min_counts,
-                    color_palette=color_palette, show_trans_function=show_hill_function,
-                    show_ntc_gradient=show_ntc_gradient, xlabel=xlabel, ax=ax, **kwargs
+                    x_true=x_true, window=window, show_correction='uncorrected',
+                    min_counts=min_counts, color_palette=color_palette,
+                    show_trans_function=show_hill_function,
+                    show_ntc_gradient=show_ntc_gradient, xlabel=xlabel, ax=axes[i, 0], **kwargs
                 )
             elif distribution == 'normal':
                 plot_normal_xy(
                     model=model, feature=feat_name, modality=modality,
-                    x_true=x_true, window=window, show_correction=show_correction,
+                    x_true=x_true, window=window, show_correction='uncorrected',
                     color_palette=color_palette, show_trans_function=show_hill_function,
-                    show_ntc_gradient=show_ntc_gradient, xlabel=xlabel, ax=ax, **kwargs
+                    show_ntc_gradient=show_ntc_gradient, xlabel=xlabel, ax=axes[i, 0], **kwargs
                 )
             else:
-                # Multinomial and mvnormal return their own figures, so skip
-                ax.text(0.5, 0.5, f"Multi-panel not supported for {distribution}",
-                       ha='center', va='center', transform=ax.transAxes)
+                # mvnormal returns its own figure
+                axes[i, 0].text(0.5, 0.5, f"Multi-panel not supported for {distribution}",
+                               ha='center', va='center', transform=axes[i, 0].transAxes)
 
-        # Hide unused subplots
-        for i in range(n_features, len(axes_flat)):
-            axes_flat[i].set_visible(False)
+            # Plot corrected (right column)
+            if distribution == 'negbinom':
+                plot_negbinom_xy(
+                    model=model, feature=feat_name, modality=modality,
+                    x_true=x_true, window=window, show_correction='corrected',
+                    color_palette=color_palette, show_hill_function=show_hill_function,
+                    show_ntc_gradient=show_ntc_gradient, sum_factor_col=sum_factor_col,
+                    xlabel=xlabel, ax=axes[i, 1], **kwargs
+                )
+            elif distribution == 'binomial':
+                plot_binomial_xy(
+                    model=model, feature=feat_name, modality=modality,
+                    x_true=x_true, window=window, show_correction='corrected',
+                    min_counts=min_counts, color_palette=color_palette,
+                    show_trans_function=show_hill_function,
+                    show_ntc_gradient=show_ntc_gradient, xlabel=xlabel, ax=axes[i, 1], **kwargs
+                )
+            elif distribution == 'normal':
+                plot_normal_xy(
+                    model=model, feature=feat_name, modality=modality,
+                    x_true=x_true, window=window, show_correction='corrected',
+                    color_palette=color_palette, show_trans_function=show_hill_function,
+                    show_ntc_gradient=show_ntc_gradient, xlabel=xlabel, ax=axes[i, 1], **kwargs
+                )
+            else:
+                # mvnormal returns its own figure
+                axes[i, 1].text(0.5, 0.5, f"Multi-panel not supported for {distribution}",
+                               ha='center', va='center', transform=axes[i, 1].transAxes)
 
         plt.suptitle(f"{model.cis_gene} → {feature} (gene, n={n_features} features)")
         plt.tight_layout()

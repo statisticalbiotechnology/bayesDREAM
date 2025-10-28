@@ -113,13 +113,27 @@ class ModelSaver:
                 path = os.path.join(output_dir, f'alpha_y_prefit_{mod_name}.pt')
                 torch.save(alpha_to_save, path)
                 saved_files[f'alpha_y_prefit_{mod_name}'] = path
+                saved_files[f'alpha_y_prefit_{mod_name}_type'] = alpha_type
                 print(f"[SAVE] {mod_name}.alpha_y_prefit ({alpha_type}) → {path}")
 
             # Save modality-specific posterior_samples_technical
             if hasattr(mod, 'posterior_samples_technical') and mod.posterior_samples_technical is not None:
                 # Remove large observation arrays before saving
+                # Also ensure that alpha_y_add and alpha_y_mult are included for backward compatibility
                 posterior_clean = {k: v for k, v in mod.posterior_samples_technical.items()
                                  if k not in ['y_obs_ntc', 'y_obs']}
+
+                # Verify critical keys are present for downstream loading
+                if mod.distribution != 'negbinom' and 'alpha_y_add' not in posterior_clean:
+                    if hasattr(mod, 'alpha_y_prefit_add') and mod.alpha_y_prefit_add is not None:
+                        posterior_clean['alpha_y_add'] = mod.alpha_y_prefit_add
+                        print(f"[SAVE] {mod_name}.posterior_samples_technical: added alpha_y_add for completeness")
+
+                if mod.distribution == 'negbinom' and 'alpha_y_mult' not in posterior_clean and 'alpha_y' not in posterior_clean:
+                    if hasattr(mod, 'alpha_y_prefit_mult') and mod.alpha_y_prefit_mult is not None:
+                        posterior_clean['alpha_y_mult'] = mod.alpha_y_prefit_mult
+                        print(f"[SAVE] {mod_name}.posterior_samples_technical: added alpha_y_mult for completeness")
+
                 path = os.path.join(output_dir, f'posterior_samples_technical_{mod_name}.pt')
                 torch.save(posterior_clean, path)
                 saved_files[f'posterior_samples_technical_{mod_name}'] = path

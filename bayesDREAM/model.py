@@ -187,6 +187,43 @@ class bayesDREAM(
 
         self.primary_modality = primary_modality
 
+        # ========================================================================
+        # CRITICAL VALIDATION: Primary modality MUST be negative binomial when cis is present
+        # ========================================================================
+        if cis_feature is not None:
+            # Check if primary modality exists and validate its distribution
+            if primary_modality in self.modalities:
+                primary_distribution = self.modalities[primary_modality].distribution
+                if primary_distribution != 'negbinom':
+                    raise ValueError(
+                        f"Primary modality '{primary_modality}' has distribution '{primary_distribution}', "
+                        f"but cis modeling requires primary modality to be 'negbinom'. "
+                        f"The cis feature/gene must represent count data that follows a negative binomial distribution."
+                    )
+                print(f"[VALIDATION] Primary modality '{primary_modality}' is 'negbinom' - cis modeling is valid")
+            elif counts_for_base is not None:
+                # Counts were provided, so we're creating the primary modality now
+                # For 'gene' primary modality, distribution is always 'negbinom', so we're good
+                # For other modalities, they haven't been implemented yet anyway
+                if primary_modality == 'gene':
+                    # Gene modality is always negbinom, validation passes
+                    print(f"[VALIDATION] Creating primary modality '{primary_modality}' as 'negbinom' for cis modeling")
+                else:
+                    # Other primary modalities are not implemented for cis extraction yet
+                    # This should be caught earlier, but add a check just in case
+                    warnings.warn(
+                        f"Primary modality '{primary_modality}' is not 'gene'. "
+                        f"Ensure this modality uses 'negbinom' distribution for cis modeling.",
+                        UserWarning
+                    )
+            else:
+                # No counts and no primary modality yet - will be validated when modality is added
+                warnings.warn(
+                    f"Cannot validate primary modality distribution yet (modality not loaded). "
+                    f"Ensure primary modality '{primary_modality}' uses 'negbinom' distribution for cis modeling.",
+                    UserWarning
+                )
+
         # Get counts for base class initialization
         # Use original counts (with cis gene) if provided, otherwise get from primary modality
         if counts_for_base is None:

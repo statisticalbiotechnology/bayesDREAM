@@ -175,7 +175,7 @@ class CisFitter:
         manual_guide_effects: pd.DataFrame = None,
         prior_strength: float = 1.0,
         lr: float = 1e-3,
-        niters: int = 50000,
+        niters: int = 100_000,
         nsamples: int = 1000,
         alpha_ewma: float = 0.05,
         tolerance: float = 1e-4, # recommended to keep based on cell2location

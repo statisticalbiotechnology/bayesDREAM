@@ -73,42 +73,50 @@ class TechnicalFitter:
         if distribution == "multinomial":
             assert K is not None, "multinomial requires K"
         
-            # Multinomial-specific plates:
-            # batch dims (from left):  ... , [C-1], [T], event [K]
-            c_mult_plate = pyro.plate("c_mult_plate", C - 1, dim=-3)
-            t_mult_plate = pyro.plate("t_mult_plate", T,     dim=-2)
+            # ---- Cell-line logits α for NON-baseline groups (baseline=0 implicit) ----
+            # Avoid plate dims entirely to prevent shape drift in SVI/guide.
+            # Sample a fixed-shape tensor as a single event of size (C-1, T, K).
+            alpha_logits_y = pyro.sample(
+                "alpha_logits_y",  # renamed from *_raw to be the actual latent
+                dist.StudentT(df=3, loc=0.0, scale=20.0)
+                    .expand([C - 1, T, K])
+                    .to_event(3)  # treat all dims as event -> guide won't add plate dims
+            )  # [C-1, T, K]
         
-            # ---- Cell-line logits α (centered across K) ----
-            with c_mult_plate:       # [C-1, ...]
-                with t_mult_plate:   # [..., T]
-                    raw_alpha_logits = pyro.sample(
-                        "alpha_logits_y_raw",
-                        dist.StudentT(df=3, loc=0.0, scale=20.0)
-                            .expand([K])        # event length K
-                            .to_event(1)        # make last axis the event
-                    )  # [C-1, T, K]
-                    centered = raw_alpha_logits - raw_alpha_logits.mean(dim=-1, keepdim=True)
-                    alpha_logits_y = pyro.deterministic("alpha_logits_y", centered)  # [C-1, T, K]
+            # Center across categories K to keep logits identifiable
+            alpha_logits_y = pyro.deterministic(
+                "alpha_logits_y_centered",
+                alpha_logits_y - alpha_logits_y.mean(dim=-1, keepdim=True)
+            )  # [C-1, T, K]
         
-            # Build full [C, T, K] with baseline=0
-            if alpha_logits_y.ndim == 3:  # [C-1, T, K]
+            # Build full [C, T, K] (or [S, C, T, K]) with baseline=0
+            if alpha_logits_y.dim() == 3:
+                # [C-1, T, K]  ->  [C, T, K]
                 alpha_full_add_logits = torch.cat(
-                    [torch.zeros(1, T, K, device=self.model.device), alpha_logits_y.to(self.model.device)],
-                    dim=0
-                )  # [C, T, K]
-            elif alpha_logits_y.ndim == 4:  # [S, C-1, T, K]
+                    [
+                        torch.zeros(1, T, K, device=self.model.device, dtype=alpha_logits_y.dtype),
+                        alpha_logits_y.to(self.model.device),
+                    ],
+                    dim=0,
+                )
+            elif alpha_logits_y.dim() == 4:
+                # [S, C-1, T, K]  ->  [S, C, T, K]
                 S = alpha_logits_y.size(0)
                 alpha_full_add_logits = torch.cat(
-                    [torch.zeros(S, 1, T, K, device=self.model.device), alpha_logits_y.to(self.model.device)],
-                    dim=1
-                )  # [S, C, T, K]
+                    [
+                        torch.zeros(S, 1, T, K, device=self.model.device, dtype=alpha_logits_y.dtype),
+                        alpha_logits_y.to(self.model.device),
+                    ],
+                    dim=1,
+                )
             else:
-                raise ValueError(f"Unexpected alpha_logits_y shape: {alpha_logits_y.shape}")
-        
+                raise ValueError(f"Unexpected alpha_logits_y shape: {tuple(alpha_logits_y.shape)}")
+            
             alpha_full_mul = None
             alpha_full_add = alpha_full_add_logits
 
-            alpha_full_add = alpha_full_add_logits
+            #print(f'[DEBUG], alpha_logits_y shape = {alpha_logits_y.shape}, expect [C-1={C-1}, T={T}, K={K}')
+            #print(f'[DEBUG], alpha_full_add shape = {alpha_full_add.shape}')
         else:
             # reuse f_plate instead of a new trans_plate
             with f_plate:
@@ -142,6 +150,7 @@ class TechnicalFitter:
             else:
                 raise ValueError(f"Unexpected alpha/log2 shapes: {alpha_y_mul.shape}, {delta_y_add.shape}")
 
+        #print(f'[DEBUG], alpha_full_add shape = {alpha_full_add.shape}')
     
         # --------------------------------
         # Dispersion / variance priors
@@ -219,8 +228,10 @@ class TechnicalFitter:
             total_counts_per_feature = y_obs_ntc_tensor.sum(dim=0)  # [T, K]
             concentration = total_counts_per_feature + 1.0          # [T, K]
             # Each feature (T) has its own Dirichlet over K categories.
-            probs_baseline = pyro.sample("probs_baseline", dist.Dirichlet(concentration))  # [T, K]
-            mu_y = probs_baseline
+            with f_plate:  # <- add this
+                probs_baseline = pyro.sample("probs_baseline", dist.Dirichlet(concentration))
+            mu_y = probs_baseline  # [T, K]
+
     
         else:
             raise ValueError(f"Unknown distribution: {distribution}")
@@ -290,34 +301,32 @@ class TechnicalFitter:
             raise ValueError(f"Unknown distribution: {distribution}")
     
     def set_technical_groups(self, covariates: list[str]):
-        """
-        Set technical_group_code based on covariates.
-
-        This should be called before fit_technical() to define technical groups.
-        The technical_group_code will be used for:
-        - fit_technical(): modeling technical variation across groups
-        - fit_cis(): optional correction for group effects
-        - fit_trans(): optional correction for group effects
-
-        Parameters
-        ----------
-        covariates : list[str]
-            Column names in self.model.meta to group by (e.g., ['cell_line'])
-
-        Examples
-        --------
-        >>> model.set_technical_groups(['cell_line'])
-        >>> model.fit_technical(sum_factor_col='sum_factor')
-        """
         if not covariates:
             raise ValueError("covariates must not be empty")
-
+    
         missing_cols = [c for c in covariates if c not in self.model.meta.columns]
         if missing_cols:
             raise ValueError(f"Missing columns in meta: {missing_cols}")
-
+    
         self.model.meta["technical_group_code"] = self.model.meta.groupby(covariates).ngroup()
         print(f"[INFO] Set technical_group_code with {self.model.meta['technical_group_code'].nunique()} groups based on {covariates}")
+    
+        # ---- SAFEGUARD: ensure every technical group is represented among NTCs ----
+        if "target" in self.model.meta.columns:
+            all_groups  = set(self.model.meta["technical_group_code"].unique().tolist())
+            ntc_groups  = set(self.model.meta.loc[self.model.meta["target"] == "ntc", "technical_group_code"].unique().tolist())
+            missing_ntc = sorted(all_groups - ntc_groups)
+            if missing_ntc:
+                n_drop = int(self.model.meta["technical_group_code"].isin(missing_ntc).sum())
+                warnings.warn(
+                    "[WARNING] Dropping cells from technical groups with no NTC representation. "
+                    f"Groups: {missing_ntc} | Cells dropped: {n_drop}",
+                    UserWarning
+                )
+                self.model.meta = self.model.meta.loc[~self.model.meta["technical_group_code"].isin(missing_ntc)].copy()
+                # Optional: re-announce counts after drop
+                print(f"[INFO] After dropping non-NTC groups, {self.model.meta['technical_group_code'].nunique()} technical group(s) remain.")
+
 
     ########################################################
     # Step 1: Optional Prefit for alpha_y (NTC only)
@@ -326,7 +335,7 @@ class TechnicalFitter:
         self,
         sum_factor_col: str = 'sum_factor',
         lr: float = 1e-3,
-        niters: int = 50_000,
+        niters: int = None,
         nsamples: int = 1_000,
         alpha_ewma: float = 0.05,
         tolerance: float = 1e-4,   # recommended to keep based on cell2location
@@ -343,7 +352,7 @@ class TechnicalFitter:
         Prefit cell-line technical effects (NTC-only) for a given modality.
         Stores both multiplicative ('alpha_y_mult') and additive/logit ('alpha_y_add') effects.
         """
-    
+
         # ---------------------------
         # Resolve modality/distribution
         # ---------------------------
@@ -354,21 +363,36 @@ class TechnicalFitter:
         if distribution is None:
             distribution = modality.distribution
 
+        # ---------------------------
+        # Set conditional default for niters
+        # ---------------------------
+        if niters is None:
+            # Default: 50,000 unless multivariate (multinomial or mvnormal), then 100,000
+            if distribution in ('multinomial', 'mvnormal'):
+                niters = 100_000
+                print(f"[INFO] Using default niters=100,000 for multivariate distribution '{distribution}'")
+            else:
+                niters = 50_000
+                print(f"[INFO] Using default niters=50,000 for distribution '{distribution}'")
+
         if denominator is None and modality.denominator is not None:
             denominator = modality.denominator
 
-        # Before attempting cis extraction:
+        # ========================================================================
+        # CRITICAL VALIDATION: Cis extraction requires negative binomial distribution
+        # ========================================================================
         if (
             modality_name == self.model.primary_modality
             and hasattr(self.model, 'counts')
             and self.model.cis_gene is not None
             and 'cis' in self.model.modalities
         ):
-            if distribution == 'multinomial':
+            if distribution != 'negbinom':
                 raise ValueError(
-                    "Primary modality is multinomial, but cis effect extraction "
-                    "is undefined for multinomial. Set a non-multinomial primary "
-                    "modality when cis is present."
+                    f"Primary modality has distribution '{distribution}', but cis effect extraction "
+                    f"requires 'negbinom' distribution. "
+                    f"The cis gene/feature must represent count data following a negative binomial distribution. "
+                    f"Cannot perform cis modeling with '{distribution}' distribution."
                 )
 
         # For primary modality, use original counts (includes cis gene)
@@ -659,7 +683,9 @@ class TechnicalFitter:
             if name == "alpha_logits_y_raw":
                 # start at zero logits (i.e., no shift)
                 return torch.zeros((C - 1, T_fit, K), dtype=torch.float32, device=self.model.device)
-
+            if name == "alpha_logits_y":
+                return torch.zeros(C - 1, T_fit, K, dtype=torch.float32, device=self.model.device)
+            
             return pyro.infer.autoguide.initialization.init_to_median(site)
 
         # Guide choice: calmer for binomial & multinomial, IAF for others
@@ -806,21 +832,52 @@ class TechnicalFitter:
             return full
 
         def _reconstruct_full_3d(alpha_fit, baseline_value, fit_mask_bool):
-            # alpha_fit: [S?, C-1, T_fit, K] -> full: [S?, C, T_all, K]
-            fit_idx = np.where(fit_mask_bool)[0]
-            if alpha_fit.dim() == 4:
-                S, Cminus1, Tfit, K_ = alpha_fit.shape
-                full = torch.full((S, Cminus1 + 1, len(fit_mask_bool), K_),
-                                  baseline_value, dtype=alpha_fit.dtype, device=alpha_fit.device)
-                full[:, 1:, fit_idx, :] = alpha_fit
-            elif alpha_fit.dim() == 3:
-                Cminus1, Tfit, K_ = alpha_fit.shape
-                full = torch.full((Cminus1 + 1, len(fit_mask_bool), K_),
-                                  baseline_value, dtype=alpha_fit.dtype, device=alpha_fit.device)
-                full[1:, fit_idx, :] = alpha_fit
+            """
+            Normalize alpha_fit to [S, C-1, T_fit, K] (S may be 1),
+            then expand to full [S, C, T_all, K] inserting the baseline row
+            and placing T_fit back into original T_all via fit_mask_bool.
+            """
+            # last two dims must be (T_fit, K)
+            Tfit = alpha_fit.size(-2)
+            K_   = alpha_fit.size(-1)
+            if Tfit != T_fit or K_ != K:
+                raise ValueError(f"alpha_fit trailing dims mismatch: got (T={Tfit},K={K_}) expected (T={T_fit},K={K})")
+        
+            # ----- Step 1: ensure a leading sample dim S -----
+            t = alpha_fit
+            if t.dim() == 3:
+                # [C-1, T_fit, K] -> [1, C-1, T_fit, K]
+                t = t.unsqueeze(0)
+            elif t.dim() == 4:
+                # [S, C-1, T_fit, K] -> OK
+                pass
+            elif t.dim() >= 5:
+                # e.g. [S, 1, 1, T_fit, K] or even [S, a, b, T_fit, K]
+                # Collapse all dims between S and the trailing (T_fit,K) into a single (C-1) axis.
+                S = t.size(0)
+                # product over dims 1..(dim-3)
+                pre_shape = t.shape[1:-2]
+                Cminus1 = 1
+                for d in pre_shape:
+                    Cminus1 *= int(d)
+                t = t.reshape(S, Cminus1, Tfit, K_)
             else:
-                raise ValueError(f"Unexpected 3D alpha shape: {alpha_fit.shape}")
+                raise ValueError(f"Unexpected 3D alpha shape: {tuple(alpha_fit.shape)}")
+        
+            # t is now [S, C-1, T_fit, K]
+            S, Cminus1, Tfit, K_ = t.shape
+        
+            # ----- Step 2: build full [S, C, T_all, K] and scatter T_fit back -----
+            fit_idx = torch.as_tensor(np.where(fit_mask_bool)[0], device=t.device)
+            full = torch.full(
+                (S, Cminus1 + 1, len(fit_mask_bool), K_),
+                baseline_value,
+                dtype=t.dtype,
+                device=t.device,
+            )
+            full[:, 1:, fit_idx, :] = t  # insert non-baseline rows into fit positions
             return full
+
     
         if distribution == "multinomial":
             # additive logits only

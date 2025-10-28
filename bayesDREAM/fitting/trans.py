@@ -343,7 +343,7 @@ class TransFitter:
         function_type: str = 'single_hill',  # or 'additive', 'nested'
         polynomial_degree: int = 6,
         lr: float = 1e-3,
-        niters: int = 50000,
+        niters: int = None,
         nsamples: int = 1000,
         alpha_ewma: float = 0.05,
         tolerance: float = 1e-4, # recommended to keep based on cell2location
@@ -418,6 +418,21 @@ class TransFitter:
         # Auto-detect denominator from modality (for binomial)
         if denominator is None and modality.denominator is not None:
             denominator = modality.denominator
+
+        # ---------------------------
+        # Set conditional default for niters
+        # ---------------------------
+        if niters is None:
+            # Default: 100,000 unless multivariate (multinomial or mvnormal) OR polynomial function, then 200,000
+            if distribution in ('multinomial', 'mvnormal'):
+                niters = 200_000
+                print(f"[INFO] Using default niters=200,000 for multivariate distribution '{distribution}'")
+            elif function_type == 'polynomial':
+                niters = 200_000
+                print(f"[INFO] Using default niters=200,000 for polynomial function")
+            else:
+                niters = 100_000
+                print(f"[INFO] Using default niters=100,000 for distribution '{distribution}' and function_type '{function_type}'")
 
         # Check that technical fit has been done for this modality
         if modality.alpha_y_prefit is None:

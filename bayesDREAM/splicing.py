@@ -110,6 +110,7 @@ def process_donor_usage(sj_counts: pd.DataFrame,
     sj_meta : pd.DataFrame
         Junction metadata with required columns: coord.intron, chrom, intron_start,
         intron_end, strand, gene_name_start, gene_name_end
+        Optional columns: gene_id_start, gene_id_end (for Ensembl ID support)
     min_cell_total : int
         Minimum total reads per donor per cell to include
 
@@ -118,12 +119,16 @@ def process_donor_usage(sj_counts: pd.DataFrame,
     counts_3d : np.ndarray
         Shape: (n_donors, n_cells, max_acceptors_per_donor)
     feature_meta : pd.DataFrame
-        Donor site metadata with columns: chrom, strand, donor, acceptors (list), n_acceptors
+        Donor site metadata with columns: chrom, strand, donor, acceptors (list), n_acceptors,
+        gene (primary gene), genes (list of all genes)
     cell_names : list
         Cell identifiers
     """
     print("[INFO] Processing donor usage (5' splice sites)...")
     idx = _build_sj_index(sj_counts, sj_meta)
+
+    # Check for gene_id columns
+    has_gene_id = 'gene_id_start' in idx.columns and 'gene_id_end' in idx.columns
 
     # Group by (chrom, strand, donor)
     donor_groups = idx.groupby(['chrom', 'strand', 'donor'], sort=True)
@@ -165,12 +170,35 @@ def process_donor_usage(sj_counts: pd.DataFrame,
 
         all_counts.append(donor_counts)
 
+        # Collect all genes associated with this donor site
+        genes_list = []
+        if has_gene_id:
+            # Collect from all gene identifier columns
+            for col in ['gene_name_start', 'gene_name_end', 'gene_id_start', 'gene_id_end']:
+                if col in group.columns:
+                    genes_list.extend(group[col].dropna().unique().tolist())
+        else:
+            # Only gene names available
+            genes_list.extend(group['gene_name_start'].dropna().unique().tolist())
+            genes_list.extend(group['gene_name_end'].dropna().unique().tolist())
+
+        # Remove duplicates and sort
+        genes_unique = sorted(set(genes_list))
+
+        # Primary gene: most common gene (by junction count), or first alphabetically if tie
+        if genes_unique:
+            primary_gene = genes_unique[0]  # Default to first
+        else:
+            primary_gene = None
+
         feature_rows.append({
             'chrom': chrom,
             'strand': strand,
             'donor': donor,
             'acceptors': acceptors,
-            'n_acceptors': n_acceptors
+            'n_acceptors': n_acceptors,
+            'gene': primary_gene,
+            'genes': genes_unique
         })
 
     # Filter donors with only one acceptor OR with zero variance in ALL ratios
@@ -215,7 +243,7 @@ def process_donor_usage(sj_counts: pd.DataFrame,
         warnings.warn("No donors with multiple acceptors found after filtering!")
         # Return empty arrays
         return (np.zeros((0, n_cells, 0), dtype=float),
-                pd.DataFrame(columns=['chrom', 'strand', 'donor', 'acceptors', 'n_acceptors']),
+                pd.DataFrame(columns=['chrom', 'strand', 'donor', 'acceptors', 'n_acceptors', 'gene', 'genes']),
                 cell_names)
 
     # Stack into 3D array: (n_donors, n_cells, max_acceptors)
@@ -248,6 +276,7 @@ def process_acceptor_usage(sj_counts: pd.DataFrame,
     sj_meta : pd.DataFrame
         Junction metadata with required columns: coord.intron, chrom, intron_start,
         intron_end, strand, gene_name_start, gene_name_end
+        Optional columns: gene_id_start, gene_id_end (for Ensembl ID support)
     min_cell_total : int
         Minimum total reads per acceptor per cell to include
 
@@ -256,12 +285,16 @@ def process_acceptor_usage(sj_counts: pd.DataFrame,
     counts_3d : np.ndarray
         Shape: (n_acceptors, n_cells, max_donors_per_acceptor)
     feature_meta : pd.DataFrame
-        Acceptor site metadata with columns: chrom, strand, acceptor, donors (list), n_donors
+        Acceptor site metadata with columns: chrom, strand, acceptor, donors (list), n_donors,
+        gene (primary gene), genes (list of all genes)
     cell_names : list
         Cell identifiers
     """
     print("[INFO] Processing acceptor usage (3' splice sites)...")
     idx = _build_sj_index(sj_counts, sj_meta)
+
+    # Check for gene_id columns
+    has_gene_id = 'gene_id_start' in idx.columns and 'gene_id_end' in idx.columns
 
     # Group by (chrom, strand, acceptor)
     acceptor_groups = idx.groupby(['chrom', 'strand', 'acceptor'], sort=True)
@@ -303,12 +336,35 @@ def process_acceptor_usage(sj_counts: pd.DataFrame,
 
         all_counts.append(acceptor_counts)
 
+        # Collect all genes associated with this acceptor site
+        genes_list = []
+        if has_gene_id:
+            # Collect from all gene identifier columns
+            for col in ['gene_name_start', 'gene_name_end', 'gene_id_start', 'gene_id_end']:
+                if col in group.columns:
+                    genes_list.extend(group[col].dropna().unique().tolist())
+        else:
+            # Only gene names available
+            genes_list.extend(group['gene_name_start'].dropna().unique().tolist())
+            genes_list.extend(group['gene_name_end'].dropna().unique().tolist())
+
+        # Remove duplicates and sort
+        genes_unique = sorted(set(genes_list))
+
+        # Primary gene: most common gene (by junction count), or first alphabetically if tie
+        if genes_unique:
+            primary_gene = genes_unique[0]  # Default to first
+        else:
+            primary_gene = None
+
         feature_rows.append({
             'chrom': chrom,
             'strand': strand,
             'acceptor': acceptor,
             'donors': donors,
-            'n_donors': n_donors
+            'n_donors': n_donors,
+            'gene': primary_gene,
+            'genes': genes_unique
         })
 
     # Filter acceptors with only one donor OR with zero variance in ALL ratios
@@ -353,7 +409,7 @@ def process_acceptor_usage(sj_counts: pd.DataFrame,
         warnings.warn("No acceptors with multiple donors found after filtering!")
         # Return empty arrays
         return (np.zeros((0, n_cells, 0), dtype=float),
-                pd.DataFrame(columns=['chrom', 'strand', 'acceptor', 'donors', 'n_donors']),
+                pd.DataFrame(columns=['chrom', 'strand', 'acceptor', 'donors', 'n_donors', 'gene', 'genes']),
                 cell_names)
 
     # Stack into 3D array: (n_acceptors, n_cells, max_donors)
@@ -387,9 +443,13 @@ def _find_cassette_triplets_strand(sj_counts: pd.DataFrame,
     Returns
     -------
     pd.DataFrame
-        Columns: trip_id, chrom, strand, d1, a2, d2, a3, sj_inc1, sj_inc2, sj_skip
+        Columns: trip_id, chrom, strand, d1, a2, d2, a3, sj_inc1, sj_inc2, sj_skip,
+                 gene (primary gene), genes (list of all genes)
     """
     idx = _build_sj_index(sj_counts, sj_meta)
+
+    # Check for gene_id columns
+    has_gene_id = 'gene_id_start' in idx.columns and 'gene_id_end' in idx.columns
 
     # Keep only clean junctions
     idx = idx[idx['strand'].notna() & idx['donor'].notna() & idx['acceptor'].notna()].copy()
@@ -403,6 +463,22 @@ def _find_cassette_triplets_strand(sj_counts: pd.DataFrame,
     idx_by_donor = idx.groupby(['chrom', 'strand', 'donor'])
     idx_by_acceptor = idx.groupby(['chrom', 'strand', 'acceptor'])
     idx_by_pair = idx.set_index(['chrom', 'strand', 'donor', 'acceptor'])['coord.intron'].to_dict()
+
+    # Create junction ID -> gene mapping for gene collection
+    junction_to_genes = {}
+    for _, row in idx.iterrows():
+        coord = row['coord.intron']
+        genes = []
+        if has_gene_id:
+            for col in ['gene_name_start', 'gene_name_end', 'gene_id_start', 'gene_id_end']:
+                if col in row.index and pd.notna(row[col]):
+                    genes.append(row[col])
+        else:
+            if pd.notna(row.get('gene_name_start')):
+                genes.append(row['gene_name_start'])
+            if pd.notna(row.get('gene_name_end')):
+                genes.append(row['gene_name_end'])
+        junction_to_genes[coord] = list(set(genes))  # Remove duplicates
 
     triplets = []
 
@@ -451,6 +527,17 @@ def _find_cassette_triplets_strand(sj_counts: pd.DataFrame,
                 if sj_inc1 is None or sj_inc2 is None:
                     continue
 
+                # Collect genes from all three junctions
+                genes_list = []
+                for sj_id in [sj_inc1, sj_inc2, sj_skip]:
+                    genes_list.extend(junction_to_genes.get(sj_id, []))
+
+                # Remove duplicates and sort
+                genes_unique = sorted(set(genes_list))
+
+                # Primary gene: first alphabetically (could be improved with better heuristics)
+                primary_gene = genes_unique[0] if genes_unique else None
+
                 triplets.append({
                     'chrom': chrom,
                     'strand': strand,
@@ -460,12 +547,14 @@ def _find_cassette_triplets_strand(sj_counts: pd.DataFrame,
                     'a3': a3,
                     'sj_inc1': sj_inc1,
                     'sj_inc2': sj_inc2,
-                    'sj_skip': sj_skip
+                    'sj_skip': sj_skip,
+                    'gene': primary_gene,
+                    'genes': genes_unique
                 })
 
     if not triplets:
         return pd.DataFrame(columns=['trip_id', 'chrom', 'strand', 'd1', 'a2', 'd2', 'a3',
-                                    'sj_inc1', 'sj_inc2', 'sj_skip'])
+                                    'sj_inc1', 'sj_inc2', 'sj_skip', 'gene', 'genes'])
 
     trips_df = pd.DataFrame(triplets)
     trips_df = trips_df.drop_duplicates()
@@ -485,9 +574,13 @@ def _find_cassette_triplets_genomic(sj_counts: pd.DataFrame,
     Returns
     -------
     pd.DataFrame
-        Columns: trip_id, chrom, strand, d1, a2, d2, a3, sj_inc1, sj_inc2, sj_skip
+        Columns: trip_id, chrom, strand, d1, a2, d2, a3, sj_inc1, sj_inc2, sj_skip,
+                 gene (primary gene), genes (list of all genes)
     """
     idx = _build_sj_index(sj_counts, sj_meta)
+
+    # Check for gene_id columns
+    has_gene_id = 'gene_id_start' in idx.columns and 'gene_id_end' in idx.columns
 
     # Keep only clean junctions
     idx = idx[idx['left'].notna() & idx['right'].notna()].copy()
@@ -500,6 +593,22 @@ def _find_cassette_triplets_genomic(sj_counts: pd.DataFrame,
     idx_by_left = idx.groupby(['chrom', 'left'])
     idx_by_right = idx.groupby(['chrom', 'right'])
     idx_by_coords = idx.set_index(['chrom', 'left', 'right'])['coord.intron'].to_dict()
+
+    # Create junction ID -> gene mapping for gene collection
+    junction_to_genes = {}
+    for _, row in idx.iterrows():
+        coord = row['coord.intron']
+        genes = []
+        if has_gene_id:
+            for col in ['gene_name_start', 'gene_name_end', 'gene_id_start', 'gene_id_end']:
+                if col in row.index and pd.notna(row[col]):
+                    genes.append(row[col])
+        else:
+            if pd.notna(row.get('gene_name_start')):
+                genes.append(row['gene_name_start'])
+            if pd.notna(row.get('gene_name_end')):
+                genes.append(row['gene_name_end'])
+        junction_to_genes[coord] = list(set(genes))  # Remove duplicates
 
     triplets = []
 
@@ -534,6 +643,17 @@ def _find_cassette_triplets_genomic(sj_counts: pd.DataFrame,
                 if sj_inc2 is None:
                     continue
 
+                # Collect genes from all three junctions
+                genes_list = []
+                for sj_id in [sj_inc1, sj_inc2, sj_skip]:
+                    genes_list.extend(junction_to_genes.get(sj_id, []))
+
+                # Remove duplicates and sort
+                genes_unique = sorted(set(genes_list))
+
+                # Primary gene: first alphabetically (could be improved with better heuristics)
+                primary_gene = genes_unique[0] if genes_unique else None
+
                 triplets.append({
                     'chrom': chrom,
                     'strand': strand if pd.notna(strand) else None,
@@ -543,12 +663,14 @@ def _find_cassette_triplets_genomic(sj_counts: pd.DataFrame,
                     'a3': R3,
                     'sj_inc1': sj_inc1,
                     'sj_inc2': sj_inc2,
-                    'sj_skip': sj_skip
+                    'sj_skip': sj_skip,
+                    'gene': primary_gene,
+                    'genes': genes_unique
                 })
 
     if not triplets:
         return pd.DataFrame(columns=['trip_id', 'chrom', 'strand', 'd1', 'a2', 'd2', 'a3',
-                                    'sj_inc1', 'sj_inc2', 'sj_skip'])
+                                    'sj_inc1', 'sj_inc2', 'sj_skip', 'gene', 'genes'])
 
     trips_df = pd.DataFrame(triplets)
     trips_df = trips_df.drop_duplicates()
@@ -622,7 +744,7 @@ def process_exon_skipping(sj_counts: pd.DataFrame,
         # Return empty arrays
         cell_names = sj_counts.columns.tolist()
         empty_meta = pd.DataFrame(columns=['trip_id', 'chrom', 'strand', 'd1', 'a2', 'd2', 'a3',
-                                           'sj_inc1', 'sj_inc2', 'sj_skip'])
+                                           'sj_inc1', 'sj_inc2', 'sj_skip', 'gene', 'genes'])
         if return_unfiltered:
             return (np.zeros((0, len(cell_names))), np.zeros((0, len(cell_names))),
                     np.zeros((0, len(cell_names))), empty_meta, cell_names,
@@ -721,7 +843,7 @@ def process_exon_skipping(sj_counts: pd.DataFrame,
     if len(valid_events) == 0:
         warnings.warn("No exon skipping events with variable inclusion ratios found after filtering!")
         empty_meta = pd.DataFrame(columns=['trip_id', 'chrom', 'strand', 'd1', 'a2', 'd2', 'a3',
-                                           'sj_inc1', 'sj_inc2', 'sj_skip'])
+                                           'sj_inc1', 'sj_inc2', 'sj_skip', 'gene', 'genes'])
         if return_unfiltered:
             return (np.zeros((0, n_cells)), np.zeros((0, n_cells)), np.zeros((0, n_cells)),
                     empty_meta, cell_names,

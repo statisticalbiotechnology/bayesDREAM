@@ -98,35 +98,64 @@ def sample_negbinom_trans(
 def sample_multinomial_trans(
     y_obs_tensor,         # [N, T, K] integer counts
     mu_y,                 # [N, T, K] baseline probs (will be renormalized)
-    alpha_y_full,         # [C, T, K] additive logits (centered across K)
-    groups_tensor,        # [N]
+    alpha_y_full,         # [C, T, K] or [S, C, T, K] additive logits
+    groups_tensor,        # [N] int in [0..C-1]
     N, T, K, C=None
 ):
     # Totals per (obs, feature)
     total_counts = y_obs_tensor.sum(dim=-1)  # [N, T]
 
-    # Base logits & group shifts
-    mu_y = mu_y / (mu_y.sum(dim=-1, keepdim=True).clamp_min(1e-12))  # safety renorm
+    # Safety renormalize baseline probabilities
+    mu_y = mu_y / (mu_y.sum(dim=-1, keepdim=True).clamp_min(1e-12))  # [N, T, K]
     base_logits = torch.log(mu_y.clamp_min(1e-12))                    # [N, T, K]
+
     if alpha_y_full is not None and groups_tensor is not None:
-        alpha_used = alpha_y_full[groups_tensor, :, :]                # [N, T, K]
-        logits = base_logits + alpha_used
-        probs = torch.softmax(logits, dim=-1)                         # [N, T, K]
+        if alpha_y_full.dim() == 3:
+            # [C, T, K] -> index by group per observation
+            # alpha_used: [N, T, K]
+            alpha_used = alpha_y_full[groups_tensor, :, :]
+            logits = base_logits + alpha_used                          # [N, T, K]
+            probs = torch.softmax(logits, dim=-1)
+        elif alpha_y_full.dim() == 4:
+            # [S, C, T, K] -> index groups along dim=1, broadcast base over S
+            S = alpha_y_full.size(0)
+            # alpha_used: [S, N, T, K]
+            alpha_used = alpha_y_full[:, groups_tensor, :, :]
+            # expand base to [S, N, T, K]
+            base_logits_S = base_logits.unsqueeze(0).expand(S, -1, -1, -1)
+            logits = base_logits_S + alpha_used                        # [S, N, T, K]
+            probs = torch.softmax(logits, dim=-1)                      # [S, N, T, K]
+        else:
+            raise ValueError(f"Unexpected alpha_y_full shape: {tuple(alpha_y_full.shape)}")
     else:
-        probs = mu_y
+        probs = mu_y  # [N, T, K]
 
-    # Multinomial log-likelihood (vectorized)
-    y = y_obs_tensor
-    log_probs = torch.log(probs.clamp_min(1e-12))                     # [N, T, K]
-    ll = (
-        torch.lgamma(total_counts + 1.0)
-        - torch.lgamma(y + 1.0).sum(dim=-1)
-        + (y * log_probs).sum(dim=-1)
-    )  # [N, T]
-
-    # Contribute to the model log-density
-    with pyro.plate("obs_plate", N * T):
-        pyro.factor("y_obs", ll.reshape(-1))
+    # Log-likelihood contribution
+    if probs.dim() == 3:
+        # [N, T, K]
+        log_probs = torch.log(probs.clamp_min(1e-12))
+        ll = (
+            torch.lgamma(total_counts + 1.0)
+            - torch.lgamma(y_obs_tensor + 1.0).sum(dim=-1)
+            + (y_obs_tensor * log_probs).sum(dim=-1)
+        )  # [N, T]
+        with pyro.plate("obs_plate", N * T):
+            pyro.factor("y_obs", ll.reshape(-1))
+    elif probs.dim() == 4:
+        # [S, N, T, K]
+        S = probs.size(0)
+        y = y_obs_tensor.unsqueeze(0).expand(S, -1, -1, -1)            # [S, N, T, K]
+        total_counts_S = total_counts.unsqueeze(0).expand(S, -1, -1)   # [S, N, T]
+        log_probs = torch.log(probs.clamp_min(1e-12))
+        ll = (
+            torch.lgamma(total_counts_S + 1.0)
+            - torch.lgamma(y + 1.0).sum(dim=-1)
+            + (y * log_probs).sum(dim=-1)
+        )  # [S, N, T]
+        with pyro.plate("obs_plate", S * N * T):
+            pyro.factor("y_obs", ll.reshape(-1))
+    else:
+        raise ValueError(f"Unexpected probs shape: {tuple(probs.shape)}")
 
 
 #######################################
