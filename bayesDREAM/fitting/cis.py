@@ -31,6 +31,12 @@ class CisFitter:
         """
         self.model = model
 
+    def _t(self, x, dtype=torch.float32):
+        return torch.as_tensor(x, dtype=dtype, device=self.model.device)
+
+    def _to_cpu(x):
+        return x.cpu() if isinstance(x, torch.Tensor) else None
+
     ########################################################
     # Step 2: Fit cis effects (model_x)
     ########################################################
@@ -126,12 +132,12 @@ class CisFitter:
             sigma_eff_alpha = pyro.sample("sigma_eff_alpha", dist.Exponential(rate_alpha))
             sigma_eff_beta = pyro.sample("sigma_eff_beta", dist.Exponential(rate_beta))
         else:
-            sigma_eff_alpha = pyro.sample("sigma_eff_alpha", dist.Gamma(1.0, 0.01))
-            sigma_eff_beta = pyro.sample("sigma_eff_beta", dist.Gamma(1.0, 0.01))
+            sigma_eff_alpha = pyro.sample("sigma_eff_alpha", dist.Gamma(self._t(1.0), self._t(0.01)))
+            sigma_eff_beta = pyro.sample("sigma_eff_beta", dist.Gamma(self._t(1.0), self._t(0.01)))
         with pyro.plate("guides_plate", G):
-            eps_x_eff_g = pyro.sample("eps_x_eff_g", dist.StudentT(df=3.0, loc=0.0, scale=1.0))
+            eps_x_eff_g = pyro.sample("eps_x_eff_g", dist.StudentT(df=self._t(3.0), loc=self._t(0.0), scale=self._t(1.0)))
             log2_x_eff_g = mu + sigma * eps_x_eff_g
-            x_eff_g = pyro.deterministic("x_eff_g", torch.tensor(2.0, device=self.model.device) ** log2_x_eff_g)
+            x_eff_g = pyro.deterministic("x_eff_g", torch.tensor(self._t(2.0), device=self.model.device) ** log2_x_eff_g)
         
             sigma_eff = pyro.sample("sigma_eff", dist.Gamma(sigma_eff_alpha, sigma_eff_beta))
                 
@@ -155,7 +161,7 @@ class CisFitter:
                 "log_x_true",
                 dist.Normal(torch.log2(x_mean), sigma_eff[..., guides_tensor])
             )
-            x_true = pyro.deterministic("x_true", torch.tensor(2.0, device=self.model.device) ** log_x_true)
+            x_true = pyro.deterministic("x_true", self._t(2.0) ** log_x_true)
             mu_obs = alpha_x_used * x_true * sum_factor_tensor
             pyro.sample(
                 "x_obs",
@@ -542,23 +548,23 @@ class CisFitter:
             model_inputs = {
                 "N": N,
                 "G": G,
-                "alpha_dirichlet_tensor": alpha_dirichlet_tensor.cpu(),
-                "guides_tensor": guides_tensor.cpu(),
-                "x_obs_tensor": x_obs_tensor.cpu(),
-                "sum_factor_tensor": sum_factor_tensor.cpu(),
-                "beta_o_alpha_tensor": beta_o_alpha_tensor.cpu(),
-                "beta_o_beta_tensor": beta_o_beta_tensor.cpu(),
-                "alpha_alpha_mu_tensor": alpha_alpha_mu_tensor.cpu(),
-                "mu_x_mean_tensor": mu_x_mean_tensor.cpu(),
-                "mu_x_sd_tensor": mu_x_sd_tensor.cpu(),
-                "sigma_eff_mean_tensor": sigma_eff_mean_tensor.clamp(min=1e-2).cpu(),
-                "sigma_eff_sd_tensor": sigma_eff_sd_tensor.clamp(min=1e-2).cpu(),
-                "epsilon_tensor": epsilon_tensor.cpu(),
+                "alpha_dirichlet_tensor": _to_cpu(alpha_dirichlet_tensor),
+                "guides_tensor": _to_cpu(guides_tensor),
+                "x_obs_tensor": _to_cpu(x_obs_tensor),
+                "sum_factor_tensor": _to_cpu(sum_factor_tensor),
+                "beta_o_alpha_tensor": _to_cpu(beta_o_alpha_tensor),
+                "beta_o_beta_tensor": _to_cpu(beta_o_beta_tensor),
+                "alpha_alpha_mu_tensor": _to_cpu(alpha_alpha_mu_tensor),
+                "mu_x_mean_tensor": _to_cpu(mu_x_mean_tensor),
+                "mu_x_sd_tensor": _to_cpu(mu_x_sd_tensor),
+                "sigma_eff_mean_tensor": _to_cpu(sigma_eff_mean_tensor.clamp(min=1e-2)),
+                "sigma_eff_sd_tensor": _to_cpu(sigma_eff_sd_tensor.clamp(min=1e-2)),
+                "epsilon_tensor": _to_cpu(epsilon_tensor),
                 "C": C,
-                "groups_tensor": groups_tensor.cpu() if groups_tensor is not None else None,
-                "alpha_x_sample": self.model.alpha_x_prefit.mean(dim=0).cpu() if self.model.alpha_x_type == "posterior" else (self.model.alpha_x_prefit.cpu() if self.model.alpha_x_prefit is not None else None),
+                "groups_tensor": _to_cpu(groups_tensor),
+                "alpha_x_sample": _to_cpu(self.model.alpha_x_prefit.mean(dim=0)) if self.model.alpha_x_type == "posterior" else _to_cpu(self.model.alpha_x_prefit),
                 "o_x_sample": None,
-                "target_per_guide_tensor": target_per_guide_tensor.cpu() if target_per_guide_tensor is not None else None,
+                "target_per_guide_tensor": _to_cpu(target_per_guide_tensor),
                 "independent_mu_sigma": independent_mu_sigma,
             }
         else:
@@ -608,7 +614,7 @@ class CisFitter:
                     samples = predictive_x(**model_inputs)
                     for k, v in samples.items():
                         if keep_sites(k, {"value": v}):
-                            all_samples[k].append(v.cpu())
+                            all_samples[k].append(_to_cpu(v))
                     if self.model.device.type == "cuda":
                         torch.cuda.empty_cache()
                     import gc
@@ -633,10 +639,12 @@ class CisFitter:
             print("[INFO] Reset self.model.device to:", self.model.device)
 
         for k, v in posterior_samples_x.items():
-            posterior_samples_x[k] = v.cpu()
-        
+            posterior_samples_x[k] = _to_cpu(v)
+
         self.model.loss_x = losses
-        self.posterior_samples_cis = posterior_samples_x
+        # Store full posterior on model (not just on CisFitter)
+        self.model.posterior_samples_cis = posterior_samples_x
+        self.posterior_samples_cis = posterior_samples_x  # Keep for backward compatibility
         self.model.x_true = posterior_samples_x['x_true']
         self.model.x_true_type = 'posterior'
         self.log2_x_true = posterior_samples_x['log_x_true']

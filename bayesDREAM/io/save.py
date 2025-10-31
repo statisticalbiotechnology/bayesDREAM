@@ -51,7 +51,7 @@ class ModelSaver:
         - alpha_y_prefit.pt: Trans gene overdispersion (from primary modality)
         """
         if output_dir is None:
-            output_dir = self.model.output_dir
+            output_dir =  os.path.join(self.model.output_dir, self.model.label)
 
         os.makedirs(output_dir, exist_ok=True)
 
@@ -134,10 +134,20 @@ class ModelSaver:
                         posterior_clean['alpha_y_mult'] = mod.alpha_y_prefit_mult
                         print(f"[SAVE] {mod_name}.posterior_samples_technical: added alpha_y_mult for completeness")
 
+                # Add feature metadata (including full DataFrame for excluded features tracking)
+                posterior_with_meta = {
+                    'posterior_samples': posterior_clean,
+                    'modality_name': mod_name,
+                    'distribution': mod.distribution,
+                    'feature_names': mod.feature_names if hasattr(mod, 'feature_names') else None,
+                    'n_features': mod.dims.get('n_features', None),
+                    'feature_meta': mod.feature_meta.to_dict('records') if hasattr(mod, 'feature_meta') and mod.feature_meta is not None else None
+                }
+
                 path = os.path.join(output_dir, f'posterior_samples_technical_{mod_name}.pt')
-                torch.save(posterior_clean, path)
+                torch.save(posterior_with_meta, path)
                 saved_files[f'posterior_samples_technical_{mod_name}'] = path
-                print(f"[SAVE] {mod_name}.posterior_samples_technical → {path}")
+                print(f"[SAVE] {mod_name}.posterior_samples_technical ({mod.dims.get('n_features')} features) → {path}")
 
         print(f"[SAVE] Technical fit saved to {output_dir}")
         print(f"[SAVE] Modalities saved: {modalities_to_save}")
@@ -164,7 +174,7 @@ class ModelSaver:
             Paths to saved files
         """
         if output_dir is None:
-            output_dir = self.model.output_dir
+            output_dir = os.path.join(self.model.output_dir, self.model.label)
 
         os.makedirs(output_dir, exist_ok=True)
 
@@ -184,10 +194,20 @@ class ModelSaver:
             # Remove large observation arrays
             posterior_clean = {k: v for k, v in self.model.posterior_samples_cis.items()
                              if k not in ['x_obs', 'y_obs']}
+
+            # Add cis gene metadata (including feature_meta from cis modality)
+            cis_mod = self.model.get_modality('cis')
+            posterior_with_meta = {
+                'posterior_samples': posterior_clean,
+                'cis_gene': self.model.cis_gene,
+                'modality_name': 'cis',  # Cis always uses 'cis' modality
+                'feature_meta': cis_mod.feature_meta.to_dict('records') if hasattr(cis_mod, 'feature_meta') and cis_mod.feature_meta is not None else None
+            }
+
             path = os.path.join(output_dir, 'posterior_samples_cis.pt')
-            torch.save(posterior_clean, path)
+            torch.save(posterior_with_meta, path)
             saved_files['posterior_samples_cis'] = path
-            print(f"[SAVE] posterior_samples_cis → {path}")
+            print(f"[SAVE] posterior_samples_cis (cis_gene: {self.model.cis_gene}) → {path}")
 
         print(f"[SAVE] Cis fit saved to {output_dir}")
         return saved_files
@@ -219,7 +239,7 @@ class ModelSaver:
         - posterior_samples_trans.pt: Model-level posterior samples
         """
         if output_dir is None:
-            output_dir = self.model.output_dir
+            output_dir = os.path.join(self.model.output_dir, self.model.label)
 
         os.makedirs(output_dir, exist_ok=True)
 
@@ -241,13 +261,29 @@ class ModelSaver:
         # Save model-level posterior samples (when primary modality is being saved)
         if should_save_model_level:
             if hasattr(self.model, 'posterior_samples_trans') and self.model.posterior_samples_trans is not None:
-                # Remove large observation arrays
+                # Remove large observation arrays and add metadata
                 posterior_clean = {k: v for k, v in self.model.posterior_samples_trans.items()
                                  if k not in ['y_obs', 'x_obs']}
-                path = os.path.join(output_dir, 'posterior_samples_trans.pt')
-                torch.save(posterior_clean, path)
+
+                # Get modality for feature info
+                primary_mod = self.model.get_modality(self.model.primary_modality)
+
+                # Add modality and feature metadata (including full feature_meta DataFrame)
+                posterior_with_meta = {
+                    'posterior_samples': posterior_clean,
+                    'modality_name': self.model.primary_modality,
+                    'distribution': primary_mod.distribution,
+                    'feature_names': primary_mod.feature_names if hasattr(primary_mod, 'feature_names') else None,
+                    'n_features': primary_mod.dims.get('n_features', None),
+                    'feature_meta': primary_mod.feature_meta.to_dict('records') if hasattr(primary_mod, 'feature_meta') and primary_mod.feature_meta is not None else None,
+                    'cis_gene': self.model.cis_gene
+                }
+
+                # Include modality name in filename to prevent overwrites
+                path = os.path.join(output_dir, f'posterior_samples_trans_{self.model.primary_modality}.pt')
+                torch.save(posterior_with_meta, path)
                 saved_files['posterior_samples_trans'] = path
-                print(f"[SAVE] posterior_samples_trans → {path}")
+                print(f"[SAVE] posterior_samples_trans (modality: {self.model.primary_modality}, {primary_mod.dims.get('n_features')} features) → {path}")
 
         # Save per-modality posterior samples
         for mod_name in modalities_to_save:
@@ -255,10 +291,22 @@ class ModelSaver:
             if hasattr(mod, 'posterior_samples_trans') and mod.posterior_samples_trans is not None:
                 posterior_clean = {k: v for k, v in mod.posterior_samples_trans.items()
                                  if k not in ['y_obs', 'x_obs']}
+
+                # Add modality and feature metadata (including full feature_meta DataFrame)
+                posterior_with_meta = {
+                    'posterior_samples': posterior_clean,
+                    'modality_name': mod_name,
+                    'distribution': mod.distribution,
+                    'feature_names': mod.feature_names if hasattr(mod, 'feature_names') else None,
+                    'n_features': mod.dims.get('n_features', None),
+                    'feature_meta': mod.feature_meta.to_dict('records') if hasattr(mod, 'feature_meta') and mod.feature_meta is not None else None,
+                    'cis_gene': self.model.cis_gene
+                }
+
                 path = os.path.join(output_dir, f'posterior_samples_trans_{mod_name}.pt')
-                torch.save(posterior_clean, path)
+                torch.save(posterior_with_meta, path)
                 saved_files[f'posterior_samples_trans_{mod_name}'] = path
-                print(f"[SAVE] {mod_name}.posterior_samples_trans → {path}")
+                print(f"[SAVE] {mod_name}.posterior_samples_trans (distribution: {mod.distribution}, {mod.dims.get('n_features')} features) → {path}")
 
         print(f"[SAVE] Trans fit saved to {output_dir}")
         print(f"[SAVE] Modalities saved: {modalities_to_save}")

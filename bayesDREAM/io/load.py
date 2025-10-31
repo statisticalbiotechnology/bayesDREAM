@@ -4,6 +4,7 @@ Load methods for bayesDREAM fitted parameters.
 
 import os
 import torch
+import pandas as pd
 
 class ModelLoader:
     """Handles loading fitted parameters."""
@@ -40,7 +41,7 @@ class ModelLoader:
             Loaded parameters
         """
         if input_dir is None:
-            input_dir = self.model.output_dir
+            input_dir = os.path.join(self.model.output_dir, self.model.label)
 
         loaded = {}
 
@@ -114,7 +115,32 @@ class ModelLoader:
             # Load modality-specific posterior_samples_technical
             posterior_path = os.path.join(input_dir, f'posterior_samples_technical_{mod_name}.pt')
             if os.path.exists(posterior_path):
-                mod.posterior_samples_technical = torch.load(posterior_path)
+                loaded_data = torch.load(posterior_path)
+
+                # Check if new format (with metadata) or old format (just dict)
+                if isinstance(loaded_data, dict) and 'posterior_samples' in loaded_data:
+                    # New format with metadata
+                    mod.posterior_samples_technical = loaded_data['posterior_samples']
+                    loaded[f'posterior_samples_technical_{mod_name}'] = mod.posterior_samples_technical
+
+                    # Reconstruct feature_meta DataFrame if present
+                    feature_meta_df = None
+                    if loaded_data.get('feature_meta') is not None:
+                        feature_meta_df = pd.DataFrame(loaded_data['feature_meta'])
+
+                    loaded[f'posterior_samples_technical_{mod_name}_metadata'] = {
+                        'modality_name': loaded_data.get('modality_name'),
+                        'distribution': loaded_data.get('distribution'),
+                        'feature_names': loaded_data.get('feature_names'),
+                        'n_features': loaded_data.get('n_features'),
+                        'feature_meta': feature_meta_df
+                    }
+                    print(f"[LOAD] {mod_name}.posterior_samples_technical ({loaded_data.get('n_features')} features) ← {posterior_path}")
+                else:
+                    # Old format (backward compatibility)
+                    mod.posterior_samples_technical = loaded_data
+                    loaded[f'posterior_samples_technical_{mod_name}'] = mod.posterior_samples_technical
+                    print(f"[LOAD] {mod_name}.posterior_samples_technical (legacy format) ← {posterior_path}")
 
                 # Also extract and set specific alpha attributes from posterior_samples
                 # This ensures backward compatibility even if files were saved without the specific attributes
@@ -128,9 +154,6 @@ class ModelLoader:
                     if not hasattr(mod, 'alpha_y_prefit_mult') or mod.alpha_y_prefit_mult is None:
                         mod.alpha_y_prefit_mult = mod.posterior_samples_technical[alpha_y_mult_key]
                         print(f"[LOAD] {mod_name}.alpha_y_prefit_mult ← extracted from posterior_samples_technical")
-
-                loaded[f'posterior_samples_technical_{mod_name}'] = mod.posterior_samples_technical
-                print(f"[LOAD] {mod_name}.posterior_samples_technical ← {posterior_path}")
 
         print(f"[LOAD] Technical fit loaded from {input_dir}")
         print(f"[LOAD] Modalities loaded: {modalities_to_load}")
@@ -153,7 +176,7 @@ class ModelLoader:
             Loaded parameters
         """
         if input_dir is None:
-            input_dir = self.model.output_dir
+            input_dir = os.path.join(self.model.output_dir, self.model.label)
 
         loaded = {}
 
@@ -173,9 +196,30 @@ class ModelLoader:
         # Load posterior samples
         posterior_path = os.path.join(input_dir, 'posterior_samples_cis.pt')
         if os.path.exists(posterior_path):
-            self.model.posterior_samples_cis = torch.load(posterior_path)
-            loaded['posterior_samples_cis'] = self.model.posterior_samples_cis
-            print(f"[LOAD] posterior_samples_cis ← {posterior_path}")
+            loaded_data = torch.load(posterior_path)
+
+            # Check if new format (with metadata) or old format (just dict)
+            if isinstance(loaded_data, dict) and 'posterior_samples' in loaded_data:
+                # New format with metadata
+                self.model.posterior_samples_cis = loaded_data['posterior_samples']
+                loaded['posterior_samples_cis'] = self.model.posterior_samples_cis
+
+                # Reconstruct feature_meta DataFrame if present
+                feature_meta_df = None
+                if loaded_data.get('feature_meta') is not None:
+                    feature_meta_df = pd.DataFrame(loaded_data['feature_meta'])
+
+                loaded['posterior_samples_cis_metadata'] = {
+                    'cis_gene': loaded_data.get('cis_gene'),
+                    'modality_name': loaded_data.get('modality_name'),
+                    'feature_meta': feature_meta_df
+                }
+                print(f"[LOAD] posterior_samples_cis (cis_gene: {loaded_data.get('cis_gene')}) ← {posterior_path}")
+            else:
+                # Old format (backward compatibility)
+                self.model.posterior_samples_cis = loaded_data
+                loaded['posterior_samples_cis'] = self.model.posterior_samples_cis
+                print(f"[LOAD] posterior_samples_cis (legacy format) ← {posterior_path}")
 
         print(f"[LOAD] Cis fit loaded from {input_dir}")
         return loaded
@@ -199,7 +243,7 @@ class ModelLoader:
             Loaded parameters
         """
         if input_dir is None:
-            input_dir = self.model.output_dir
+            input_dir = os.path.join(self.model.output_dir, self.model.label)
 
         loaded = {}
 
@@ -218,19 +262,70 @@ class ModelLoader:
 
         # Load model-level posterior samples (when primary modality is being loaded)
         if should_load_model_level:
-            posterior_path = os.path.join(input_dir, 'posterior_samples_trans.pt')
+            # Try new filename pattern first (includes modality name)
+            posterior_path = os.path.join(input_dir, f'posterior_samples_trans_{self.model.primary_modality}.pt')
+            if not os.path.exists(posterior_path):
+                # Fall back to old filename pattern (backward compatibility)
+                posterior_path = os.path.join(input_dir, 'posterior_samples_trans.pt')
+
             if os.path.exists(posterior_path):
-                self.model.posterior_samples_trans = torch.load(posterior_path)
-                loaded['posterior_samples_trans'] = self.model.posterior_samples_trans
-                print(f"[LOAD] posterior_samples_trans ← {posterior_path}")
+                loaded_data = torch.load(posterior_path)
+                # Check if new format (with metadata) or old format (just dict)
+                if isinstance(loaded_data, dict) and 'posterior_samples' in loaded_data:
+                    # New format with metadata
+                    self.model.posterior_samples_trans = loaded_data['posterior_samples']
+                    loaded['posterior_samples_trans'] = self.model.posterior_samples_trans
+
+                    # Reconstruct feature_meta DataFrame if present
+                    feature_meta_df = None
+                    if loaded_data.get('feature_meta') is not None:
+                        feature_meta_df = pd.DataFrame(loaded_data['feature_meta'])
+
+                    loaded['posterior_samples_trans_metadata'] = {
+                        'modality_name': loaded_data.get('modality_name'),
+                        'distribution': loaded_data.get('distribution'),
+                        'feature_names': loaded_data.get('feature_names'),
+                        'n_features': loaded_data.get('n_features'),
+                        'cis_gene': loaded_data.get('cis_gene'),
+                        'feature_meta': feature_meta_df
+                    }
+                    print(f"[LOAD] posterior_samples_trans (modality: {loaded_data.get('modality_name')}, {loaded_data.get('n_features')} features) ← {posterior_path}")
+                else:
+                    # Old format (backward compatibility)
+                    self.model.posterior_samples_trans = loaded_data
+                    loaded['posterior_samples_trans'] = self.model.posterior_samples_trans
+                    print(f"[LOAD] posterior_samples_trans (legacy format) ← {posterior_path}")
 
         # Load per-modality posterior samples
         for mod_name in modalities_to_load:
             mod_path = os.path.join(input_dir, f'posterior_samples_trans_{mod_name}.pt')
             if os.path.exists(mod_path):
-                self.model.modalities[mod_name].posterior_samples_trans = torch.load(mod_path)
-                loaded[f'posterior_samples_trans_{mod_name}'] = self.model.modalities[mod_name].posterior_samples_trans
-                print(f"[LOAD] {mod_name}.posterior_samples_trans ← {mod_path}")
+                loaded_data = torch.load(mod_path)
+                # Check if new format (with metadata) or old format (just dict)
+                if isinstance(loaded_data, dict) and 'posterior_samples' in loaded_data:
+                    # New format with metadata
+                    self.model.modalities[mod_name].posterior_samples_trans = loaded_data['posterior_samples']
+                    loaded[f'posterior_samples_trans_{mod_name}'] = self.model.modalities[mod_name].posterior_samples_trans
+
+                    # Reconstruct feature_meta DataFrame if present
+                    feature_meta_df = None
+                    if loaded_data.get('feature_meta') is not None:
+                        feature_meta_df = pd.DataFrame(loaded_data['feature_meta'])
+
+                    loaded[f'posterior_samples_trans_{mod_name}_metadata'] = {
+                        'modality_name': loaded_data.get('modality_name'),
+                        'distribution': loaded_data.get('distribution'),
+                        'feature_names': loaded_data.get('feature_names'),
+                        'n_features': loaded_data.get('n_features'),
+                        'cis_gene': loaded_data.get('cis_gene'),
+                        'feature_meta': feature_meta_df
+                    }
+                    print(f"[LOAD] {mod_name}.posterior_samples_trans (distribution: {loaded_data.get('distribution')}, {loaded_data.get('n_features')} features) ← {mod_path}")
+                else:
+                    # Old format (backward compatibility)
+                    self.model.modalities[mod_name].posterior_samples_trans = loaded_data
+                    loaded[f'posterior_samples_trans_{mod_name}'] = self.model.modalities[mod_name].posterior_samples_trans
+                    print(f"[LOAD] {mod_name}.posterior_samples_trans (legacy format) ← {mod_path}")
 
         print(f"[LOAD] Trans fit loaded from {input_dir}")
         print(f"[LOAD] Modalities loaded: {modalities_to_load}")
