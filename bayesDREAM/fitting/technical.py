@@ -9,6 +9,7 @@ import warnings
 import numpy as np
 import pandas as pd
 import torch
+from torch.distributions import constraints, transform_to
 import pyro
 import pyro.distributions as dist
 from pyro.distributions.transforms import iterated, affine_autoregressive
@@ -30,6 +31,12 @@ class TechnicalFitter:
             The parent model instance
         """
         self.model = model
+
+    def _t(self, x, dtype=torch.float32):
+        return torch.as_tensor(x, dtype=dtype, device=self.model.device)
+
+    def _to_cpu(x):
+        return x.cpu() if isinstance(x, torch.Tensor) else None
     
     def _model_technical(
         self,
@@ -70,48 +77,57 @@ class TechnicalFitter:
         #   multiplicative: alpha_full_mul  (baseline=1)
         #   additive/logit: alpha_full_add  (baseline=0)
         # ----------------------------
-        if distribution == "multinomial":
+        if distribution == 'multinomial':
             assert K is not None, "multinomial requires K"
         
-            # ---- Cell-line logits α for NON-baseline groups (baseline=0 implicit) ----
-            # Avoid plate dims entirely to prevent shape drift in SVI/guide.
-            # Sample a fixed-shape tensor as a single event of size (C-1, T, K).
-            alpha_logits_y = pyro.sample(
-                "alpha_logits_y",  # renamed from *_raw to be the actual latent
-                dist.StudentT(df=3, loc=0.0, scale=20.0)
-                    .expand([C - 1, T, K])
-                    .to_event(3)  # treat all dims as event -> guide won't add plate dims
-            )  # [C-1, T, K]
+            # ---- zero-probability category mask per (T,K) from NTC counts ----
+            total_counts_per_feature = y_obs_ntc_tensor.sum(dim=0)  # [T, K]
+            zero_cat_mask = (total_counts_per_feature == 0)         # [T, K] bool
+            pyro.deterministic("zero_cat_mask", zero_cat_mask)
+            # After computing zero_cat_mask = (total_counts_per_feature == 0)  # [T, K]
+            active_k = (~zero_cat_mask).sum(dim=-1)  # [T]
+            if (active_k == 0).any():
+                bad = torch.nonzero(active_k == 0, as_tuple=False).squeeze(-1).tolist()
+                raise RuntimeError(
+                    f"Multinomial: feature(s) reached model with all categories zero (indices: {bad}). "
+                    "These should have been excluded by zero_count_mask."
+                )
+            if (active_k <= 1).any():
+                bad = torch.nonzero(active_k <= 1, as_tuple=False).squeeze(-1).tolist()
+                raise RuntimeError(
+                    f"Multinomial: feature(s) with ≤1 active category reached model (indices: {bad}). "
+                    "These should have been excluded by only_one_category_mask."
+                )
         
-            # Center across categories K to keep logits identifiable
-            alpha_logits_y = pyro.deterministic(
-                "alpha_logits_y_centered",
-                alpha_logits_y - alpha_logits_y.mean(dim=-1, keepdim=True)
-            )  # [C-1, T, K]
+            # ---- Cell-line logits α for NON-baseline groups (baseline=0 implicit) ----
+            with pyro.plate("c_plate_multi", C - 1, dim=-3), \
+                 pyro.plate("f_plate_multi", T, dim=-2), \
+                 pyro.plate("k_plate", K, dim=-1):
+                alpha_logits_y = pyro.sample("alpha_logits_y", dist.StudentT(3, 0.0, 20.0))
+        
+            # Force α to 0 where category is structurally absent
+            alpha_logits_y = alpha_logits_y.masked_fill(zero_cat_mask.unsqueeze(0), 0.0)
+        
+            # Center across categories; re-apply the mask to keep zeros exactly 0
+            alpha_logits_y = alpha_logits_y - alpha_logits_y.mean(dim=-1, keepdim=True)
+            alpha_logits_y = alpha_logits_y.masked_fill(zero_cat_mask.unsqueeze(0), 0.0)
+            alpha_logits_y = pyro.deterministic("alpha_logits_y_centered", alpha_logits_y)
         
             # Build full [C, T, K] (or [S, C, T, K]) with baseline=0
             if alpha_logits_y.dim() == 3:
-                # [C-1, T, K]  ->  [C, T, K]
                 alpha_full_add_logits = torch.cat(
-                    [
-                        torch.zeros(1, T, K, device=self.model.device, dtype=alpha_logits_y.dtype),
-                        alpha_logits_y.to(self.model.device),
-                    ],
-                    dim=0,
+                    [torch.zeros(1, T, K, device=self.model.device, dtype=alpha_logits_y.dtype),
+                     alpha_logits_y.to(self.model.device)], dim=0
                 )
             elif alpha_logits_y.dim() == 4:
-                # [S, C-1, T, K]  ->  [S, C, T, K]
                 S = alpha_logits_y.size(0)
                 alpha_full_add_logits = torch.cat(
-                    [
-                        torch.zeros(S, 1, T, K, device=self.model.device, dtype=alpha_logits_y.dtype),
-                        alpha_logits_y.to(self.model.device),
-                    ],
-                    dim=1,
+                    [torch.zeros(S, 1, T, K, device=self.model.device, dtype=alpha_logits_y.dtype),
+                     alpha_logits_y.to(self.model.device)], dim=1
                 )
             else:
                 raise ValueError(f"Unexpected alpha_logits_y shape: {tuple(alpha_logits_y.shape)}")
-            
+        
             alpha_full_mul = None
             alpha_full_add = alpha_full_add_logits
 
@@ -123,9 +139,9 @@ class TechnicalFitter:
                 with c_plate:  # [C-1, T]
                     log2_alpha_y = pyro.sample(
                         "log2_alpha_y",
-                        dist.StudentT(df=3, loc=0.0, scale=20.0)
+                        dist.StudentT(df=self._t(3), loc=self._t(0.0), scale=self._t(20.0))
                     )
-                    alpha_y_mul = pyro.deterministic("alpha_y_mul", 2.0 ** log2_alpha_y)
+                    alpha_y_mul = pyro.deterministic("alpha_y_mul", _t(2.0) ** log2_alpha_y)
                     delta_y_add = pyro.deterministic("delta_y_add", log2_alpha_y)
 
             if alpha_y_mul.ndim == 2:
@@ -167,14 +183,20 @@ class TechnicalFitter:
     
         elif distribution == 'normal':
             with f_plate:
-                sigma_y = pyro.sample("sigma_y", dist.HalfCauchy(10.0))  # [T]
-    
+                sigma_y = pyro.sample(
+                    "sigma_y",
+                    dist.HalfCauchy(self._t(10.0))  # <- ensure device
+                )  # [T]
+        
         elif distribution == 'mvnormal':
             assert D is not None, "mvnormal requires D"
             with f_plate:
                 with pyro.plate("dim_plate", D, dim=-2):
-                    sigma_y_mv = pyro.sample("sigma_y_mv", dist.HalfCauchy(10.0))  # [T, D]
-    
+                    sigma_y_mv = pyro.sample(
+                        "sigma_y_mv",
+                        dist.HalfCauchy(self._t(10.0))  # <- ensure device
+                    )  # [T, D]
+        
         # --------------------------------
         # Baseline means per distribution
         # --------------------------------
@@ -225,12 +247,23 @@ class TechnicalFitter:
             mu_y = mu_ntc
     
         elif distribution == 'multinomial':
-            total_counts_per_feature = y_obs_ntc_tensor.sum(dim=0)  # [T, K]
-            concentration = total_counts_per_feature + 1.0          # [T, K]
-            # Each feature (T) has its own Dirichlet over K categories.
-            with f_plate:  # <- add this
-                probs_baseline = pyro.sample("probs_baseline", dist.Dirichlet(concentration))
+            # ---- Baseline category probabilities per feature: DO NOT wrap in a plate ----
+            # concentration is [T, K]; keep this as the batch shape of the Dirichlet.
+            concentration = total_counts_per_feature + 1.0  # [T, K], strictly > 0
+            #assert concentration.shape == (T, K), f"concentration {concentration.shape} != ({T},{K})"
+            with f_plate:
+                probs0 = pyro.sample("probs_baseline_raw", dist.Dirichlet(concentration))  # [T, K]
+            #assert probs0.shape == (T, K), f"Dirichlet sample {probs0.shape} != ({T},{K})"
+            #assert zero_cat_mask.shape == (T, K), f"zero_cat_mask {zero_cat_mask.shape} != ({T},{K})"
+        
+            # Hard-zero masked categories and renormalize across active ones
+            probs_masked = probs0 * (~zero_cat_mask).to(probs0.dtype)                 # [T, K]
+            row_sums = probs_masked.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+            probs_baseline = probs_masked / row_sums                                   # [T, K]
+            probs_baseline = pyro.deterministic("probs_baseline", probs_baseline)
+        
             mu_y = probs_baseline  # [T, K]
+            #print(f'[DEBUG] mu_y.shape = {mu_y.shape}, expected: [{T}, {K}]')
 
     
         else:
@@ -275,10 +308,11 @@ class TechnicalFitter:
     
         elif distribution == 'multinomial':
             # mu_y is [T, K] baseline; expand to [N, T, K]
-            mu_y_multi = mu_y.unsqueeze(0).expand(N, T, K)
+            #mu_y_multi = mu_y.unsqueeze(0).expand(N, T, K)
             observation_sampler(
                 y_obs_tensor=y_obs_ntc_tensor,
-                mu_y=mu_y_multi,
+                #mu_y=mu_y_multi,
+                mu_y=mu_y,
                 alpha_y_full=alpha_full_add,     # <— ADD THIS
                 groups_tensor=groups_ntc_tensor, # <— ADD THIS
                 N=N, T=T, K=K, C=C
@@ -662,10 +696,65 @@ class TechnicalFitter:
             denominator_ntc_tensor = torch.tensor(denom_for_tensor, dtype=torch.float32, device=self.model.device)
     
         # ---------------------------
-        # Guide (init) for log2_alpha_y
+        # Guide + init functions
         # ---------------------------
+        import pyro.poutine as poutine
+        from pyro.infer.autoguide import AutoGuideList, AutoDelta, AutoNormal, AutoIAFNormal
+        from pyro.infer.autoguide.initialization import init_to_median
+        
+        def _safe_simplex_from_counts(total_counts_TK: torch.Tensor, interior_floor=1e-3) -> torch.Tensor:
+            """
+            total_counts_TK: [T, K] float
+            Returns p: [T, K] on the simplex, strictly interior (all entries in (eps, 1-eps)).
+            """
+            p = total_counts_TK + 1.0
+            p = p / p.sum(dim=-1, keepdim=True)
+            K = p.shape[-1]
+            eps = interior_floor / K
+            p = (1.0 - K * eps) * p + eps
+            p = p / p.sum(dim=-1, keepdim=True)
+            return p
+        
         def init_loc_fn(site):
             name = site["name"]
+        
+            # Derive local shapes from the actual tensors used in the model
+            if y_obs_ntc_tensor.dim() == 3:
+                T_local = int(y_obs_ntc_tensor.shape[1])
+                K_local = int(y_obs_ntc_tensor.shape[2])
+            else:
+                T_local = int(y_obs_ntc_tensor.shape[1])
+                K_local = None
+        
+            # -------------------------
+            # Multinomial-only inits
+            # -------------------------
+            if distribution == 'multinomial':
+                # Robust init for Dirichlet (simplex)
+                if name == "probs_baseline_raw":
+                    # Use the site's own shapes to be robust to any future plate changes
+                    T_local = int(site["fn"].batch_shape[0])
+                    K_local = int(site["fn"].event_shape[0])
+        
+                    # Strictly interior uniform, slightly away from the boundary
+                    eps = 5e-3
+                    p = torch.full((T_local, K_local), 1.0 / K_local,
+                                   dtype=torch.float32, device=self.model.device)
+                    p = (1.0 - K_local * eps) * p + eps
+                    p = p / p.sum(dim=-1, keepdim=True)
+        
+                    assert torch.isfinite(p).all(), "Dirichlet init produced non-finite entries"
+                    assert (p > 0).all() and (p < 1).all(), "Dirichlet init not strictly interior"
+                    return p
+        
+                if name == "alpha_logits_y":
+                    # Usually has batch_shape [C-1, T_fit, K]; zeros are a safe, centered start
+                    shape = site["fn"].batch_shape
+                    return torch.zeros(shape, dtype=torch.float32, device=self.model.device)
+        
+            # -------------------------
+            # Other distributions — unchanged
+            # -------------------------
             if name == "log2_alpha_y":
                 if distribution == 'negbinom':
                     group_codes = meta_ntc["technical_group_code"].values
@@ -675,27 +764,48 @@ class TechnicalFitter:
                     for g in group_labels:
                         group_mean = np.mean(y_obs_ntc_factored[group_codes == g], axis=0) + 1e-8
                         init_values.append(np.log2(group_mean / baseline_mean))
-                    init_arr = np.stack(init_values) if len(init_values) else np.zeros((0, T_fit), dtype=np.float32)
+                    init_arr = np.stack(init_values) if len(init_values) else np.zeros((0, T_local), dtype=np.float32)
                     return torch.tensor(init_arr, dtype=torch.float32, device=self.model.device)
                 else:
-                    return torch.zeros((C - 1, T_fit), dtype=torch.float32, device=self.model.device)
-
-            if name == "alpha_logits_y_raw":
-                # start at zero logits (i.e., no shift)
-                return torch.zeros((C - 1, T_fit, K), dtype=torch.float32, device=self.model.device)
-            if name == "alpha_logits_y":
-                return torch.zeros(C - 1, T_fit, K, dtype=torch.float32, device=self.model.device)
-            
-            return pyro.infer.autoguide.initialization.init_to_median(site)
-
-        # Guide choice: calmer for binomial & multinomial, IAF for others
-        if distribution in ('binomial', 'multinomial'):
-            guide_cellline = pyro.infer.autoguide.AutoNormal(self._model_technical, init_loc_fn=init_loc_fn)
+                    return torch.zeros((C - 1, T_local), dtype=torch.float32, device=self.model.device)
+        
+            # Default for everything else
+            return init_to_median(site)
+        
+        pyro.clear_param_store()
+        
+        # ---------------------------
+        # Guide choice
+        # ---------------------------
+        if distribution == 'multinomial':
+            # Split guide: point-mass for Dirichlet baseline, Gaussian for the rest
+            guide_cellline = AutoGuideList(self._model_technical)
+        
+            # Pin the Dirichlet site with a learnable point; init uses our interior simplex
+            guide_dirichlet = AutoDelta(
+                poutine.block(self._model_technical, expose=["probs_baseline_raw"]),
+                init_loc_fn=init_loc_fn,
+            )
+            guide_cellline.add(guide_dirichlet)
+        
+            # Everything else stays as a stable Normal guide (uses your inits for alpha_logits_y, etc.)
+            guide_rest = AutoNormal(
+                poutine.block(self._model_technical, hide=["probs_baseline_raw"]),
+                init_loc_fn=init_loc_fn,
+            )
+            guide_cellline.add(guide_rest)
+        
+        elif distribution == 'binomial':
+            # Calmer guide for binomial
+            guide_cellline = AutoNormal(self._model_technical, init_loc_fn=init_loc_fn)
+        
         else:
-            guide_cellline = pyro.infer.autoguide.AutoIAFNormal(self._model_technical, init_loc_fn=init_loc_fn)
-
+            # IAF for the rest
+            guide_cellline = AutoIAFNormal(self._model_technical, init_loc_fn=init_loc_fn)
+        
         optimizer = pyro.optim.Adam({"lr": lr})
         svi = pyro.infer.SVI(self._model_technical, guide_cellline, optimizer, loss=pyro.infer.Trace_ELBO())
+
     
         # ---------------------------
         # Optimize
@@ -739,16 +849,16 @@ class TechnicalFitter:
     
             model_inputs = {
                 "N": N, "T": T_fit, "C": C,
-                "groups_ntc_tensor": groups_ntc_tensor.cpu(),
-                "y_obs_ntc_tensor": y_obs_ntc_tensor.cpu(),
-                "sum_factor_ntc_tensor": sum_factor_ntc_tensor.cpu(),
-                "beta_o_alpha_tensor": beta_o_alpha_tensor.cpu(),
-                "beta_o_beta_tensor": beta_o_beta_tensor.cpu(),
-                "mu_x_mean_tensor": mu_x_mean_tensor.cpu(),
-                "mu_x_sd_tensor": mu_x_sd_tensor.cpu(),
-                "epsilon_tensor": epsilon_tensor.cpu(),
+                "groups_ntc_tensor": _to_cpu(groups_ntc_tensor),
+                "y_obs_ntc_tensor": _to_cpu(y_obs_ntc_tensor),
+                "sum_factor_ntc_tensor": _to_cpu(sum_factor_ntc_tensor),
+                "beta_o_alpha_tensor": _to_cpu(beta_o_alpha_tensor),
+                "beta_o_beta_tensor": _to_cpu(beta_o_beta_tensor),
+                "mu_x_mean_tensor": _to_cpu(mu_x_mean_tensor),
+                "mu_x_sd_tensor": _to_cpu(mu_x_sd_tensor),
+                "epsilon_tensor": _to_cpu(epsilon_tensor),
                 "distribution": distribution,
-                "denominator_ntc_tensor": denominator_ntc_tensor.cpu() if denominator_ntc_tensor is not None else None,
+                "denominator_ntc_tensor": _to_cpu(denominator_ntc_tensor),
                 "K": K, "D": D,
             }
         else:
@@ -785,7 +895,7 @@ class TechnicalFitter:
                     samples = predictive_technical(**model_inputs)
                     for k, v in samples.items():
                         if keep_sites(k, {"value": v}):
-                            all_samples[k].append(v.cpu())
+                            all_samples[k].append(_to_cpu(v))
                     if self.model.device.type == "cuda":
                         torch.cuda.empty_cache()
                     gc.collect()
@@ -899,7 +1009,99 @@ class TechnicalFitter:
             posterior_samples["alpha_y"]       = alpha_y_mult_full
             posterior_samples["alpha_y_mult"]  = alpha_y_mult_full
             posterior_samples["alpha_y_add"]   = alpha_y_add_full
-    
+
+        # ----------------------------------------
+        # Generic reconstruction of feature-wise posteriors: T_fit -> T_all
+        # ----------------------------------------
+
+        T_all = len(fit_mask)                  # original feature count
+        T_fit_detected = int(fit_mask.sum())   # number actually fit
+        # build once, on CPU (safe because all posterior tensors were .cpu()'d)
+        fit_idx_cpu = torch.as_tensor(np.where(fit_mask)[0], device=torch.device("cpu"))
+        
+        def _scatter_T(full_template, t, axis=-1):
+            index = [slice(None)] * full_template.dim()
+            index[axis] = fit_idx_cpu.to(full_template.device)  # <-- ensure same device
+            full_template[tuple(index)] = t
+            return full_template
+        
+        def _reconstruct_feature_axis(x, *, fill_value_nan=True):
+            """
+            Detect the feature axis (either -1 or -2 when a trailing K/D exists),
+            create a full tensor with T_all on that axis, fill with NaN or
+            zeros (for 'no-effect' defaults), and scatter the T_fit slice back.
+            Returns reconstructed tensor or the original if no T_fit axis detected.
+            """
+            if not isinstance(x, torch.Tensor):
+                return x
+
+            # figure out where T_fit lives
+            axis = None
+            if x.dim() >= 1 and x.shape[-1] == T_fit_detected:
+                axis = -1
+            elif x.dim() >= 2 and x.shape[-2] == T_fit_detected:
+                axis = -2
+
+            if axis is None:
+                return x  # not a feature-wise tensor, skip
+
+            # shape with T_all inserted
+            full_shape = list(x.shape)
+            full_shape[axis] = T_all
+
+            if fill_value_nan:
+                fill_val = torch.tensor(float('nan'), dtype=x.dtype, device=x.device)
+            else:
+                fill_val = torch.tensor(0.0, dtype=x.dtype, device=x.device)
+
+            full = torch.full(full_shape, fill_val, dtype=x.dtype, device=x.device)
+            return _scatter_T(full, x, axis=axis)
+
+        # Decide which keys are "effects" (fill with 0.0) vs "baselines/scales" (fill with NaN)
+        # You can extend/tweak these sets as your model grows.
+        effect_like_keys = {
+            # common across dists
+            "log2_alpha_y", "delta_y_add", "alpha_y_mul",  # raw effect params
+            # multinomial logits
+            "alpha_logits_y", "alpha_logits_y_centered",
+        }
+
+        baseline_like_keys = {
+            # NB / Normal / Binomial baselines & variances
+            "mu_ntc", "o_y", "sigma_y",
+            # MVN
+            "mu_ntc_mv", "sigma_y_mv",
+            # Multinomial baseline probs
+            "probs_baseline",
+        }
+
+        # α’s already reconstructed above; skip final forms to avoid double work
+        skip_keys = {
+            "alpha_y", "alpha_y_mult", "alpha_y_add"
+        }
+
+        # Reconstruct any posterior that carries T_fit
+        for k, v in list(posterior_samples.items()):
+            if k in skip_keys:
+                continue
+            if not isinstance(v, torch.Tensor):
+                continue
+
+            # Heuristic: only attempt if a T_fit-looking axis exists
+            has_Tfit_axis = (
+                (v.dim() >= 1 and v.shape[-1] == T_fit_detected) or
+                (v.dim() >= 2 and v.shape[-2] == T_fit_detected)
+            )
+            if not has_Tfit_axis:
+                continue
+
+            # Choose fill: 0.0 for effect-like, NaN for baseline-like (default)
+            fill_nan = k not in effect_like_keys
+            try:
+                posterior_samples[k] = _reconstruct_feature_axis(v, fill_value_nan=fill_nan)
+            except Exception as e:
+                print(f"[WARN] Skipped reconstruction for '{k}' due to: {e}")
+        
         # ----------------------------------------
         # Feature metadata flags
         # ----------------------------------------
@@ -1054,9 +1256,8 @@ class TechnicalFitter:
         if modality.is_exon_skipping():
             modality.mark_technical_fit_complete()
 
-        # Store losses for primary modality only
-        if modality_name == self.model.primary_modality:
-            self.model.loss_technical = losses
+        # Store losses on the modality (always)
+        modality.loss_technical = losses
 
         print(f"[INFO] Stored technical fit results in modality '{modality_name}'")
     

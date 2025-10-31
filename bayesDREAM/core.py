@@ -65,8 +65,9 @@ class _BayesDREAMCore(PlottingMixin):
         counts: pd.DataFrame,
         gene_meta: pd.DataFrame = None,
         cis_gene: str = None,
-        guide_covariates: list[str] = ["cell_line"],
+        guide_covariates: list[str] = None,
         guide_covariates_ntc: list[str] = None,
+        sum_factor_col: str = 'sum_factor',
         output_dir: str = "./model_out",
         label: str = None,
         device: str = None,
@@ -199,7 +200,7 @@ class _BayesDREAMCore(PlottingMixin):
             guide_covariates_ntc = []
 
         # Input checks
-        required_cols = {"target", "cell", "sum_factor", "guide"} | set(guide_covariates) | set(guide_covariates_ntc)
+        required_cols = {"target", "cell", sum_factor_col, "guide"} | set(guide_covariates) | set(guide_covariates_ntc)
         missing_cols = required_cols - set(self.meta.columns)
         if missing_cols:
             raise ValueError(f"Missing required columns in meta: {missing_cols}")
@@ -210,8 +211,8 @@ class _BayesDREAMCore(PlottingMixin):
         if not set(self.meta["cell"]).issubset(set(self.counts.columns)):
             raise ValueError("The 'cell' column in meta must correspond 1:1 with the column names of counts.")
 
-        if (self.meta["sum_factor"] <= 0).any():
-            raise ValueError("All values in 'sum_factor' column must be strictly greater than 0.")
+        if (self.meta[sum_factor_col] <= 0).any():
+            raise ValueError(f"All values in sum_factor_col={sum_factor_col} column must be strictly greater than 0.")
 
         # Subset meta and counts to relevant cells
         valid_cells = self.meta[self.meta["target"].isin(["ntc", self.cis_gene])]["cell"].unique()
@@ -595,7 +596,7 @@ class _BayesDREAMCore(PlottingMixin):
         
         if not covariates:
             # (1) Mean sum_factor among NTC rows, grouped by covariates (e.g. lane, cell_line)
-            mean_ntc_value = meta_out.loc[meta_out[target_col] == gene_ntc, sum_factor_col_old].mean()
+            mean_ntc_value = meta_out.loc[meta_out['target'] == 'ntc', sum_factor_col_old].mean()
     
             # (2) Mean sum_factor among *all* guides, grouped by covariates + [guide_col]
             df_guide = (
@@ -722,11 +723,22 @@ class _BayesDREAMCore(PlottingMixin):
             n_groups = 1
         
         baseline_ntc_of_group = np.zeros(n_groups)
-        for grp, grp_name in enumerate(groups):
-            mask_grp = (tech_group == grp_name)
-            # Among that group, pick rows with gene == 'ntc'
-            mask_ntc = (self.meta['target'] == 'ntc') & mask_grp
-        
+        if covariates:
+            for grp, grp_name in enumerate(groups):
+                mask_grp = (tech_group == grp_name)
+                # Among that group, pick rows with gene == 'ntc'
+                mask_ntc = (self.meta['target'] == 'ntc') & mask_grp
+            
+                # If a group has no NTC, you must decide on a fallback
+                # For example, use the overall mean or 1.0, or skip that group
+                if not np.any(mask_ntc):
+                    baseline_ntc_of_group[grp] = 1.0  # fallback
+                else:
+                    # The mean of sum_factor_data among the NTC rows
+                    baseline_ntc_of_group[grp] = np.mean(sum_factor_data[mask_ntc])
+        else:
+            grp = 0
+            mask_ntc = (self.meta['target'] == 'ntc')
             # If a group has no NTC, you must decide on a fallback
             # For example, use the overall mean or 1.0, or skip that group
             if not np.any(mask_ntc):

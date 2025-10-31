@@ -1124,6 +1124,29 @@ def plot_multinomial_xy(
 
     K = counts_3d.shape[1]
 
+    # Get category labels if available in feature_meta
+    category_labels = None
+    if hasattr(modality, 'feature_meta') and modality.feature_meta is not None:
+        if 'category_labels' in modality.feature_meta.columns:
+            category_labels = modality.feature_meta.loc[feature_idx, 'category_labels']
+            if category_labels is not None and len(category_labels) != K:
+                warnings.warn(f"category_labels length ({len(category_labels)}) doesn't match K ({K}) - ignoring labels")
+                category_labels = None
+
+    # Identify non-zero categories (skip padded zeros and empty labels)
+    # A category is non-zero if it has any counts across all cells AND has a non-empty label
+    non_zero_cats = []
+    for k in range(K):
+        has_counts = counts_3d[:, k].sum() > 0
+        has_label = True if category_labels is None else (k < len(category_labels) and category_labels[k] != "")
+        if has_counts and has_label:
+            non_zero_cats.append(k)
+
+    if len(non_zero_cats) == 0:
+        raise ValueError(f"No non-zero categories found for feature '{feature}'")
+
+    K_plot = len(non_zero_cats)  # Only plot non-zero categories
+
     # Filter by min_counts (total across categories)
     total_counts = counts_3d.sum(axis=1)
     valid_mask = total_counts >= min_counts
@@ -1173,27 +1196,33 @@ def plot_multinomial_xy(
         show_correction = 'uncorrected'
 
     # Create figure
-    # Layout: if show_correction='both', then K rows × 2 columns, else 1 row × K columns
+    # Layout: if show_correction='both', then K_plot rows × 2 columns, else 1 row × K_plot columns
     if show_correction == 'both':
         if figsize is None:
-            figsize = (12, 4 * K)  # 2 columns, K rows
-        fig, axes = plt.subplots(K, 2, figsize=figsize, squeeze=False)
+            figsize = (12, 4 * K_plot)  # 2 columns, K_plot rows
+        fig, axes = plt.subplots(K_plot, 2, figsize=figsize, squeeze=False)
     else:
         if figsize is None:
-            figsize = (4 * K, 5)  # K columns, 1 row
-        fig, axes_row = plt.subplots(1, K, figsize=figsize, squeeze=False)
-        axes = axes_row  # Shape: (1, K)
+            figsize = (4 * K_plot, 5)  # K_plot columns, 1 row
+        fig, axes_row = plt.subplots(1, K_plot, figsize=figsize, squeeze=False)
+        axes = axes_row  # Shape: (1, K_plot)
 
     # Get technical group labels
     group_labels = get_technical_group_labels(model)
     group_codes = sorted(df['technical_group_code'].unique())
 
-    # Plot each category
-    for k in range(K):
+    # Plot each non-zero category
+    for plot_idx, k in enumerate(non_zero_cats):
+        # Get label for this category
+        if category_labels is not None:
+            cat_label = category_labels[k]
+        else:
+            cat_label = f"Category {k}"
+
         if show_correction == 'both':
-            # Row k, columns 0 (uncorrected) and 1 (corrected)
+            # Row plot_idx, columns 0 (uncorrected) and 1 (corrected)
             for col_idx, corrected in enumerate([False, True]):
-                ax = axes[k, col_idx]
+                ax = axes[plot_idx, col_idx]
 
                 for group_code, group_label in zip(group_codes, group_labels):
                     df_group = df[df['technical_group_code'] == group_code].copy()
@@ -1247,17 +1276,17 @@ def plot_multinomial_xy(
                     # Plot
                     color = color_palette.get(group_label, f'C{group_code}')
                     ax.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2,
-                           label=group_label if k == 0 else None)
+                           label=group_label if plot_idx == 0 else None)
 
                 ax.set_xlabel(xlabel)
-                ax.set_ylabel(f'Proportion (Category {k})')
+                ax.set_ylabel(f'Proportion')
                 title_suffix = ' (corrected)' if corrected else ' (uncorrected)'
-                ax.set_title(f"Category {k}{title_suffix}")
-                if k == 0:
+                ax.set_title(f"{cat_label}{title_suffix}")
+                if plot_idx == 0:
                     ax.legend(frameon=False, loc='upper right')
         else:
-            # Single row, column k
-            ax = axes[0, k]
+            # Single row, column plot_idx
+            ax = axes[0, plot_idx]
             corrected = (show_correction == 'corrected')
 
             for group_code, group_label in zip(group_codes, group_labels):
@@ -1310,17 +1339,17 @@ def plot_multinomial_xy(
                 # Plot
                 color = color_palette.get(group_label, f'C{group_code}')
                 ax.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2,
-                       label=group_label if k == 0 else None)
+                       label=group_label if plot_idx == 0 else None)
 
             ax.set_xlabel(xlabel)
-            ax.set_ylabel(f'Proportion (Category {k})')
+            ax.set_ylabel(f'Proportion')
             title_suffix = ' (corrected)' if corrected else ' (uncorrected)'
-            ax.set_title(f"Category {k}{title_suffix}")
-            if k == 0:
+            ax.set_title(f"{cat_label}{title_suffix}")
+            if plot_idx == 0:
                 ax.legend(frameon=False, loc='upper right')
 
     plt.suptitle(f"{model.cis_gene} → {feature} (min_counts={min_counts})")
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0, 1, 0.97])  # Leave space for suptitle
 
     return fig
 
@@ -1774,6 +1803,26 @@ def _plot_multinomial_multifeature(
         # Get counts for this feature
         counts_3d = modality.counts[feat_idx, :, :]  # (cells, K)
 
+        # Get category labels if available for this feature
+        category_labels = None
+        if hasattr(modality, 'feature_meta') and modality.feature_meta is not None:
+            if 'category_labels' in modality.feature_meta.columns:
+                category_labels = modality.feature_meta.loc[feat_idx, 'category_labels']
+                if category_labels is not None and len(category_labels) != K:
+                    warnings.warn(f"category_labels length ({len(category_labels)}) doesn't match K ({K}) for feature {feat_name} - ignoring labels")
+                    category_labels = None
+
+        # Identify non-zero categories for this feature (skip padded zeros and empty labels)
+        non_zero_cats = []
+        for k in range(K):
+            has_counts = counts_3d[:, k].sum() > 0
+            has_label = True if category_labels is None else (k < len(category_labels) and category_labels[k] != "")
+            if has_counts and has_label:
+                non_zero_cats.append(k)
+
+        if len(non_zero_cats) == 0:
+            continue  # Skip features with no non-zero categories
+
         # Filter by min_counts
         total_counts = counts_3d.sum(axis=1)
         valid_mask = total_counts >= min_counts
@@ -1805,8 +1854,14 @@ def _plot_multinomial_multifeature(
         if len(df) == 0:
             continue
 
-        # Plot each category
-        for k in range(K):
+        # Plot each non-zero category
+        for cat_plot_idx, k in enumerate(non_zero_cats):
+            # Get label for this category
+            if category_labels is not None:
+                cat_label = category_labels[k]
+            else:
+                cat_label = f"Cat{k}"
+
             if show_correction == 'both':
                 # Row: feat_i * max_K + k, Columns: 0 (uncorrected), 1 (corrected)
                 row = feat_i * max_K + k
@@ -1858,13 +1913,13 @@ def _plot_multinomial_multifeature(
                         # Plot
                         color = color_palette.get(group_label, f'C{group_code}')
                         ax.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2,
-                               label=group_label if k == 0 and feat_i == 0 else None)
+                               label=group_label if cat_plot_idx == 0 and feat_i == 0 else None)
 
                     ax.set_xlabel(xlabel)
                     ax.set_ylabel(f'Proportion')
                     title_suffix = ' (corrected)' if corrected else ' (uncorrected)'
-                    ax.set_title(f"{feat_name[:20]}... Cat{k}{title_suffix}", fontsize=9)
-                    if k == 0 and feat_i == 0:
+                    ax.set_title(f"{feat_name[:20]}... {cat_label}{title_suffix}", fontsize=9)
+                    if cat_plot_idx == 0 and feat_i == 0:
                         ax.legend(frameon=False, loc='upper right', fontsize=8)
             else:
                 # Row: feat_i, Column: k
@@ -1916,13 +1971,13 @@ def _plot_multinomial_multifeature(
                     # Plot
                     color = color_palette.get(group_label, f'C{group_code}')
                     ax.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2,
-                           label=group_label if k == 0 and feat_i == 0 else None)
+                           label=group_label if cat_plot_idx == 0 and feat_i == 0 else None)
 
                 ax.set_xlabel(xlabel)
                 ax.set_ylabel(f'Proportion')
                 title_suffix = ' (corrected)' if corrected else ' (uncorrected)'
-                ax.set_title(f"{feat_name[:20]}... Cat{k}{title_suffix}", fontsize=9)
-                if k == 0 and feat_i == 0:
+                ax.set_title(f"{feat_name[:20]}... {cat_label}{title_suffix}", fontsize=9)
+                if cat_plot_idx == 0 and feat_i == 0:
                     ax.legend(frameon=False, loc='upper right', fontsize=8)
 
         # Hide unused subplots (if K < max_K for this feature)
@@ -1931,7 +1986,7 @@ def _plot_multinomial_multifeature(
                 axes[feat_i, k].axis('off')
 
     plt.suptitle(f"{model.cis_gene} → {gene_name} (gene, n={n_features} features, min_counts={min_counts})")
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0, 1, 0.97])  # Leave space for suptitle
 
     return fig
 

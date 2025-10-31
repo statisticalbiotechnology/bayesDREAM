@@ -41,6 +41,7 @@ class Modality:
         counts: Union[np.ndarray, pd.DataFrame],
         feature_meta: pd.DataFrame,
         distribution: Literal['negbinom', 'multinomial', 'binomial', 'normal', 'mvnormal'],
+        feature_names: Optional[list] = None,
         denominator: Optional[np.ndarray] = None,
         cells_axis: int = 1,  # 0 if cells are rows, 1 if cells are columns
         cell_names: Optional[list] = None,  # Explicit cell names (when counts is ndarray)
@@ -99,7 +100,7 @@ class Modality:
         else:
             self.counts = np.asarray(counts)
             self.count_df = None
-            self.feature_names = None
+            self.feature_names = feature_names if feature_names is not None else None
             # Use provided cell_names if available, otherwise None
             self.cell_names = cell_names if cell_names is not None else None
 
@@ -149,7 +150,13 @@ class Modality:
             if self.counts.ndim != 3:
                 raise ValueError(f"mvnormal modality requires 3D counts (features, cells, dimensions), got shape {self.counts.shape}")
             n_features = self.counts.shape[0]
-
+        
+        if self.feature_names is not None:
+            if len(self.feature_names) != n_features:
+                raise ValueError(
+                    f"feature_names has length {len(self.feature_names)} but counts has {n_features} features"
+                )
+        
         # Validate feature_meta matches
         if len(self.feature_meta) != n_features:
             raise ValueError(f"feature_meta has {len(self.feature_meta)} rows but counts has {n_features} features")
@@ -241,7 +248,10 @@ class Modality:
 
         # Subset metadata
         new_feature_meta = self.feature_meta.iloc[feature_indices].copy()
-
+        # NEW: subset feature_names if present
+        new_feature_names = None
+        if self.feature_names is not None:
+            new_feature_names = [self.feature_names[i] for i in feature_indices]
         return Modality(
             name=self.name,
             counts=new_counts,
@@ -249,6 +259,7 @@ class Modality:
             distribution=self.distribution,
             denominator=new_denom,
             cells_axis=self.cells_axis,
+            feature_names=new_feature_names,   # <---
             inc1=new_inc1,
             inc2=new_inc2,
             skip=new_skip,

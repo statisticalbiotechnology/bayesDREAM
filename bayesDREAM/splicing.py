@@ -37,6 +37,12 @@ def _normalize_strand(strand_values):
     else:
         return norm_single(strand_values)
 
+def _most_common(series):
+    """Return most common non-null value or None."""
+    s = pd.Series(series).dropna()
+    if s.empty:
+        return None
+    return s.value_counts().idxmax()
 
 def _build_sj_index(sj_counts: pd.DataFrame,
                     sj_meta: pd.DataFrame) -> pd.DataFrame:
@@ -70,21 +76,31 @@ def _build_sj_index(sj_counts: pd.DataFrame,
     if has_optional:
         print(f"[INFO] Found gene_id columns - will support both gene names and Ensembl IDs")
 
-    # Copy and prepare
     idx = sj_meta.copy()
     idx['strand'] = _normalize_strand(idx['strand'].values)
     idx['start'] = idx['intron_start'].astype(int)
     idx['end'] = idx['intron_end'].astype(int)
 
-    # Define donor (5'SS) and acceptor (3'SS) based on strand
-    idx['donor'] = np.where(idx['strand'] == '+', idx['start'], idx['end'])
-    idx['acceptor'] = np.where(idx['strand'] == '+', idx['end'], idx['start'])
+    # donor/acceptor genomic positions by strand
+    idx['donor']    = np.where(idx['strand'] == '+', idx['start'], idx['end'])
+    idx['acceptor'] = np.where(idx['strand'] == '+', idx['end'],   idx['start'])
 
-    # Genomic coordinates (for exon skipping)
+    # ---- NEW: per-site gene assignment by strand ----
+    # donor gene is start-gene on '+' and end-gene on '-'
+    idx['donor_gene_name'] = np.where(idx['strand'] == '+', idx['gene_name_start'], idx['gene_name_end'])
+    idx['acceptor_gene_name'] = np.where(idx['strand'] == '+', idx['gene_name_end'], idx['gene_name_start'])
+
+    if has_optional:
+        idx['donor_gene_id'] = np.where(idx['strand'] == '+', idx['gene_id_start'], idx['gene_id_end'])
+        idx['acceptor_gene_id'] = np.where(idx['strand'] == '+', idx['gene_id_end'], idx['gene_id_start'])
+    else:
+        idx['donor_gene_id'] = np.nan
+        idx['acceptor_gene_id'] = np.nan
+    # -----------------------------------------------
+
     idx['left'] = np.minimum(idx['start'], idx['end'])
     idx['right'] = np.maximum(idx['start'], idx['end'])
 
-    # Keep only junctions present in counts matrix
     present = sj_counts.index.tolist()
     idx = idx[idx['coord.intron'].isin(present)].copy()
 
@@ -170,26 +186,10 @@ def process_donor_usage(sj_counts: pd.DataFrame,
 
         all_counts.append(donor_counts)
 
-        # Collect all genes associated with this donor site
-        genes_list = []
-        if has_gene_id:
-            # Collect from all gene identifier columns
-            for col in ['gene_name_start', 'gene_name_end', 'gene_id_start', 'gene_id_end']:
-                if col in group.columns:
-                    genes_list.extend(group[col].dropna().unique().tolist())
-        else:
-            # Only gene names available
-            genes_list.extend(group['gene_name_start'].dropna().unique().tolist())
-            genes_list.extend(group['gene_name_end'].dropna().unique().tolist())
-
-        # Remove duplicates and sort
-        genes_unique = sorted(set(genes_list))
-
-        # Primary gene: most common gene (by junction count), or first alphabetically if tie
-        if genes_unique:
-            primary_gene = genes_unique[0]  # Default to first
-        else:
-            primary_gene = None
+        # ---- REPLACE gene collection with site-centric assignment ----
+        gene_name = _most_common(group['donor_gene_name'])
+        gene_id   = _most_common(group['donor_gene_id'])
+        # --------------------------------------------------------------
 
         feature_rows.append({
             'chrom': chrom,
@@ -197,8 +197,8 @@ def process_donor_usage(sj_counts: pd.DataFrame,
             'donor': donor,
             'acceptors': acceptors,
             'n_acceptors': n_acceptors,
-            'gene': primary_gene,
-            'genes': genes_unique
+            'gene_name': gene_name,
+            'gene_id': gene_id
         })
 
     # Filter donors with only one acceptor OR with zero variance in ALL ratios
@@ -243,7 +243,7 @@ def process_donor_usage(sj_counts: pd.DataFrame,
         warnings.warn("No donors with multiple acceptors found after filtering!")
         # Return empty arrays
         return (np.zeros((0, n_cells, 0), dtype=float),
-                pd.DataFrame(columns=['chrom', 'strand', 'donor', 'acceptors', 'n_acceptors', 'gene', 'genes']),
+                pd.DataFrame(columns=['chrom', 'strand', 'donor', 'acceptors', 'n_acceptors', 'gene_name', 'gene_id']),
                 cell_names)
 
     # Stack into 3D array: (n_donors, n_cells, max_acceptors)
@@ -256,6 +256,17 @@ def process_donor_usage(sj_counts: pd.DataFrame,
         counts_3d[i, :, :n_acc] = donor_counts
 
     feature_meta = pd.DataFrame(filtered_rows)
+
+    # Add category labels showing acceptor coordinates for each donor
+    # Pad to max_acceptors to match the counts_3d dimensions
+    def make_labels(acceptors):
+        labels = [f"A:{a}" for a in acceptors]
+        # Pad with empty strings to match max_acceptors
+        while len(labels) < max_acceptors:
+            labels.append("")
+        return labels
+
+    feature_meta['category_labels'] = feature_meta['acceptors'].apply(make_labels)
 
     return counts_3d, feature_meta, cell_names
 
@@ -336,26 +347,10 @@ def process_acceptor_usage(sj_counts: pd.DataFrame,
 
         all_counts.append(acceptor_counts)
 
-        # Collect all genes associated with this acceptor site
-        genes_list = []
-        if has_gene_id:
-            # Collect from all gene identifier columns
-            for col in ['gene_name_start', 'gene_name_end', 'gene_id_start', 'gene_id_end']:
-                if col in group.columns:
-                    genes_list.extend(group[col].dropna().unique().tolist())
-        else:
-            # Only gene names available
-            genes_list.extend(group['gene_name_start'].dropna().unique().tolist())
-            genes_list.extend(group['gene_name_end'].dropna().unique().tolist())
-
-        # Remove duplicates and sort
-        genes_unique = sorted(set(genes_list))
-
-        # Primary gene: most common gene (by junction count), or first alphabetically if tie
-        if genes_unique:
-            primary_gene = genes_unique[0]  # Default to first
-        else:
-            primary_gene = None
+        # ---- REPLACE gene collection with site-centric assignment ----
+        gene_name = _most_common(group['acceptor_gene_name'])
+        gene_id   = _most_common(group['acceptor_gene_id'])
+        # --------------------------------------------------------------
 
         feature_rows.append({
             'chrom': chrom,
@@ -363,8 +358,8 @@ def process_acceptor_usage(sj_counts: pd.DataFrame,
             'acceptor': acceptor,
             'donors': donors,
             'n_donors': n_donors,
-            'gene': primary_gene,
-            'genes': genes_unique
+            'gene_name': gene_name,
+            'gene_id': gene_id
         })
 
     # Filter acceptors with only one donor OR with zero variance in ALL ratios
@@ -409,7 +404,7 @@ def process_acceptor_usage(sj_counts: pd.DataFrame,
         warnings.warn("No acceptors with multiple donors found after filtering!")
         # Return empty arrays
         return (np.zeros((0, n_cells, 0), dtype=float),
-                pd.DataFrame(columns=['chrom', 'strand', 'acceptor', 'donors', 'n_donors', 'gene', 'genes']),
+                pd.DataFrame(columns=['chrom', 'strand', 'acceptor', 'donors', 'n_donors', 'gene_name', 'gene_id']),
                 cell_names)
 
     # Stack into 3D array: (n_acceptors, n_cells, max_donors)
@@ -422,6 +417,17 @@ def process_acceptor_usage(sj_counts: pd.DataFrame,
         counts_3d[i, :, :n_don] = acceptor_counts
 
     feature_meta = pd.DataFrame(filtered_rows)
+
+    # Add category labels showing donor coordinates for each acceptor
+    # Pad to max_donors to match the counts_3d dimensions
+    def make_labels(donors):
+        labels = [f"D:{d}" for d in donors]
+        # Pad with empty strings to match max_donors
+        while len(labels) < max_donors:
+            labels.append("")
+        return labels
+
+    feature_meta['category_labels'] = feature_meta['donors'].apply(make_labels)
 
     return counts_3d, feature_meta, cell_names
 
@@ -440,71 +446,63 @@ def _find_cassette_triplets_strand(sj_counts: pd.DataFrame,
     - Plus strand: d1 < a2 < d2 < a3
     - Minus strand: d1 > a2 > d2 > a3
 
-    Returns
-    -------
-    pd.DataFrame
-        Columns: trip_id, chrom, strand, d1, a2, d2, a3, sj_inc1, sj_inc2, sj_skip,
-                 gene (primary gene), genes (list of all genes)
+    Returns a DataFrame with per-site gene annotations:
+      gene_name_d1/gene_id_d1, gene_name_d2/gene_id_d2,
+      gene_name_a1/gene_id_a1, gene_name_a2/gene_id_a2,
+    and if all four agree, unified gene_name/gene_id; otherwise NA.
     """
+    # Build SJ index with donor/acceptor + site-centric genes
     idx = _build_sj_index(sj_counts, sj_meta)
-
-    # Check for gene_id columns
-    has_gene_id = 'gene_id_start' in idx.columns and 'gene_id_end' in idx.columns
 
     # Keep only clean junctions
     idx = idx[idx['strand'].notna() & idx['donor'].notna() & idx['acceptor'].notna()].copy()
     idx = idx.drop_duplicates(subset=['chrom', 'strand', 'donor', 'acceptor', 'coord.intron'])
 
+    cols_empty = [
+        'trip_id','chrom','strand','d1','a2','d2','a3',
+        'sj_inc1','sj_inc2','sj_skip',
+        'gene_name_d1','gene_id_d1','gene_name_d2','gene_id_d2',
+        'gene_name_a1','gene_id_a1','gene_name_a2','gene_id_a2',
+        'gene_name','gene_id'
+    ]
     if len(idx) == 0:
-        return pd.DataFrame(columns=['trip_id', 'chrom', 'strand', 'd1', 'a2', 'd2', 'a3',
-                                    'sj_inc1', 'sj_inc2', 'sj_skip'])
+        return pd.DataFrame(columns=cols_empty)
 
-    # Build efficient lookup structures
-    idx_by_donor = idx.groupby(['chrom', 'strand', 'donor'])
-    idx_by_acceptor = idx.groupby(['chrom', 'strand', 'acceptor'])
+    # Fast lookups
+    idx_by_donor   = idx.groupby(['chrom', 'strand', 'donor'])
+    idx_by_acceptor= idx.groupby(['chrom', 'strand', 'acceptor'])
     idx_by_pair = idx.set_index(['chrom', 'strand', 'donor', 'acceptor'])['coord.intron'].to_dict()
 
-    # Create junction ID -> gene mapping for gene collection
-    junction_to_genes = {}
-    for _, row in idx.iterrows():
-        coord = row['coord.intron']
-        genes = []
-        if has_gene_id:
-            for col in ['gene_name_start', 'gene_name_end', 'gene_id_start', 'gene_id_end']:
-                if col in row.index and pd.notna(row[col]):
-                    genes.append(row[col])
-        else:
-            if pd.notna(row.get('gene_name_start')):
-                genes.append(row['gene_name_start'])
-            if pd.notna(row.get('gene_name_end')):
-                genes.append(row['gene_name_end'])
-        junction_to_genes[coord] = list(set(genes))  # Remove duplicates
+    # Site -> (most common) site-centric gene
+    donor_name_map = idx.groupby(['chrom','strand','donor'])['donor_gene_name'].apply(_most_common).to_dict()
+    donor_id_map   = idx.groupby(['chrom','strand','donor'])['donor_gene_id'].apply(_most_common).to_dict()
+    acc_name_map   = idx.groupby(['chrom','strand','acceptor'])['acceptor_gene_name'].apply(_most_common).to_dict()
+    acc_id_map     = idx.groupby(['chrom','strand','acceptor'])['acceptor_gene_id'].apply(_most_common).to_dict()
 
     triplets = []
 
-    # For each potential skip junction
+    # For each potential skip junction (d1 -> a3)
     for _, row in idx.iterrows():
-        chrom = row['chrom']
+        chrom  = row['chrom']
         strand = row['strand']
-        d1 = row['donor']
-        a3 = row['acceptor']
-        sj_skip = row['coord.intron']
+        d1     = row['donor']
+        a3     = row['acceptor']
+        sj_skip= row['coord.intron']
 
-        # Find all acceptors from d1
+        # All acceptors from d1
         try:
             group_d1 = idx_by_donor.get_group((chrom, strand, d1))
             a2_candidates = group_d1['acceptor'].unique()
         except KeyError:
             continue
 
-        # Find all donors to a3
+        # All donors to a3
         try:
             group_a3 = idx_by_acceptor.get_group((chrom, strand, a3))
             d2_candidates = group_a3['donor'].unique()
         except KeyError:
             continue
 
-        # Check all combinations
         for a2 in a2_candidates:
             if pd.isna(a2):
                 continue
@@ -512,31 +510,41 @@ def _find_cassette_triplets_strand(sj_counts: pd.DataFrame,
                 if pd.isna(d2):
                     continue
 
-                # Verify strand-specific ordering
+                # Check strand-specific exon order
                 if strand == '+':
                     if not (d1 < a2 < d2 < a3):
                         continue
-                else:  # strand == '-'
+                else:  # '-'
                     if not (d1 > a2 > d2 > a3):
                         continue
 
-                # Check if inclusion junctions exist
-                sj_inc1 = idx_by_pair.get((chrom, strand, d1, a2))
-                sj_inc2 = idx_by_pair.get((chrom, strand, d2, a3))
-
+                # Inclusion junctions must exist
+                sj_inc1 = idx_by_pair.get((chrom, strand, d1, a2))  # d1->a2
+                sj_inc2 = idx_by_pair.get((chrom, strand, d2, a3))  # d2->a3
                 if sj_inc1 is None or sj_inc2 is None:
                     continue
 
-                # Collect genes from all three junctions
-                genes_list = []
-                for sj_id in [sj_inc1, sj_inc2, sj_skip]:
-                    genes_list.extend(junction_to_genes.get(sj_id, []))
+                # Per-site genes
+                gene_name_d1 = donor_name_map.get((chrom, strand, d1))
+                gene_id_d1   = donor_id_map.get((chrom, strand, d1))
+                gene_name_d2 = donor_name_map.get((chrom, strand, d2))
+                gene_id_d2   = donor_id_map.get((chrom, strand, d2))
 
-                # Remove duplicates and sort
-                genes_unique = sorted(set(genes_list))
+                gene_name_a1 = acc_name_map.get((chrom, strand, a2))
+                gene_id_a1   = acc_id_map.get((chrom, strand, a2))
+                gene_name_a2 = acc_name_map.get((chrom, strand, a3))
+                gene_id_a2   = acc_id_map.get((chrom, strand, a3))
 
-                # Primary gene: first alphabetically (could be improved with better heuristics)
-                primary_gene = genes_unique[0] if genes_unique else None
+                # Unified gene if all 4 sites agree (both name and id)
+                names = [gene_name_d1, gene_name_d2, gene_name_a1, gene_name_a2]
+                ids   = [gene_id_d1,   gene_id_d2,   gene_id_a1,   gene_id_a2]
+                if all(x is not None for x in names) and len(set(names)) == 1 and \
+                   all(x is not None for x in ids)   and len(set(ids))   == 1:
+                    gene_name_u = names[0]
+                    gene_id_u   = ids[0]
+                else:
+                    gene_name_u = None
+                    gene_id_u   = None
 
                 triplets.append({
                     'chrom': chrom,
@@ -548,85 +556,88 @@ def _find_cassette_triplets_strand(sj_counts: pd.DataFrame,
                     'sj_inc1': sj_inc1,
                     'sj_inc2': sj_inc2,
                     'sj_skip': sj_skip,
-                    'gene': primary_gene,
-                    'genes': genes_unique
+                    'gene_name_d1': gene_name_d1,
+                    'gene_id_d1':   gene_id_d1,
+                    'gene_name_d2': gene_name_d2,
+                    'gene_id_d2':   gene_id_d2,
+                    'gene_name_a1': gene_name_a1,
+                    'gene_id_a1':   gene_id_a1,
+                    'gene_name_a2': gene_name_a2,
+                    'gene_id_a2':   gene_id_a2,
+                    'gene_name':    gene_name_u,
+                    'gene_id':      gene_id_u,
                 })
 
     if not triplets:
-        return pd.DataFrame(columns=['trip_id', 'chrom', 'strand', 'd1', 'a2', 'd2', 'a3',
-                                    'sj_inc1', 'sj_inc2', 'sj_skip', 'gene', 'genes'])
+        return pd.DataFrame(columns=cols_empty)
 
     trips_df = pd.DataFrame(triplets)
-    trips_df = trips_df.drop_duplicates()
+
+    # Deduplicate using event-defining columns only
+    dedup_cols = ['chrom','strand','d1','a2','d2','a3','sj_inc1','sj_inc2','sj_skip']
+    trips_df = trips_df.drop_duplicates(subset=dedup_cols, ignore_index=True)
     trips_df['trip_id'] = range(len(trips_df))
 
+    # Ensure column order
+    trips_df = trips_df[cols_empty]
     return trips_df
 
 
 def _find_cassette_triplets_genomic(sj_counts: pd.DataFrame,
                                     sj_meta: pd.DataFrame) -> pd.DataFrame:
     """
-    Find cassette exon triplets using genomic coordinates (fallback when strand info is poor).
+    Find cassette exon triplets using genomic coordinates (fallback when strand is unreliable).
 
     Uses left/right genomic positions instead of strand-aware donor/acceptor.
     Pattern: L1 < R2 < L2 < R3
 
-    Returns
-    -------
-    pd.DataFrame
-        Columns: trip_id, chrom, strand, d1, a2, d2, a3, sj_inc1, sj_inc2, sj_skip,
-                 gene (primary gene), genes (list of all genes)
+    Returns a DataFrame with per-site gene annotations where possible (requires strand);
+    if strand is missing for a row, per-site genes are left as NA for that event.
     """
     idx = _build_sj_index(sj_counts, sj_meta)
 
-    # Check for gene_id columns
-    has_gene_id = 'gene_id_start' in idx.columns and 'gene_id_end' in idx.columns
-
-    # Keep only clean junctions
+    # Keep only junctions with computed left/right
     idx = idx[idx['left'].notna() & idx['right'].notna()].copy()
 
+    cols_empty = [
+        'trip_id','chrom','strand','d1','a2','d2','a3',
+        'sj_inc1','sj_inc2','sj_skip',
+        'gene_name_d1','gene_id_d1','gene_name_d2','gene_id_d2',
+        'gene_name_a1','gene_id_a1','gene_name_a2','gene_id_a2',
+        'gene_name','gene_id'
+    ]
     if len(idx) == 0:
-        return pd.DataFrame(columns=['trip_id', 'chrom', 'strand', 'd1', 'a2', 'd2', 'a3',
-                                    'sj_inc1', 'sj_inc2', 'sj_skip'])
+        return pd.DataFrame(columns=cols_empty)
 
-    # Build lookup structures
-    idx_by_left = idx.groupby(['chrom', 'left'])
+    # Lookups by coordinates
+    idx_by_left  = idx.groupby(['chrom', 'left'])
     idx_by_right = idx.groupby(['chrom', 'right'])
     idx_by_coords = idx.set_index(['chrom', 'left', 'right'])['coord.intron'].to_dict()
 
-    # Create junction ID -> gene mapping for gene collection
-    junction_to_genes = {}
-    for _, row in idx.iterrows():
-        coord = row['coord.intron']
-        genes = []
-        if has_gene_id:
-            for col in ['gene_name_start', 'gene_name_end', 'gene_id_start', 'gene_id_end']:
-                if col in row.index and pd.notna(row[col]):
-                    genes.append(row[col])
-        else:
-            if pd.notna(row.get('gene_name_start')):
-                genes.append(row['gene_name_start'])
-            if pd.notna(row.get('gene_name_end')):
-                genes.append(row['gene_name_end'])
-        junction_to_genes[coord] = list(set(genes))  # Remove duplicates
+    # Site -> (most common) site-centric gene (requires strand)
+    donor_name_map = idx.groupby(['chrom','strand','donor'])['donor_gene_name'].apply(_most_common).to_dict()
+    donor_id_map   = idx.groupby(['chrom','strand','donor'])['donor_gene_id'].apply(_most_common).to_dict()
+    acc_name_map   = idx.groupby(['chrom','strand','acceptor'])['acceptor_gene_name'].apply(_most_common).to_dict()
+    acc_id_map     = idx.groupby(['chrom','strand','acceptor'])['acceptor_gene_id'].apply(_most_common).to_dict()
 
     triplets = []
 
     for _, row in idx.iterrows():
         chrom = row['chrom']
-        L1 = row['left']
-        R3 = row['right']
+        L1    = row['left']
+        R3    = row['right']
         sj_skip = row['coord.intron']
         strand = row.get('strand', None)
+        strand_val = strand if pd.notna(strand) else None
 
-        # Find junctions with left=L1 and right between L1 and R3
+        # Candidates with left=L1 and right between L1 and R3  -> (L1, R2)
         try:
             group_L1 = idx_by_left.get_group((chrom, L1))
             R2_candidates = group_L1[(group_L1['right'] > L1) & (group_L1['right'] < R3)]['right'].unique()
         except KeyError:
             continue
 
-        # Find junctions with right=R3 and left between L1 and R3
+        # Candidates with right=R3 and left between L1 and R3  -> (L2, R3)
         try:
             group_R3 = idx_by_right.get_group((chrom, R3))
             L2_candidates = group_R3[(group_R3['left'] > L1) & (group_R3['left'] < R3)]['left'].unique()
@@ -643,39 +654,74 @@ def _find_cassette_triplets_genomic(sj_counts: pd.DataFrame,
                 if sj_inc2 is None:
                     continue
 
-                # Collect genes from all three junctions
-                genes_list = []
-                for sj_id in [sj_inc1, sj_inc2, sj_skip]:
-                    genes_list.extend(junction_to_genes.get(sj_id, []))
+                # Map genomic to site notation:
+                d1 = L1
+                a2 = R2
+                d2 = L2
+                a3 = R3
 
-                # Remove duplicates and sort
-                genes_unique = sorted(set(genes_list))
+                # Per-site genes (only if strand known)
+                if strand_val is not None:
+                    gene_name_d1 = donor_name_map.get((chrom, strand_val, d1))
+                    gene_id_d1   = donor_id_map.get((chrom, strand_val, d1))
+                    gene_name_d2 = donor_name_map.get((chrom, strand_val, d2))
+                    gene_id_d2   = donor_id_map.get((chrom, strand_val, d2))
 
-                # Primary gene: first alphabetically (could be improved with better heuristics)
-                primary_gene = genes_unique[0] if genes_unique else None
+                    gene_name_a1 = acc_name_map.get((chrom, strand_val, a2))
+                    gene_id_a1   = acc_id_map.get((chrom, strand_val, a2))
+                    gene_name_a2 = acc_name_map.get((chrom, strand_val, a3))
+                    gene_id_a2   = acc_id_map.get((chrom, strand_val, a3))
+                else:
+                    gene_name_d1 = gene_id_d1 = None
+                    gene_name_d2 = gene_id_d2 = None
+                    gene_name_a1 = gene_id_a1 = None
+                    gene_name_a2 = gene_id_a2 = None
+
+                # Unified gene if all 4 sites agree
+                names = [gene_name_d1, gene_name_d2, gene_name_a1, gene_name_a2]
+                ids   = [gene_id_d1,   gene_id_d2,   gene_id_a1,   gene_id_a2]
+                if all(x is not None for x in names) and len(set(names)) == 1 and \
+                   all(x is not None for x in ids)   and len(set(ids))   == 1:
+                    gene_name_u = names[0]
+                    gene_id_u   = ids[0]
+                else:
+                    gene_name_u = None
+                    gene_id_u   = None
 
                 triplets.append({
                     'chrom': chrom,
-                    'strand': strand if pd.notna(strand) else None,
-                    'd1': L1,
-                    'a2': R2,
-                    'd2': L2,
-                    'a3': R3,
+                    'strand': strand_val,
+                    'd1': d1,
+                    'a2': a2,
+                    'd2': d2,
+                    'a3': a3,
                     'sj_inc1': sj_inc1,
                     'sj_inc2': sj_inc2,
                     'sj_skip': sj_skip,
-                    'gene': primary_gene,
-                    'genes': genes_unique
+                    'gene_name_d1': gene_name_d1,
+                    'gene_id_d1':   gene_id_d1,
+                    'gene_name_d2': gene_name_d2,
+                    'gene_id_d2':   gene_id_d2,
+                    'gene_name_a1': gene_name_a1,
+                    'gene_id_a1':   gene_id_a1,
+                    'gene_name_a2': gene_name_a2,
+                    'gene_id_a2':   gene_id_a2,
+                    'gene_name':    gene_name_u,
+                    'gene_id':      gene_id_u,
                 })
 
     if not triplets:
-        return pd.DataFrame(columns=['trip_id', 'chrom', 'strand', 'd1', 'a2', 'd2', 'a3',
-                                    'sj_inc1', 'sj_inc2', 'sj_skip', 'gene', 'genes'])
+        return pd.DataFrame(columns=cols_empty)
 
     trips_df = pd.DataFrame(triplets)
-    trips_df = trips_df.drop_duplicates()
+
+    # Deduplicate using event-defining columns only
+    dedup_cols = ['chrom','strand','d1','a2','d2','a3','sj_inc1','sj_inc2','sj_skip']
+    trips_df = trips_df.drop_duplicates(subset=dedup_cols, ignore_index=True)
     trips_df['trip_id'] = range(len(trips_df))
 
+    # Ensure column order
+    trips_df = trips_df[cols_empty]
     return trips_df
 
 
@@ -1122,6 +1168,21 @@ def create_splicing_modality(sj_counts: pd.DataFrame,
     Modality
         Modality object with appropriate distribution and metadata
     """
+    def _donor_feature_names(df: pd.DataFrame) -> list[str]:
+        # D:<chrom>:<strand>:<donor>
+        return [f"D:{c}:{s}:{d}" for c, s, d in zip(df['chrom'], df['strand'], df['donor'])]
+    
+    def _acceptor_feature_names(df: pd.DataFrame) -> list[str]:
+        # A:<chrom>:<strand>:<acceptor>
+        return [f"A:{c}:{s}:{a}" for c, s, a in zip(df['chrom'], df['strand'], df['acceptor'])]
+    
+    def _exon_skip_feature_names(df: pd.DataFrame) -> list[str]:
+        # X:<chrom>:<strand>:<d1>-<a2>|<d2>-<a3>  (stable & human-readable)
+        # fall back safely if strand is NA
+        s_list = df['strand'].astype(object).where(df['strand'].notna(), '?')
+        return [f"X:{c}:{s}:{d1}-{a2}|{d2}-{a3}"
+                for c, s, d1, a2, d2, a3 in zip(df['chrom'], s_list, df['d1'], df['a2'], df['d2'], df['a3'])]
+    
     if splicing_type == 'sj':
         # Raw SJ counts as binomial with gene counts as denominator
         sj_filtered, gene_denom, sj_meta_filtered = process_sj_counts(
@@ -1141,6 +1202,7 @@ def create_splicing_modality(sj_counts: pd.DataFrame,
         counts_3d, feature_meta, cell_names = process_donor_usage(
             sj_counts, sj_meta, min_cell_total
         )
+        feature_names = _donor_feature_names(feature_meta)
         # Convert to DataFrame to preserve cell names
         # For multinomial, we can't use DataFrame directly, so we'll store metadata separately
         return Modality(
@@ -1149,20 +1211,24 @@ def create_splicing_modality(sj_counts: pd.DataFrame,
             feature_meta=feature_meta,
             distribution='multinomial',
             cells_axis=1,
-            cell_names=cell_names
+            cell_names=cell_names,
+            feature_names=feature_names,  # <-- pass names
         )
 
     elif splicing_type == 'acceptor':
         counts_3d, feature_meta, cell_names = process_acceptor_usage(
             sj_counts, sj_meta, min_cell_total
         )
+        feature_names = _acceptor_feature_names(feature_meta)
+        
         return Modality(
             name='splicing_acceptor',
             counts=counts_3d,
             feature_meta=feature_meta,
             distribution='multinomial',
             cells_axis=1,
-            cell_names=cell_names
+            cell_names=cell_names,
+            feature_names=feature_names,  # <-- pass names
         )
 
     elif splicing_type == 'exon_skip':
@@ -1180,6 +1246,8 @@ def create_splicing_modality(sj_counts: pd.DataFrame,
         else:
             inc1_counts, inc2_counts, skip_counts, feature_meta, cell_names = result
             inc1_unfilt, inc2_unfilt, skip_unfilt, meta_unfilt = None, None, None, None
+        
+        feature_names = _exon_skip_feature_names(feature_meta)
 
         # Compute inclusion and total using specified method
         if method == 'min':
@@ -1197,6 +1265,7 @@ def create_splicing_modality(sj_counts: pd.DataFrame,
             denominator=tot_counts,
             cells_axis=1,
             cell_names=cell_names,
+            feature_names=feature_names,  # <-- pass names
             inc1=inc1_counts,
             inc2=inc2_counts,
             skip=skip_counts,
