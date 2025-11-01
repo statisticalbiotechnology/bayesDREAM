@@ -1915,6 +1915,21 @@ def _plot_multinomial_multifeature(
                     warnings.warn(f"category_labels length ({len(category_labels)}) doesn't match K ({K}) for feature {feat_name} - ignoring labels")
                     category_labels = None
 
+        # IMPORTANT: Recompute non-zero categories after subsetting to avoid data leakage
+        # The pre-computed non_zero_cats may be wrong if subset_mask was applied
+        non_zero_cats_recomputed = []
+        for k in range(K):
+            has_counts = counts_3d[:, k].sum() > 0
+            has_label = True if category_labels is None else (k < len(category_labels) and category_labels[k] != "")
+            if has_counts and has_label:
+                non_zero_cats_recomputed.append(k)
+
+        # Use recomputed non-zero cats for this feature
+        non_zero_cats = non_zero_cats_recomputed
+
+        if len(non_zero_cats) == 0:
+            continue  # Skip if no non-zero categories after subsetting
+
         # Filter by min_counts
         total_counts = counts_3d.sum(axis=1)
         valid_mask = total_counts >= min_counts
