@@ -1903,6 +1903,16 @@ def _plot_multinomial_multifeature(
         non_zero_cats = non_zero_cats_per_feature[feat_i]
 
         if len(non_zero_cats) == 0:
+            # Hide axes for this feature (all its rows/columns)
+            if show_correction == 'both':
+                # Hide all rows for this feature: feat_i * max_non_zero to (feat_i + 1) * max_non_zero
+                for row_idx in range(feat_i * max_non_zero, (feat_i + 1) * max_non_zero):
+                    for col_idx in range(2):
+                        axes[row_idx, col_idx].axis('off')
+            else:
+                # Hide all columns for this feature row
+                for col_idx in range(max_non_zero):
+                    axes[feat_i, col_idx].axis('off')
             continue  # Skip features with no non-zero categories
 
         # Get counts for this feature
@@ -1963,6 +1973,14 @@ def _plot_multinomial_multifeature(
         props_raw = props_raw[valid, :]
 
         if len(df) == 0:
+            # Hide axes for this feature (no data after filtering)
+            if show_correction == 'both':
+                for row_idx in range(feat_i * max_non_zero, (feat_i + 1) * max_non_zero):
+                    for col_idx in range(2):
+                        axes[row_idx, col_idx].axis('off')
+            else:
+                for col_idx in range(max_non_zero):
+                    axes[feat_i, col_idx].axis('off')
             continue
 
         # Plot each non-zero category
@@ -2093,7 +2111,14 @@ def _plot_multinomial_multifeature(
 
         # Hide unused subplots (if this feature has fewer non-zero cats than max_non_zero)
         n_cats_this_feature = len(non_zero_cats)
-        if show_correction != 'both':
+        if show_correction == 'both':
+            # Hide unused rows for this feature
+            for cat_idx in range(n_cats_this_feature, max_non_zero):
+                row_idx = feat_i * max_non_zero + cat_idx
+                for col_idx in range(2):
+                    axes[row_idx, col_idx].axis('off')
+        else:
+            # Hide unused columns for this feature
             for cat_idx in range(n_cats_this_feature, max_non_zero):
                 axes[feat_i, cat_idx].axis('off')
 
