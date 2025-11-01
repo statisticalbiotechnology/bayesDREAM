@@ -35,8 +35,10 @@ class TechnicalFitter:
     def _t(self, x, dtype=torch.float32):
         return torch.as_tensor(x, dtype=dtype, device=self.model.device)
 
-    def _to_cpu(x):
-        return x.cpu() if isinstance(x, torch.Tensor) else None
+    def _to_cpu(self, x):
+        if isinstance(x, torch.Tensor):
+            return x.detach().cpu()
+        return x
     
     def _model_technical(
         self,
@@ -849,16 +851,16 @@ class TechnicalFitter:
     
             model_inputs = {
                 "N": N, "T": T_fit, "C": C,
-                "groups_ntc_tensor": _to_cpu(groups_ntc_tensor),
-                "y_obs_ntc_tensor": _to_cpu(y_obs_ntc_tensor),
-                "sum_factor_ntc_tensor": _to_cpu(sum_factor_ntc_tensor),
-                "beta_o_alpha_tensor": _to_cpu(beta_o_alpha_tensor),
-                "beta_o_beta_tensor": _to_cpu(beta_o_beta_tensor),
-                "mu_x_mean_tensor": _to_cpu(mu_x_mean_tensor),
-                "mu_x_sd_tensor": _to_cpu(mu_x_sd_tensor),
-                "epsilon_tensor": _to_cpu(epsilon_tensor),
+                "groups_ntc_tensor": self._to_cpu(groups_ntc_tensor),
+                "y_obs_ntc_tensor": self._to_cpu(y_obs_ntc_tensor),
+                "sum_factor_ntc_tensor": self._to_cpu(sum_factor_ntc_tensor),
+                "beta_o_alpha_tensor": self._to_cpu(beta_o_alpha_tensor),
+                "beta_o_beta_tensor": self._to_cpu(beta_o_beta_tensor),
+                "mu_x_mean_tensor": self._to_cpu(mu_x_mean_tensor),
+                "mu_x_sd_tensor": self._to_cpu(mu_x_sd_tensor),
+                "epsilon_tensor": self._to_cpu(epsilon_tensor),
                 "distribution": distribution,
-                "denominator_ntc_tensor": _to_cpu(denominator_ntc_tensor),
+                "denominator_ntc_tensor": self._to_cpu(denominator_ntc_tensor),
                 "K": K, "D": D,
             }
         else:
@@ -895,7 +897,7 @@ class TechnicalFitter:
                     samples = predictive_technical(**model_inputs)
                     for k, v in samples.items():
                         if keep_sites(k, {"value": v}):
-                            all_samples[k].append(_to_cpu(v))
+                            all_samples[k].append(self._to_cpu(v))
                     if self.model.device.type == "cuda":
                         torch.cuda.empty_cache()
                     gc.collect()

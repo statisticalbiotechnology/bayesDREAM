@@ -36,8 +36,10 @@ class TransFitter:
     def _t(self, x, dtype=torch.float32):
         return torch.as_tensor(x, dtype=dtype, device=self.model.device)
 
-    def _to_cpu(x):
-        return x.cpu() if isinstance(x, torch.Tensor) else None
+    def _to_cpu(self, x):
+        if isinstance(x, torch.Tensor):
+            return x.detach().cpu()
+        return x
 
     #########################################
     ## Step 3: Fit trans effects (model_y) ##
@@ -156,7 +158,16 @@ class TransFitter:
                 # Instead of directly n_a, we do n_a_raw
                 n_a_raw = pyro.sample("n_a_raw", dist.Normal(n_mu_tensor, sigma_n_a))
                 #n_a = pyro.sample("n_a", dist.Normal(n_mu_tensor, sigma_n))
-                n_a = pyro.deterministic("n_a", (alpha * n_a_raw).clamp(min=nmin, max=nmax)) # clamp for numerical stability
+                # Make sure nmin/nmax are scalar tensors; then get python floats for clamp
+                BOX_LOW  = self._t(-20.0)
+                BOX_HIGH = self._t( 20.0)
+                low  = torch.maximum(nmin, BOX_LOW)
+                high = torch.minimum(nmax, BOX_HIGH)
+                
+                n_a = pyro.deterministic(
+                    "n_a",
+                    (alpha * n_a_raw).clamp(min=low.item(), max=high.item())
+                )
                 
                 # Scale for Vmax, K is multiplied by alpha
                 #eff_Vmax_sigma = alpha * Vmaxa_sigma + epsilon_tensor
@@ -249,6 +260,7 @@ class TransFitter:
                 check_tensor("A", A)
                 if function_type in ['single_hill', 'additive_hill', 'nested_hill']:
                     check_tensor("n_a", n_a)
+                    print(f"used nmin={low}, used nmax={high}")
                     check_tensor("Vmax_a", Vmax_a)
                     check_tensor("K_a", K_a)
                 if function_type in ['additive_hill', 'nested_hill']:
@@ -563,15 +575,29 @@ class TransFitter:
         y_obs_tensor = torch.tensor(y_obs, dtype=torch.float32, device=self.model.device)
         epsilon_tensor = torch.tensor(epsilon, dtype=torch.float32, device=self.model.device)
         p_n_tensor = torch.tensor(p_n, dtype=torch.float32, device=self.model.device)
-        if self.model.x_true.min() < 1: 
-            nmin = torch.log(torch.tensor(torch.finfo(torch.float32).max, dtype=torch.float32, device=self.model.device))  / torch.log(self.model.x_true.min())
-        else:
-            nmin = np.nan
-        
-        if self.model.x_true.max() > 1: 
-            nmax = torch.log(torch.tensor(torch.finfo(torch.float32).max, dtype=torch.float32, device=self.model.device))  / torch.log(self.model.x_true.max())
-        else:
-            nmax = np.nan
+
+        # --- robust, finite bounds for n to avoid overflow in x**n ---
+        # use the same x_true sample type you use elsewhere
+        x_for_bounds = self.model.x_true if self.model.x_true_type == "posterior" else self.model.x_true
+        x_min = torch.clamp(x_for_bounds.min(), min=1e-12)  # strictly > 0 to avoid log(0)
+        x_max = x_for_bounds.max()
+
+        log_fmax = torch.log(torch.tensor(torch.finfo(torch.float32).max, device=self.model.device))
+
+        # candidates can be inf if denominator ~ 0; we cap them later
+        nmin_cand = (-log_fmax / torch.abs(torch.log(x_min))) if (x_min < 1) else torch.tensor(float('-inf'), device=self.model.device)
+        nmax_cand = ( log_fmax / torch.abs(torch.log(x_max))) if (x_max > 1) else torch.tensor(float('inf'),  device=self.model.device)
+        print(f'nmin_cand={nmin_cand}, nmax_cand={nmax_cand}')
+
+        BOX_LOW  = torch.tensor(-20.0, device=self.model.device)
+        BOX_HIGH = torch.tensor( 20.0, device=self.model.device)
+
+        nmin = torch.where(torch.isfinite(nmin_cand), torch.maximum(nmin_cand, BOX_LOW),  BOX_LOW)
+        nmax = torch.where(torch.isfinite(nmax_cand), torch.minimum(nmax_cand, BOX_HIGH), BOX_HIGH)
+        # ensure proper ordering just in case
+        nmin = torch.minimum(nmin, nmax)
+        print(f'nmin={nmin}, nmax={nmax}')
+
 
         guides_tensor = torch.tensor(self.model.meta['guide_code'].values, dtype=torch.long, device=self.model.device)
         K_max_tensor = torch.max(torch.stack([torch.mean(x_true_mean[guides_tensor == g]) for g in torch.unique(guides_tensor)]))
@@ -791,28 +817,30 @@ class TransFitter:
             model_inputs = {
                 "N": N,
                 "T": T,
-                "y_obs_tensor": _to_cpu(y_obs_tensor),
-                "sum_factor_tensor": _to_cpu(sum_factor_tensor),
-                "beta_o_alpha_tensor": _to_cpu(beta_o_alpha_tensor),
-                "beta_o_beta_tensor": _to_cpu(beta_o_beta_tensor),
-                "alpha_alpha_mu_tensor": _to_cpu(alpha_alpha_mu_tensor),
-                "K_max_tensor": _to_cpu(K_max_tensor),
-                "K_alpha_tensor": _to_cpu(K_alpha_tensor),
-                "Vmax_mean_tensor": _to_cpu(Vmax_mean_tensor),
-                "Vmax_alpha_tensor": _to_cpu(Vmax_alpha_tensor),
-                "n_mu_tensor": _to_cpu(n_mu_tensor),
-                "n_sigma_base_tensor": _to_cpu(n_sigma_base_tensor),
-                "Amean_tensor": _to_cpu(Amean_tensor),
-                "p_n_tensor": _to_cpu(p_n_tensor),
+                "y_obs_tensor": self._to_cpu(y_obs_tensor),
+                "sum_factor_tensor": self._to_cpu(sum_factor_tensor),
+                "beta_o_alpha_tensor": self._to_cpu(beta_o_alpha_tensor),
+                "beta_o_beta_tensor": self._to_cpu(beta_o_beta_tensor),
+                "alpha_alpha_mu_tensor": self._to_cpu(alpha_alpha_mu_tensor),
+                "K_max_tensor": self._to_cpu(K_max_tensor),
+                "K_alpha_tensor": self._to_cpu(K_alpha_tensor),
+                "Vmax_mean_tensor": self._to_cpu(Vmax_mean_tensor),
+                "Vmax_alpha_tensor": self._to_cpu(Vmax_alpha_tensor),
+                "n_mu_tensor": self._to_cpu(n_mu_tensor),
+                "n_sigma_base_tensor": self._to_cpu(n_sigma_base_tensor),
+                "Amean_tensor": self._to_cpu(Amean_tensor),
+                "p_n_tensor": self._to_cpu(p_n_tensor),
                 "threshold": threshold,     # plain Python ok
                 "slope": slope,
-                "epsilon_tensor": _to_cpu(epsilon_tensor),
-                "x_true_sample": _to_cpu(self.model.x_true.mean(dim=0) if self.model.x_true_type == "posterior" else self.model.x_true),
-                "log2_x_true_sample": _to_cpu(self.log2_x_true.mean(dim=0) if self.log2_x_true_type == "posterior" else self.log2_x_true),
+                "epsilon_tensor": self._to_cpu(epsilon_tensor),
+                "x_true_sample": self._to_cpu(self.model.x_true.mean(dim=0) if self.model.x_true_type == "posterior" else self.model.x_true),
+                "log2_x_true_sample": self._to_cpu(self.log2_x_true.mean(dim=0) if self.log2_x_true_type == "posterior" else self.log2_x_true),
+                "nmin": self._to_cpu(nmin),
+                "nmax": self._to_cpu(nmax),
                 # Only move if not None:
-                "alpha_y_sample": _to_cpu(alpha_y_prefit.mean(dim=0) if alpha_y_type == "posterior" else alpha_y_prefit) if alpha_y_prefit is not None else None,
+                "alpha_y_sample": self._to_cpu(alpha_y_prefit.mean(dim=0) if alpha_y_type == "posterior" else alpha_y_prefit) if alpha_y_prefit is not None else None,
                 "C": C,
-                "groups_tensor": _to_cpu(groups_tensor) if groups_tensor is not None else None,
+                "groups_tensor": self._to_cpu(groups_tensor) if groups_tensor is not None else None,
                 "predictive_mode": True,
                 # create on CPU explicitly since we just set self.model.device="cpu"
                 "temperature": torch.tensor(final_temp, dtype=torch.float32, device=torch.device("cpu")),
@@ -821,7 +849,7 @@ class TransFitter:
                 "polynomial_degree": polynomial_degree,
                 "use_alpha": True,
                 "distribution": distribution,
-                "denominator_tensor": _to_cpu(denominator_tensor) if denominator_tensor is not None else None,
+                "denominator_tensor": self._to_cpu(denominator_tensor) if denominator_tensor is not None else None,
                 "K": K,
                 "D": D,
             }
@@ -847,6 +875,8 @@ class TransFitter:
                 "epsilon_tensor": epsilon_tensor,
                 "x_true_sample": self.model.x_true.mean(dim=0) if self.model.x_true_type == "posterior" else self.model.x_true,
                 "log2_x_true_sample": self.log2_x_true.mean(dim=0) if self.log2_x_true_type == "posterior" else self.log2_x_true,
+                "nmin": nmin,
+                "nmax": nmax,
                 "alpha_y_sample": alpha_y_prefit.mean(dim=0) if alpha_y_type == "posterior" else alpha_y_prefit if alpha_y_prefit is not None else None,
                 "C": C,
                 "groups_tensor": groups_tensor if groups_tensor is not None else None,
@@ -886,7 +916,7 @@ class TransFitter:
                     samples = predictive_y(**model_inputs)
                     for k, v in samples.items():
                         if keep_sites(k, {"value": v}):
-                            all_samples[k].append(_to_cpu(v))
+                            all_samples[k].append(self._to_cpu(v))
                     if self.model.device.type == "cuda":
                         torch.cuda.empty_cache()
                     import gc
@@ -913,7 +943,7 @@ class TransFitter:
             print("[INFO] Reset self.model.device to:", self.model.device)
 
         for k, v in posterior_samples_y.items():
-            posterior_samples_y[k] = _to_cpu(v)
+            posterior_samples_y[k] = self._to_cpu(v)
 
         # Store results
         # Store in modality

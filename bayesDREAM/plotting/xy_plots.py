@@ -13,7 +13,7 @@ from matplotlib.colors import Normalize, LinearSegmentedColormap
 from matplotlib.cm import ScalarMappable
 from matplotlib.collections import LineCollection
 from scipy.spatial import cKDTree
-from typing import Optional, Dict, List, Tuple, Union
+from typing import Optional, Dict, List, Tuple, Union, Any
 import warnings
 import torch
 
@@ -644,6 +644,7 @@ def plot_negbinom_xy(
     sum_factor_col: str = 'sum_factor',
     xlabel: str = "log2(x_true)",
     ax: Optional[plt.Axes] = None,
+    subset_mask: Optional[np.ndarray] = None,
     **kwargs
 ) -> plt.Axes:
     """
@@ -672,19 +673,34 @@ def plot_negbinom_xy(
     else:
         y_obs = modality.counts[:, feature_idx]
 
+    # Apply subset mask if provided
+    if subset_mask is not None:
+        y_obs = y_obs[subset_mask]
+
     # Build dataframe
     # Check if sum_factor_col exists
     if sum_factor_col not in model.meta.columns:
         raise ValueError(f"Sum factor column '{sum_factor_col}' not found in model.meta. "
                         f"Available columns: {list(model.meta.columns)}")
 
-    df = pd.DataFrame({
-        'x_true': x_true,
-        'y_obs': y_obs,
-        'technical_group_code': model.meta['technical_group_code'].values,
-        'target': model.meta['target'].values,
-        'sum_factor': model.meta[sum_factor_col].values
-    })
+    # Get metadata arrays (already subsetted in plot_xy_data if subset_mask provided)
+    if subset_mask is not None:
+        meta_subset = model.meta[subset_mask]
+        df = pd.DataFrame({
+            'x_true': x_true,
+            'y_obs': y_obs,
+            'technical_group_code': meta_subset['technical_group_code'].values,
+            'target': meta_subset['target'].values,
+            'sum_factor': meta_subset[sum_factor_col].values
+        })
+    else:
+        df = pd.DataFrame({
+            'x_true': x_true,
+            'y_obs': y_obs,
+            'technical_group_code': model.meta['technical_group_code'].values,
+            'target': model.meta['target'].values,
+            'sum_factor': model.meta[sum_factor_col].values
+        })
 
     # Technical correction
     has_technical_fit = modality.alpha_y_prefit is not None
@@ -851,6 +867,7 @@ def plot_binomial_xy(
     show_correction: str = 'both',
     xlabel: str = "log2(x_true)",
     ax: Optional[plt.Axes] = None,
+    subset_mask: Optional[np.ndarray] = None,
     **kwargs
 ) -> plt.Axes:
     """
@@ -889,17 +906,32 @@ def plot_binomial_xy(
         counts = modality.counts[:, feature_idx]
         denom = modality.denominator[:, feature_idx]
 
+    # Apply subset mask if provided
+    if subset_mask is not None:
+        counts = counts[subset_mask]
+        denom = denom[subset_mask]
+
     # Filter by min_counts
     valid_mask = denom >= min_counts
 
     # Build dataframe
-    df = pd.DataFrame({
-        'x_true': x_true[valid_mask],
-        'counts': counts[valid_mask],
-        'denominator': denom[valid_mask],
-        'technical_group_code': model.meta['technical_group_code'].values[valid_mask],
-        'target': model.meta['target'].values[valid_mask]
-    })
+    if subset_mask is not None:
+        meta_subset = model.meta[subset_mask]
+        df = pd.DataFrame({
+            'x_true': x_true[valid_mask],
+            'counts': counts[valid_mask],
+            'denominator': denom[valid_mask],
+            'technical_group_code': meta_subset['technical_group_code'].values[valid_mask],
+            'target': meta_subset['target'].values[valid_mask]
+        })
+    else:
+        df = pd.DataFrame({
+            'x_true': x_true[valid_mask],
+            'counts': counts[valid_mask],
+            'denominator': denom[valid_mask],
+            'technical_group_code': model.meta['technical_group_code'].values[valid_mask],
+            'target': model.meta['target'].values[valid_mask]
+        })
 
     # Compute PSI (as percentage: 0-100 scale)
     df['PSI'] = (df['counts'] / df['denominator']) * 100.0
@@ -1086,6 +1118,7 @@ def plot_multinomial_xy(
     show_ntc_gradient: bool = False,
     xlabel: str = "log2(x_true)",
     figsize: Optional[Tuple[int, int]] = None,
+    subset_mask: Optional[np.ndarray] = None,
     **kwargs
 ) -> Union[plt.Figure, List[plt.Axes]]:
     """
@@ -1122,6 +1155,10 @@ def plot_multinomial_xy(
     else:
         raise ValueError(f"Expected 3D counts for multinomial, got {modality.counts.ndim}D")
 
+    # Apply subset mask if provided
+    if subset_mask is not None:
+        counts_3d = counts_3d[subset_mask, :]
+
     K = counts_3d.shape[1]
 
     # Get category labels if available in feature_meta
@@ -1152,11 +1189,19 @@ def plot_multinomial_xy(
     valid_mask = total_counts >= min_counts
 
     # Build dataframe
-    df = pd.DataFrame({
-        'x_true': x_true[valid_mask],
-        'technical_group_code': model.meta['technical_group_code'].values[valid_mask],
-        'target': model.meta['target'].values[valid_mask]
-    })
+    if subset_mask is not None:
+        meta_subset = model.meta[subset_mask]
+        df = pd.DataFrame({
+            'x_true': x_true[valid_mask],
+            'technical_group_code': meta_subset['technical_group_code'].values[valid_mask],
+            'target': meta_subset['target'].values[valid_mask]
+        })
+    else:
+        df = pd.DataFrame({
+            'x_true': x_true[valid_mask],
+            'technical_group_code': model.meta['technical_group_code'].values[valid_mask],
+            'target': model.meta['target'].values[valid_mask]
+        })
 
     # Store raw counts for each category (needed for correction)
     counts_filtered = counts_3d[valid_mask, :]  # (n_cells_filtered, K)
@@ -1366,6 +1411,7 @@ def plot_normal_xy(
     show_ntc_gradient: bool = False,
     xlabel: str = "log2(x_true)",
     ax: Optional[plt.Axes] = None,
+    subset_mask: Optional[np.ndarray] = None,
     **kwargs
 ) -> plt.Axes:
     """
@@ -1391,13 +1437,26 @@ def plot_normal_xy(
     else:
         y_vals = modality.counts[:, feature_idx]
 
+    # Apply subset mask if provided
+    if subset_mask is not None:
+        y_vals = y_vals[subset_mask]
+
     # Build dataframe
-    df = pd.DataFrame({
-        'x_true': x_true,
-        'y_val': y_vals,
-        'technical_group_code': model.meta['technical_group_code'].values,
-        'target': model.meta['target'].values
-    })
+    if subset_mask is not None:
+        meta_subset = model.meta[subset_mask]
+        df = pd.DataFrame({
+            'x_true': x_true,
+            'y_val': y_vals,
+            'technical_group_code': meta_subset['technical_group_code'].values,
+            'target': meta_subset['target'].values
+        })
+    else:
+        df = pd.DataFrame({
+            'x_true': x_true,
+            'y_val': y_vals,
+            'technical_group_code': model.meta['technical_group_code'].values,
+            'target': model.meta['target'].values
+        })
 
     # Filter valid
     valid = (df['x_true'] > 0) & np.isfinite(df['y_val'])
@@ -1561,6 +1620,7 @@ def plot_mvnormal_xy(
     show_ntc_gradient: bool = False,
     xlabel: str = "log2(x_true)",
     figsize: Optional[Tuple[int, int]] = None,
+    subset_mask: Optional[np.ndarray] = None,
     **kwargs
 ) -> Union[plt.Figure, List[plt.Axes]]:
     """
@@ -1589,6 +1649,10 @@ def plot_mvnormal_xy(
     else:
         raise ValueError(f"Expected 3D counts for mvnormal, got {modality.counts.ndim}D")
 
+    # Apply subset mask if provided
+    if subset_mask is not None:
+        values_3d = values_3d[subset_mask, :]
+
     D = values_3d.shape[1]
 
     # Check technical correction
@@ -1607,11 +1671,19 @@ def plot_mvnormal_xy(
         fig, axes = plt.subplots(1, D, figsize=figsize, squeeze=False)
 
     # Build dataframe
-    df = pd.DataFrame({
-        'x_true': x_true,
-        'technical_group_code': model.meta['technical_group_code'].values,
-        'target': model.meta['target'].values
-    })
+    if subset_mask is not None:
+        meta_subset = model.meta[subset_mask]
+        df = pd.DataFrame({
+            'x_true': x_true,
+            'technical_group_code': meta_subset['technical_group_code'].values,
+            'target': meta_subset['target'].values
+        })
+    else:
+        df = pd.DataFrame({
+            'x_true': x_true,
+            'technical_group_code': model.meta['technical_group_code'].values,
+            'target': model.meta['target'].values
+        })
 
     for d in range(D):
         df[f'dim_{d}'] = values_3d[:, d]
@@ -1706,6 +1778,7 @@ def _plot_multinomial_multifeature(
     color_palette: Dict[str, str],
     xlabel: str,
     figsize: Optional[Tuple[int, int]] = None,
+    subset_mask: Optional[np.ndarray] = None,
     **kwargs
 ) -> plt.Figure:
     """
@@ -1829,6 +1902,10 @@ def _plot_multinomial_multifeature(
         # Get counts for this feature
         counts_3d = modality.counts[feat_idx, :, :]  # (cells, K)
 
+        # Apply subset mask if provided
+        if subset_mask is not None:
+            counts_3d = counts_3d[subset_mask, :]
+
         # Get category labels if available for this feature
         category_labels = None
         if hasattr(modality, 'feature_meta') and modality.feature_meta is not None:
@@ -1843,11 +1920,19 @@ def _plot_multinomial_multifeature(
         valid_mask = total_counts >= min_counts
 
         # Build dataframe
-        df = pd.DataFrame({
-            'x_true': x_true[valid_mask],
-            'technical_group_code': model.meta['technical_group_code'].values[valid_mask],
-            'target': model.meta['target'].values[valid_mask]
-        })
+        if subset_mask is not None:
+            meta_subset = model.meta[subset_mask]
+            df = pd.DataFrame({
+                'x_true': x_true[valid_mask],
+                'technical_group_code': meta_subset['technical_group_code'].values[valid_mask],
+                'target': meta_subset['target'].values[valid_mask]
+            })
+        else:
+            df = pd.DataFrame({
+                'x_true': x_true[valid_mask],
+                'technical_group_code': model.meta['technical_group_code'].values[valid_mask],
+                'target': model.meta['target'].values[valid_mask]
+            })
 
         counts_filtered = counts_3d[valid_mask, :]
         total_filtered = total_counts[valid_mask]
@@ -2025,6 +2110,7 @@ def plot_xy_data(
     xlabel: str = "log2(x_true)",
     figsize: Optional[Tuple[int, int]] = None,
     src_barcodes: Optional[np.ndarray] = None,
+    subset_meta: Optional[Dict[str, Any]] = None,
     **kwargs
 ) -> Union[plt.Figure, plt.Axes]:
     """
@@ -2075,6 +2161,12 @@ def plot_xy_data(
         Figure size (auto-sized if None)
     src_barcodes : np.ndarray, optional
         Source barcode order if x_true not in model.meta order
+    subset_meta : dict, optional
+        Subset cells by metadata columns. Dictionary of {column: value} pairs.
+        Example: {'target': 'ntc'} - plot only NTC cells
+        Example: {'cell_line': 'CRISPRi'} - plot only CRISPRi cells
+        Example: {'lane': 'L1', 'cell_line': 'CRISPRa'} - plot L1 lane CRISPRa cells
+        Multiple conditions are combined with AND logic.
     **kwargs
         Additional plotting arguments
 
@@ -2115,6 +2207,12 @@ def plot_xy_data(
     >>>
     >>> # Plot with NTC gradient coloring
     >>> model.plot_xy_data('TET2', show_ntc_gradient=True, show_correction='uncorrected')
+    >>>
+    >>> # Plot only NTC cells
+    >>> model.plot_xy_data('TET2', subset_meta={'target': 'ntc'})
+    >>>
+    >>> # Plot only CRISPRi cells
+    >>> model.plot_xy_data('GFI1B', subset_meta={'cell_line': 'CRISPRi'})
     """
     # Check x_true is set
     if not hasattr(model, 'x_true') or model.x_true is None:
@@ -2138,6 +2236,26 @@ def plot_xy_data(
     if src_barcodes is not None:
         cell_barcodes = model.meta['cell'].values if 'cell' in model.meta.columns else model.meta.index.values
         x_true = reorder_xtrue_by_barcode(x_true, src_barcodes, cell_barcodes)
+
+    # Apply metadata subsetting
+    subset_mask = None
+    if subset_meta is not None:
+        # Create mask based on subset_meta conditions (AND logic)
+        subset_mask = np.ones(len(model.meta), dtype=bool)
+        for col, value in subset_meta.items():
+            if col not in model.meta.columns:
+                raise ValueError(f"Column '{col}' not found in model.meta. Available columns: {list(model.meta.columns)}")
+            subset_mask &= (model.meta[col] == value).values
+
+        n_cells_before = len(model.meta)
+        n_cells_after = subset_mask.sum()
+        if n_cells_after == 0:
+            raise ValueError(f"No cells match subset_meta criteria: {subset_meta}")
+
+        print(f"[SUBSET] Filtering {n_cells_before} → {n_cells_after} cells based on {subset_meta}")
+
+        # Apply mask to x_true
+        x_true = x_true[subset_mask]
 
     # Get modality
     if modality_name is None:
@@ -2172,6 +2290,7 @@ def plot_xy_data(
                 color_palette=color_palette,
                 xlabel=xlabel,
                 figsize=figsize,
+                subset_mask=subset_mask,
                 **kwargs
             )
 
@@ -2194,7 +2313,7 @@ def plot_xy_data(
                     x_true=x_true, window=window, show_correction='uncorrected',
                     color_palette=color_palette, show_hill_function=show_hill_function,
                     show_ntc_gradient=show_ntc_gradient, sum_factor_col=sum_factor_col,
-                    xlabel=xlabel, ax=axes[i, 0], **kwargs
+                    xlabel=xlabel, ax=axes[i, 0], subset_mask=subset_mask, **kwargs
                 )
             elif distribution == 'binomial':
                 plot_binomial_xy(
@@ -2202,14 +2321,16 @@ def plot_xy_data(
                     x_true=x_true, window=window, show_correction='uncorrected',
                     min_counts=min_counts, color_palette=color_palette,
                     show_trans_function=show_hill_function,
-                    show_ntc_gradient=show_ntc_gradient, xlabel=xlabel, ax=axes[i, 0], **kwargs
+                    show_ntc_gradient=show_ntc_gradient, xlabel=xlabel, ax=axes[i, 0],
+                    subset_mask=subset_mask, **kwargs
                 )
             elif distribution == 'normal':
                 plot_normal_xy(
                     model=model, feature=feat_name, modality=modality,
                     x_true=x_true, window=window, show_correction='uncorrected',
                     color_palette=color_palette, show_trans_function=show_hill_function,
-                    show_ntc_gradient=show_ntc_gradient, xlabel=xlabel, ax=axes[i, 0], **kwargs
+                    show_ntc_gradient=show_ntc_gradient, xlabel=xlabel, ax=axes[i, 0],
+                    subset_mask=subset_mask, **kwargs
                 )
             else:
                 # mvnormal returns its own figure
@@ -2223,7 +2344,7 @@ def plot_xy_data(
                     x_true=x_true, window=window, show_correction='corrected',
                     color_palette=color_palette, show_hill_function=show_hill_function,
                     show_ntc_gradient=show_ntc_gradient, sum_factor_col=sum_factor_col,
-                    xlabel=xlabel, ax=axes[i, 1], **kwargs
+                    xlabel=xlabel, ax=axes[i, 1], subset_mask=subset_mask, **kwargs
                 )
             elif distribution == 'binomial':
                 plot_binomial_xy(
@@ -2231,14 +2352,16 @@ def plot_xy_data(
                     x_true=x_true, window=window, show_correction='corrected',
                     min_counts=min_counts, color_palette=color_palette,
                     show_trans_function=show_hill_function,
-                    show_ntc_gradient=show_ntc_gradient, xlabel=xlabel, ax=axes[i, 1], **kwargs
+                    show_ntc_gradient=show_ntc_gradient, xlabel=xlabel, ax=axes[i, 1],
+                    subset_mask=subset_mask, **kwargs
                 )
             elif distribution == 'normal':
                 plot_normal_xy(
                     model=model, feature=feat_name, modality=modality,
                     x_true=x_true, window=window, show_correction='corrected',
                     color_palette=color_palette, show_trans_function=show_hill_function,
-                    show_ntc_gradient=show_ntc_gradient, xlabel=xlabel, ax=axes[i, 1], **kwargs
+                    show_ntc_gradient=show_ntc_gradient, xlabel=xlabel, ax=axes[i, 1],
+                    subset_mask=subset_mask, **kwargs
                 )
             else:
                 # mvnormal returns its own figure
@@ -2268,6 +2391,7 @@ def plot_xy_data(
             show_ntc_gradient=show_ntc_gradient,
             sum_factor_col=sum_factor_col,
             xlabel=xlabel,
+            subset_mask=subset_mask,
             **kwargs
         )
 
@@ -2283,6 +2407,7 @@ def plot_xy_data(
             show_trans_function=show_hill_function,
             show_ntc_gradient=show_ntc_gradient,
             xlabel=xlabel,
+            subset_mask=subset_mask,
             **kwargs
         )
 
@@ -2300,6 +2425,7 @@ def plot_xy_data(
             show_ntc_gradient=show_ntc_gradient,
             xlabel=xlabel,
             figsize=figsize,
+            subset_mask=subset_mask,
             **kwargs
         )
 
@@ -2315,6 +2441,7 @@ def plot_xy_data(
             show_trans_function=show_hill_function,
             show_ntc_gradient=show_ntc_gradient,
             xlabel=xlabel,
+            subset_mask=subset_mask,
             **kwargs
         )
 
@@ -2331,6 +2458,7 @@ def plot_xy_data(
             show_ntc_gradient=show_ntc_gradient,
             xlabel=xlabel,
             figsize=figsize,
+            subset_mask=subset_mask,
             **kwargs
         )
 
