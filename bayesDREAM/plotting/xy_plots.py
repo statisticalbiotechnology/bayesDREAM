@@ -1349,7 +1349,7 @@ def plot_multinomial_xy(
                 ax.legend(frameon=False, loc='upper right')
 
     plt.suptitle(f"{model.cis_gene} → {feature} (min_counts={min_counts})")
-    plt.tight_layout(rect=[0, 0, 1, 0.97])  # Leave space for suptitle
+    plt.tight_layout(rect=[0, 0.03, 1, 0.96])  # Leave space for suptitle
 
     return fig
 
@@ -1751,16 +1751,38 @@ def _plot_multinomial_multifeature(
     """
     n_features = len(feature_indices)
 
-    # Get number of categories (K) for each feature
+    # Get number of categories (K) for each feature and identify non-zero categories
     Ks = []
+    non_zero_cats_per_feature = []
+
     for feat_idx in feature_indices:
         if modality.counts.ndim == 3:
-            K = modality.counts[feat_idx, :, :].shape[1]
+            counts_3d = modality.counts[feat_idx, :, :]  # (cells, K)
+            K = counts_3d.shape[1]
             Ks.append(K)
+
+            # Get category labels if available for this feature
+            category_labels = None
+            if hasattr(modality, 'feature_meta') and modality.feature_meta is not None:
+                if 'category_labels' in modality.feature_meta.columns:
+                    category_labels = modality.feature_meta.loc[feat_idx, 'category_labels']
+                    if category_labels is not None and len(category_labels) != K:
+                        category_labels = None
+
+            # Identify non-zero categories (skip padded zeros and empty labels)
+            non_zero_cats = []
+            for k in range(K):
+                has_counts = counts_3d[:, k].sum() > 0
+                has_label = True if category_labels is None else (k < len(category_labels) and category_labels[k] != "")
+                if has_counts and has_label:
+                    non_zero_cats.append(k)
+
+            non_zero_cats_per_feature.append(non_zero_cats)
         else:
             raise ValueError(f"Expected 3D counts for multinomial, got {modality.counts.ndim}D")
 
-    max_K = max(Ks)
+    # Use max number of non-zero categories instead of max_K
+    max_non_zero = max(len(nz) for nz in non_zero_cats_per_feature) if non_zero_cats_per_feature else 1
 
     # Check technical correction
     has_technical_fit = False
@@ -1776,17 +1798,17 @@ def _plot_multinomial_multifeature(
         warnings.warn(f"Technical fit not available for modality '{modality.name}' - showing uncorrected only")
         show_correction = 'uncorrected'
 
-    # Create figure layout
+    # Create figure layout based on non-zero categories only
     if show_correction == 'both':
-        # Layout: (n_features × max_K) rows × 2 columns
-        n_rows = n_features * max_K
+        # Layout: (n_features × max_non_zero) rows × 2 columns
+        n_rows = n_features * max_non_zero
         n_cols = 2
         if figsize is None:
             figsize = (12, 3 * n_rows)  # 3 inches per row
     else:
-        # Layout: n_features rows × max_K columns
+        # Layout: n_features rows × max_non_zero columns
         n_rows = n_features
-        n_cols = max_K
+        n_cols = max_non_zero
         if figsize is None:
             figsize = (4 * n_cols, 3 * n_rows)  # 4 inches per column, 3 inches per row
 
@@ -1799,6 +1821,10 @@ def _plot_multinomial_multifeature(
     # Plot each feature
     for feat_i, (feat_idx, feat_name) in enumerate(zip(feature_indices, feature_names)):
         K = Ks[feat_i]
+        non_zero_cats = non_zero_cats_per_feature[feat_i]
+
+        if len(non_zero_cats) == 0:
+            continue  # Skip features with no non-zero categories
 
         # Get counts for this feature
         counts_3d = modality.counts[feat_idx, :, :]  # (cells, K)
@@ -1811,17 +1837,6 @@ def _plot_multinomial_multifeature(
                 if category_labels is not None and len(category_labels) != K:
                     warnings.warn(f"category_labels length ({len(category_labels)}) doesn't match K ({K}) for feature {feat_name} - ignoring labels")
                     category_labels = None
-
-        # Identify non-zero categories for this feature (skip padded zeros and empty labels)
-        non_zero_cats = []
-        for k in range(K):
-            has_counts = counts_3d[:, k].sum() > 0
-            has_label = True if category_labels is None else (k < len(category_labels) and category_labels[k] != "")
-            if has_counts and has_label:
-                non_zero_cats.append(k)
-
-        if len(non_zero_cats) == 0:
-            continue  # Skip features with no non-zero categories
 
         # Filter by min_counts
         total_counts = counts_3d.sum(axis=1)
@@ -1863,8 +1878,8 @@ def _plot_multinomial_multifeature(
                 cat_label = f"Cat{k}"
 
             if show_correction == 'both':
-                # Row: feat_i * max_K + k, Columns: 0 (uncorrected), 1 (corrected)
-                row = feat_i * max_K + k
+                # Row: feat_i * max_non_zero + cat_plot_idx, Columns: 0 (uncorrected), 1 (corrected)
+                row = feat_i * max_non_zero + cat_plot_idx
                 for col_idx, corrected in enumerate([False, True]):
                     ax = axes[row, col_idx]
 
@@ -1922,8 +1937,8 @@ def _plot_multinomial_multifeature(
                     if cat_plot_idx == 0 and feat_i == 0:
                         ax.legend(frameon=False, loc='upper right', fontsize=8)
             else:
-                # Row: feat_i, Column: k
-                ax = axes[feat_i, k]
+                # Row: feat_i, Column: cat_plot_idx
+                ax = axes[feat_i, cat_plot_idx]
                 corrected = (show_correction == 'corrected')
 
                 for group_code, group_label in zip(group_codes, group_labels):
@@ -1980,13 +1995,14 @@ def _plot_multinomial_multifeature(
                 if cat_plot_idx == 0 and feat_i == 0:
                     ax.legend(frameon=False, loc='upper right', fontsize=8)
 
-        # Hide unused subplots (if K < max_K for this feature)
+        # Hide unused subplots (if this feature has fewer non-zero cats than max_non_zero)
+        n_cats_this_feature = len(non_zero_cats)
         if show_correction != 'both':
-            for k in range(K, max_K):
-                axes[feat_i, k].axis('off')
+            for cat_idx in range(n_cats_this_feature, max_non_zero):
+                axes[feat_i, cat_idx].axis('off')
 
     plt.suptitle(f"{model.cis_gene} → {gene_name} (gene, n={n_features} features, min_counts={min_counts})")
-    plt.tight_layout(rect=[0, 0, 1, 0.97])  # Leave space for suptitle
+    plt.tight_layout(rect=[0, 0.03, 1, 0.96])  # Leave space for suptitle
 
     return fig
 
