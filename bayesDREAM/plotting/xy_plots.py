@@ -1825,12 +1825,18 @@ def _plot_multinomial_multifeature(
     n_features = len(feature_indices)
 
     # Get number of categories (K) for each feature and identify non-zero categories
+    # IMPORTANT: Must compute non-zero categories AFTER subsetting to get correct max_non_zero
     Ks = []
     non_zero_cats_per_feature = []
 
     for feat_idx in feature_indices:
         if modality.counts.ndim == 3:
             counts_3d = modality.counts[feat_idx, :, :]  # (cells, K)
+
+            # Apply subset mask if provided (to get correct max_non_zero for figure sizing)
+            if subset_mask is not None:
+                counts_3d = counts_3d[subset_mask, :]
+
             K = counts_3d.shape[1]
             Ks.append(K)
 
@@ -1842,7 +1848,7 @@ def _plot_multinomial_multifeature(
                     if category_labels is not None and len(category_labels) != K:
                         category_labels = None
 
-            # Identify non-zero categories (skip padded zeros and empty labels)
+            # Identify non-zero categories AFTER subsetting (skip padded zeros and empty labels)
             non_zero_cats = []
             for k in range(K):
                 has_counts = counts_3d[:, k].sum() > 0
@@ -1854,7 +1860,7 @@ def _plot_multinomial_multifeature(
         else:
             raise ValueError(f"Expected 3D counts for multinomial, got {modality.counts.ndim}D")
 
-    # Use max number of non-zero categories instead of max_K
+    # Use max number of non-zero categories (computed from subsetted data)
     max_non_zero = max(len(nz) for nz in non_zero_cats_per_feature) if non_zero_cats_per_feature else 1
 
     # Check technical correction
@@ -1915,18 +1921,8 @@ def _plot_multinomial_multifeature(
                     warnings.warn(f"category_labels length ({len(category_labels)}) doesn't match K ({K}) for feature {feat_name} - ignoring labels")
                     category_labels = None
 
-        # IMPORTANT: Recompute non-zero categories after subsetting to avoid data leakage
-        # The pre-computed non_zero_cats may be wrong if subset_mask was applied
-        non_zero_cats_recomputed = []
-        for k in range(K):
-            has_counts = counts_3d[:, k].sum() > 0
-            has_label = True if category_labels is None else (k < len(category_labels) and category_labels[k] != "")
-            if has_counts and has_label:
-                non_zero_cats_recomputed.append(k)
-
-        # Use recomputed non-zero cats for this feature
-        non_zero_cats = non_zero_cats_recomputed
-
+        # Use pre-computed non_zero_cats (already computed from subsetted data)
+        # non_zero_cats was set at line 1897
         if len(non_zero_cats) == 0:
             continue  # Skip if no non-zero categories after subsetting
 
