@@ -879,13 +879,16 @@ def plot_negbinom_xy(
             # Get is_ntc for this group
             is_ntc_group = is_ntc[df_group.index].values
 
-            # k-NN smoothing
+            # Transform to log2(y+1) BEFORE smoothing
+            y_log = np.log2(y_expr + 1)
+
+            # k-NN smoothing in log space
             k = _knn_k(len(df_group), window)
             if show_ntc_gradient:
                 # Smoothing with NTC tracking
                 x_smooth, y_smooth, ntc_prop = _smooth_knn(
                     df_group['x_true'].values,
-                    y_expr.values,
+                    y_log,
                     k,
                     is_ntc=is_ntc_group
                 )
@@ -895,7 +898,7 @@ def plot_negbinom_xy(
                 group_cmap = group_cmaps.get(group_label, plt.cm.gray)
                 plot_colored_line(
                     x=np.log2(x_smooth),
-                    y=np.log2(y_smooth),
+                    y=y_smooth,  # Already in log2(y+1) space
                     color_values=1 - ntc_prop,  # Darker (group color) = fewer NTCs
                     cmap=group_cmap,
                     ax=ax_plot,
@@ -916,21 +919,21 @@ def plot_negbinom_xy(
                     cbar.set_label('1 - Proportion NTC (darker = fewer NTCs)')
                     colorbar_added = True
             else:
-                # Standard smoothing without NTC tracking
-                x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, y_expr.values, k)
+                # Standard smoothing without NTC tracking in log space
+                x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, y_log, k)
 
                 # Use standard coloring
                 color = _color_for_label(group_label, fallback_idx=idx, palette=color_palette)
-                ax_plot.plot(np.log2(x_smooth), np.log2(y_smooth), color=color, linewidth=2, label=group_label)
+                ax_plot.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2, label=group_label)
 
         # Trans function overlay (if trans model fitted)
         if show_hill_function and not corrected:
             x_range = np.linspace(x_true.min(), x_true.max(), 100)
             y_pred = predict_trans_function(model, feature, x_range, modality_name=None)
 
-            if y_pred is not None and np.all(y_pred > 0):
-                # Only plot if all predictions are positive (for log2 transform)
-                ax_plot.plot(np.log2(x_range), np.log2(y_pred),
+            if y_pred is not None:
+                # Transform prediction to log2(y+1) space to match data
+                ax_plot.plot(np.log2(x_range), np.log2(y_pred + 1),
                             color='blue', linestyle='--', linewidth=2,
                             label='Fitted Trans Function')
 
@@ -941,11 +944,10 @@ def plot_negbinom_xy(
                     if feature in trans_genes:
                         gene_idx = trans_genes.index(feature)
                         A = A_samples.mean(dim=0)[gene_idx].item() if hasattr(A_samples, 'mean') else A_samples.mean(axis=0)[gene_idx]
-                        if A > 0:
-                            ax_plot.axhline(np.log2(A), color='red', linestyle=':', linewidth=1, label='log2(A) baseline')
+                        ax_plot.axhline(np.log2(A + 1), color='red', linestyle=':', linewidth=1, label='log2(A+1) baseline')
 
         ax_plot.set_xlabel(xlabel)
-        ax_plot.set_ylabel('log2(Expression)')
+        ax_plot.set_ylabel('log2(Expression + 1)')
         title_suffix = ' (corrected)' if corrected else ' (uncorrected)'
         ax_plot.set_title(f"{model.cis_gene} → {feature}{title_suffix}")
         ax_plot.legend(frameon=False)
