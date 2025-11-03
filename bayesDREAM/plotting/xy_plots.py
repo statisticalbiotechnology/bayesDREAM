@@ -309,6 +309,59 @@ def _to_scalar(val):
     # Already scalar
     return float(val)
 
+def _multinomial_correct_mean_probs(
+    props_group: np.ndarray,          # (n, K) proportions for this group
+    alpha_y_add,                      # [S, C, T, K] or [C, T, K]
+    group_code: int,
+    feature_idx: int,
+    zero_cat_mask: np.ndarray         # (K,) True where category is globally zero
+) -> np.ndarray:
+    """
+    Apply multinomial technical correction the *same way as the model*:
+    For each posterior sample s: softmax(log(P) - alpha_s), then average across s.
+    Enforces a hard zero mask and renormalizes.
+
+    Returns
+    -------
+    (n, K) corrected proportions
+    """
+    epsilon = 1e-6
+    # Clip and log
+    P = np.clip(props_group, epsilon, 1 - epsilon)   # (n, K)
+    logP = np.log(P)                                 # (n, K)
+
+    # Pull alpha with explicit samples dim
+    if alpha_y_add.ndim == 4:        # [S, C, T, K]
+        A = alpha_y_add[:, group_code, feature_idx, :]          # (S, K)
+    elif alpha_y_add.ndim == 3:      # [C, T, K] -> add S=1
+        A = alpha_y_add[None, group_code, feature_idx, :]       # (1, K)
+    else:
+        raise ValueError(f"Unexpected alpha_y_add shape: {alpha_y_add.shape}")
+
+    if hasattr(A, "detach"):
+        A = A.detach().cpu().numpy()
+
+    # Broadcast to (S, n, K)
+    logP_S = logP[None, :, :]
+    A_S    = A[:, None, :]
+
+    logits = logP_S - A_S                                 # (S, n, K)
+
+    # Hard-mask zero categories
+    logits[:, :, zero_cat_mask] = -np.inf
+
+    # Stable softmax with mask
+    m = np.nanmax(logits, axis=-1, keepdims=True)
+    exps = np.exp(logits - m)
+    exps[:, :, zero_cat_mask] = 0.0
+    Z = exps.sum(axis=-1, keepdims=True)
+    Z[Z == 0] = 1.0
+    P_corr_S = exps / Z                                    # (S, n, K)
+
+    # Posterior mean in probability space
+    return P_corr_S.mean(axis=0)                           # (n, K)
+
+
 
 # ============================================================================
 # Technical Group Utilities
@@ -421,6 +474,39 @@ def get_default_color_palette(labels: List[str]) -> Dict[str, str]:
                 palette[label] = f'C{len(palette)}'
 
     return palette
+
+
+def _labels_by_code_for_df(model, df) -> dict[int, str]:
+    """
+    Return {technical_group_code -> human-readable label} *for codes present in df*.
+    Prefers 'cell_line' if available, else falls back to a stable generic label.
+    """
+    present = np.sort(df['technical_group_code'].unique())
+    label_col = 'cell_line' if 'cell_line' in model.meta.columns else None
+
+    mapping = {}
+    for code in present:
+        if label_col is not None:
+            vals = model.meta.loc[model.meta['technical_group_code'] == code, label_col]
+            mapping[int(code)] = str(vals.iloc[0]) if len(vals) else f'Group_{int(code)}'
+        else:
+            mapping[int(code)] = f'Group_{int(code)}'
+    return mapping
+
+
+def _color_for_label(label: str, fallback_idx: int = 0, palette: dict | None = None) -> str:
+    """
+    Use user's desired palette: CRISPRa=red, CRISPRi=blue; otherwise fall back.
+    """
+    palette = palette or {}
+    if label in palette:
+        return palette[label]
+    # hard defaults you wanted
+    if 'CRISPRa' in label:
+        return 'crimson'
+    if 'CRISPRi' in label:
+        return 'dodgerblue'
+    return f'C{fallback_idx}'
 
 
 def plot_colored_line(
@@ -540,19 +626,36 @@ def predict_trans_function(
 
     posterior = model.posterior_samples_trans
 
-    # Check if feature in trans genes
-    trans_genes = model.trans_genes if hasattr(model, 'trans_genes') else []
-    if feature not in trans_genes:
-        return None
-
-    gene_idx = trans_genes.index(feature)
-
     # Get baseline A (present in all function types)
     if 'A' not in posterior:
         return None
 
     A_samples = posterior['A']
-    A = A_samples.mean(dim=0)[gene_idx].item() if hasattr(A_samples, 'mean') else A_samples.mean(axis=0)[gene_idx]
+
+    # Get posterior dimensions
+    if hasattr(A_samples, 'mean'):
+        A_mean = A_samples.mean(dim=0)
+        n_genes_posterior = A_mean.shape[0]
+    else:
+        A_mean = A_samples.mean(axis=0)
+        n_genes_posterior = A_mean.shape[0]
+
+    # Get trans_genes list (should match posterior dimensions)
+    trans_genes = model.trans_genes if hasattr(model, 'trans_genes') else []
+    n_genes_list = len(trans_genes)
+
+    # Check dimension consistency BEFORE using trans_genes for indexing
+    if n_genes_posterior != n_genes_list:
+        # Mismatch - cannot use trans_genes for indexing
+        # This happens when posterior was fitted on a subset of genes
+        return None
+
+    # Now safe to check if feature is in trans_genes and get its index
+    if feature not in trans_genes:
+        return None
+
+    gene_idx = trans_genes.index(feature)
+    A = A_mean[gene_idx].item() if hasattr(A_mean, 'item') else A_mean[gene_idx]
 
     # Determine function type from available parameters
     if 'Vmax_a' in posterior and 'Vmax_b' in posterior:
@@ -723,9 +826,10 @@ def plot_negbinom_xy(
             show_correction = 'uncorrected'
         axes = [ax]
 
-    # Get technical group labels
-    group_labels = get_technical_group_labels(model)
-    group_codes = sorted(df['technical_group_code'].unique())
+    # Map technical_group_code → label using only codes present in this df
+    code_to_label = _labels_by_code_for_df(model, df)
+    group_codes   = np.sort(df['technical_group_code'].unique())
+    group_labels  = [code_to_label[int(c)] for c in group_codes]
 
     # Detect NTC cells for gradient coloring
     is_ntc = df['target'].str.lower() == 'ntc'
@@ -734,9 +838,10 @@ def plot_negbinom_xy(
     # Each group gets white → group_color gradient
     group_cmaps = {}
     if show_ntc_gradient:
-        for group_label in group_labels:
-            base_color = color_palette.get(group_label, f'C0')
-            # Create colormap: white (low color value) → group color (high color value)
+        for idx, group_code in enumerate(group_codes):
+            group_code  = int(group_code)
+            group_label = code_to_label[group_code]
+            base_color  = _color_for_label(group_label, fallback_idx=idx, palette=color_palette)
             group_cmaps[group_label] = LinearSegmentedColormap.from_list(
                 f"white_{group_label}",
                 ["white", base_color]
@@ -746,7 +851,10 @@ def plot_negbinom_xy(
     def _plot_one(ax_plot, corrected):
         colorbar_added = False  # Track if colorbar added
 
-        for group_code, group_label in zip(group_codes, group_labels):
+        
+        for idx, group_code in enumerate(group_codes):
+            group_code = int(group_code)
+            group_label = code_to_label[group_code]
             df_group = df[df['technical_group_code'] == group_code].copy()
 
             if corrected and has_technical_fit:
@@ -795,7 +903,7 @@ def plot_negbinom_xy(
                 )
 
                 # Add dummy invisible line for legend label (using base group color)
-                color = color_palette.get(group_label, f'C{group_code}')
+                color = _color_for_label(group_label, fallback_idx=idx, palette=color_palette)
                 ax_plot.plot([], [], color=color, linewidth=2, label=group_label)
 
                 # Add colorbar (once per axis) - use grayscale to show NTC gradient
@@ -812,7 +920,7 @@ def plot_negbinom_xy(
                 x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, y_expr.values, k)
 
                 # Use standard coloring
-                color = color_palette.get(group_label, f'C{group_code}')
+                color = _color_for_label(group_label, fallback_idx=idx, palette=color_palette)
                 ax_plot.plot(np.log2(x_smooth), np.log2(y_smooth), color=color, linewidth=2, label=group_label)
 
         # Trans function overlay (if trans model fitted)
@@ -974,8 +1082,8 @@ def plot_binomial_xy(
         axes = [ax]
 
     # Get technical group labels
-    group_labels = get_technical_group_labels(model)
-    group_codes = sorted(df['technical_group_code'].unique())
+    code_to_label = _labels_by_code_for_df(model, df)
+    group_codes   = np.sort(df['technical_group_code'].unique())
 
     # Detect NTC cells for gradient coloring
     is_ntc = df['target'].str.lower() == 'ntc'
@@ -995,8 +1103,11 @@ def plot_binomial_xy(
     # Plot function
     def _plot_one(ax_plot, corrected):
         colorbar_added = False  # Track if colorbar added
-
-        for group_code, group_label in zip(group_codes, group_labels):
+        
+        for idx, group_code in enumerate(group_codes):
+            group_code = int(group_code)
+            group_label = code_to_label[group_code]
+            color = _color_for_label(group_label, fallback_idx=idx, palette=color_palette)
             df_group = df[df['technical_group_code'] == group_code].copy()
 
             if len(df_group) == 0:
@@ -1054,7 +1165,6 @@ def plot_binomial_xy(
                 )
 
                 # Add dummy invisible line for legend label (using base group color)
-                color = color_palette.get(group_label, f'C{group_code}')
                 ax_plot.plot([], [], color=color, linewidth=2, label=group_label)
 
                 # Add colorbar (once per axis) - use grayscale to show NTC gradient
@@ -1071,7 +1181,6 @@ def plot_binomial_xy(
                 x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, y_plot, k)
 
                 # Use standard coloring
-                color = color_palette.get(group_label, f'C{group_code}')
                 ax_plot.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2, label=group_label)
 
         # Trans function overlay (if trans model fitted)
@@ -1253,8 +1362,8 @@ def plot_multinomial_xy(
         axes = axes_row  # Shape: (1, K_plot)
 
     # Get technical group labels
-    group_labels = get_technical_group_labels(model)
-    group_codes = sorted(df['technical_group_code'].unique())
+    code_to_label = _labels_by_code_for_df(model, df)
+    group_codes   = np.sort(df['technical_group_code'].unique())
 
     # Plot each non-zero category
     for plot_idx, k in enumerate(non_zero_cats):
@@ -1269,7 +1378,10 @@ def plot_multinomial_xy(
             for col_idx, corrected in enumerate([False, True]):
                 ax = axes[plot_idx, col_idx]
 
-                for group_code, group_label in zip(group_codes, group_labels):
+                for idx, group_code in enumerate(group_codes):
+                    group_code = int(group_code)
+                    group_label = code_to_label[group_code]
+                    color = _color_for_label(group_label, fallback_idx=idx, palette=color_palette)
                     df_group = df[df['technical_group_code'] == group_code].copy()
 
                     if len(df_group) == 0:
@@ -1280,36 +1392,26 @@ def plot_multinomial_xy(
                     props_group = props_raw[group_mask, :]  # Shape: (n_cells_in_group, K)
 
                     if corrected and has_technical_fit:
-                        # Apply technical correction on logit scale
-                        epsilon = 1e-6
-                        props_clipped = np.clip(props_group, epsilon, 1 - epsilon)
-
-                        # Convert to logits
-                        logits = np.log(props_clipped)  # Log of each proportion
-
-                        # Get alpha_y_add for this group and feature
+                        # ---- Compute zero-category mask from the data used on THIS axis ----
+                        # counts_3d was already subset by valid_mask above
+                        zero_cat_mask = (counts_filtered.sum(axis=0) == 0)  # (K,)
+                        
+                        # ---- Per-sample correction, averaged in probability space ----
                         alpha_y_add = modality.alpha_y_prefit_add
-                        if alpha_y_add.ndim == 4:
-                            # [S, C, T, K] - take mean over samples
-                            alpha_correction = alpha_y_add[:, group_code, feature_idx, :].mean(axis=0)  # [K]
-                        elif alpha_y_add.ndim == 3:
-                            # [C, T, K]
-                            alpha_correction = alpha_y_add[group_code, feature_idx, :]  # [K]
-                        else:
-                            raise ValueError(f"Unexpected alpha_y_add shape: {alpha_y_add.shape}")
-
-                        # Convert to numpy if tensor
-                        if hasattr(alpha_correction, 'detach'):
-                            alpha_correction = alpha_correction.detach().cpu().numpy()
-
-                        # Apply correction
-                        logits_corrected = logits - alpha_correction  # Broadcast: (n_cells, K) - (K,)
-
-                        # Softmax to get corrected proportions
-                        logits_max = logits_corrected.max(axis=1, keepdims=True)
-                        exp_logits = np.exp(logits_corrected - logits_max)
-                        props_corrected = exp_logits / exp_logits.sum(axis=1, keepdims=True)
-
+                        # Align indices explicitly to avoid accidental reindexing issues
+                        df = df.reset_index(drop=True)
+                        props_raw = np.asarray(props_raw)  # (n_cells_filtered, K), same length as df now
+                        group_mask = (df['technical_group_code'] == group_code).values
+                        props_group = props_raw[group_mask, :]  # (n_group_cells, K)
+                        
+                        props_corrected = _multinomial_correct_mean_probs(
+                            props_group=props_group,
+                            alpha_y_add=alpha_y_add,
+                            group_code=group_code,
+                            feature_idx=feature_idx,
+                            zero_cat_mask=zero_cat_mask
+                        )  # (n_group_cells, K)
+                        
                         y_data = props_corrected[:, k]
                     else:
                         y_data = df_group[f'cat_{k}'].values
@@ -1319,7 +1421,6 @@ def plot_multinomial_xy(
                     x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, y_data, knn)
 
                     # Plot
-                    color = color_palette.get(group_label, f'C{group_code}')
                     ax.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2,
                            label=group_label if plot_idx == 0 else None)
 
@@ -1334,7 +1435,10 @@ def plot_multinomial_xy(
             ax = axes[0, plot_idx]
             corrected = (show_correction == 'corrected')
 
-            for group_code, group_label in zip(group_codes, group_labels):
+            for idx, group_code in enumerate(group_codes):
+                group_code = int(group_code)
+                group_label = code_to_label[group_code]
+                color = _color_for_label(group_label, fallback_idx=idx, palette=color_palette)
                 df_group = df[df['technical_group_code'] == group_code].copy()
 
                 if len(df_group) == 0:
@@ -1345,34 +1449,26 @@ def plot_multinomial_xy(
                 props_group = props_raw[group_mask, :]  # Shape: (n_cells_in_group, K)
 
                 if corrected and has_technical_fit:
-                    # Apply technical correction on logit scale
-                    epsilon = 1e-6
-                    props_clipped = np.clip(props_group, epsilon, 1 - epsilon)
-
-                    # Convert to logits
-                    logits = np.log(props_clipped)
-
-                    # Get alpha_y_add for this group and feature
+                    # ---- Compute zero-category mask from the data used on THIS axis ----
+                    # counts_3d was already subset by valid_mask above
+                    zero_cat_mask = (counts_filtered.sum(axis=0) == 0)  # (K,)
+                    
+                    # ---- Per-sample correction, averaged in probability space ----
                     alpha_y_add = modality.alpha_y_prefit_add
-                    if alpha_y_add.ndim == 4:
-                        alpha_correction = alpha_y_add[:, group_code, feature_idx, :].mean(axis=0)  # [K]
-                    elif alpha_y_add.ndim == 3:
-                        alpha_correction = alpha_y_add[group_code, feature_idx, :]  # [K]
-                    else:
-                        raise ValueError(f"Unexpected alpha_y_add shape: {alpha_y_add.shape}")
-
-                    # Convert to numpy if tensor
-                    if hasattr(alpha_correction, 'detach'):
-                        alpha_correction = alpha_correction.detach().cpu().numpy()
-
-                    # Apply correction
-                    logits_corrected = logits - alpha_correction
-
-                    # Softmax to get corrected proportions
-                    logits_max = logits_corrected.max(axis=1, keepdims=True)
-                    exp_logits = np.exp(logits_corrected - logits_max)
-                    props_corrected = exp_logits / exp_logits.sum(axis=1, keepdims=True)
-
+                    # Align indices explicitly to avoid accidental reindexing issues
+                    df = df.reset_index(drop=True)
+                    props_raw = np.asarray(props_raw)  # (n_cells_filtered, K), same length as df now
+                    group_mask = (df['technical_group_code'] == group_code).values
+                    props_group = props_raw[group_mask, :]  # (n_group_cells, K)
+                    
+                    props_corrected = _multinomial_correct_mean_probs(
+                        props_group=props_group,
+                        alpha_y_add=alpha_y_add,
+                        group_code=group_code,
+                        feature_idx=feature_idx,
+                        zero_cat_mask=zero_cat_mask
+                    )  # (n_group_cells, K)
+                    
                     y_data = props_corrected[:, k]
                 else:
                     y_data = df_group[f'cat_{k}'].values
@@ -1382,7 +1478,6 @@ def plot_multinomial_xy(
                 x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, y_data, knn)
 
                 # Plot
-                color = color_palette.get(group_label, f'C{group_code}')
                 ax.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2,
                        label=group_label if plot_idx == 0 else None)
 
@@ -1493,8 +1588,8 @@ def plot_normal_xy(
         axes = [ax]
 
     # Get technical group labels
-    group_labels = get_technical_group_labels(model)
-    group_codes = sorted(df['technical_group_code'].unique())
+    code_to_label = _labels_by_code_for_df(model, df)
+    group_codes   = np.sort(df['technical_group_code'].unique())
 
     # Detect NTC cells for gradient coloring
     is_ntc = df['target'].str.lower() == 'ntc'
@@ -1514,8 +1609,11 @@ def plot_normal_xy(
     # Plot function
     def _plot_one(ax_plot, corrected):
         colorbar_added = False  # Track if colorbar added
-
-        for group_code, group_label in zip(group_codes, group_labels):
+        
+        for idx, group_code in enumerate(group_codes):
+            group_code = int(group_code)
+            group_label = code_to_label[group_code]
+            color = _color_for_label(group_label, fallback_idx=idx, palette=color_palette)
             df_group = df[df['technical_group_code'] == group_code].copy()
 
             if len(df_group) == 0:
@@ -1560,7 +1658,6 @@ def plot_normal_xy(
                 )
 
                 # Add dummy invisible line for legend label (using base group color)
-                color = color_palette.get(group_label, f'C{group_code}')
                 ax_plot.plot([], [], color=color, linewidth=2, label=group_label)
 
                 # Add colorbar (once per axis) - use grayscale to show NTC gradient
@@ -1577,7 +1674,6 @@ def plot_normal_xy(
                 x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, y_plot, k)
 
                 # Use standard coloring
-                color = color_palette.get(group_label, f'C{group_code}')
                 ax_plot.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2, label=group_label)
 
         # Trans function overlay (if trans model fitted)
@@ -1695,8 +1791,8 @@ def plot_mvnormal_xy(
     df = df[valid].copy()
 
     # Get technical group labels
-    group_labels = get_technical_group_labels(model)
-    group_codes = sorted(df['technical_group_code'].unique())
+    code_to_label = _labels_by_code_for_df(model, df)
+    group_codes   = np.sort(df['technical_group_code'].unique())
 
     # Plot each dimension
     for d in range(D):
@@ -1706,7 +1802,10 @@ def plot_mvnormal_xy(
         for row, corrected in zip(rows, [False, True] if len(rows) == 2 else [show_correction == 'corrected']):
             ax = axes[row, d]
 
-            for group_code, group_label in zip(group_codes, group_labels):
+            for idx, group_code in enumerate(group_codes):
+                group_code = int(group_code)
+                group_label = code_to_label[group_code]
+                color = _color_for_label(group_label, fallback_idx=idx, palette=color_palette)
                 df_group = df[df['technical_group_code'] == group_code].copy()
 
                 if len(df_group) == 0:
@@ -1733,7 +1832,6 @@ def plot_mvnormal_xy(
                 x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, y_plot, k)
 
                 # Plot
-                color = color_palette.get(group_label, f'C{group_code}')
                 ax.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2, label=group_label if d == 0 else None)
 
             # Trans function overlay (if trans model fitted)
@@ -1983,6 +2081,11 @@ def _plot_multinomial_multifeature(
                     axes[feat_i, col_idx].axis('off')
             continue
 
+        # Map technical_group_code → label for THIS feature (after all filters)
+        code_to_label = _labels_by_code_for_df(model, df)
+        group_codes   = np.sort(df['technical_group_code'].unique())
+        group_labels  = [code_to_label[int(c)] for c in group_codes]
+
         # Plot each non-zero category
         for cat_plot_idx, k in enumerate(non_zero_cats):
             # Get label for this category
@@ -1997,7 +2100,11 @@ def _plot_multinomial_multifeature(
                 for col_idx, corrected in enumerate([False, True]):
                     ax = axes[row, col_idx]
 
-                    for group_code, group_label in zip(group_codes, group_labels):
+        
+                    for idx, group_code in enumerate(group_codes):
+                        group_code = int(group_code)
+                        group_label = code_to_label[group_code]
+                        color = _color_for_label(group_label, fallback_idx=idx, palette=color_palette)
                         df_group = df[df['technical_group_code'] == group_code].copy()
 
                         if len(df_group) == 0:
@@ -2008,29 +2115,25 @@ def _plot_multinomial_multifeature(
                         props_group = props_raw[group_mask, :]
 
                         if corrected and has_technical_fit:
-                            # Apply logit-scale correction
-                            epsilon = 1e-6
-                            props_clipped = np.clip(props_group, epsilon, 1 - epsilon)
-                            logits = np.log(props_clipped)
-
-                            # Get correction
+                            # ---- Compute zero-category mask from the data used on THIS axis ----
+                            zero_cat_mask = (counts_filtered.sum(axis=0) == 0)  # (K,)
+                            
+                            # ---- Per-sample correction, averaged in probability space ----
                             alpha_y_add = modality.alpha_y_prefit_add
-                            if alpha_y_add.ndim == 4:
-                                alpha_correction = alpha_y_add[:, group_code, feat_idx, :].mean(axis=0)
-                            elif alpha_y_add.ndim == 3:
-                                alpha_correction = alpha_y_add[group_code, feat_idx, :]
-                            else:
-                                raise ValueError(f"Unexpected alpha_y_add shape: {alpha_y_add.shape}")
-
-                            if hasattr(alpha_correction, 'detach'):
-                                alpha_correction = alpha_correction.detach().cpu().numpy()
-
-                            # Apply correction and softmax
-                            logits_corrected = logits - alpha_correction
-                            logits_max = logits_corrected.max(axis=1, keepdims=True)
-                            exp_logits = np.exp(logits_corrected - logits_max)
-                            props_corrected = exp_logits / exp_logits.sum(axis=1, keepdims=True)
-
+                            # Align indices explicitly to avoid accidental reindexing issues
+                            df = df.reset_index(drop=True)
+                            props_raw = np.asarray(props_raw)  # (n_cells_filtered, K), same length as df now
+                            group_mask = (df['technical_group_code'] == group_code).values
+                            props_group = props_raw[group_mask, :]  # (n_group_cells, K)
+                            
+                            props_corrected = _multinomial_correct_mean_probs(
+                                props_group=props_group,
+                                alpha_y_add=alpha_y_add,
+                                group_code=group_code,
+                                feature_idx=feat_idx,
+                                zero_cat_mask=zero_cat_mask
+                            )  # (n_group_cells, K)
+                            
                             y_data = props_corrected[:, k]
                         else:
                             y_data = df_group[f'cat_{k}'].values
@@ -2040,7 +2143,6 @@ def _plot_multinomial_multifeature(
                         x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, y_data, knn)
 
                         # Plot
-                        color = color_palette.get(group_label, f'C{group_code}')
                         ax.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2,
                                label=group_label if cat_plot_idx == 0 and feat_i == 0 else None)
 
@@ -2054,8 +2156,11 @@ def _plot_multinomial_multifeature(
                 # Row: feat_i, Column: cat_plot_idx
                 ax = axes[feat_i, cat_plot_idx]
                 corrected = (show_correction == 'corrected')
-
-                for group_code, group_label in zip(group_codes, group_labels):
+        
+                for idx, group_code in enumerate(group_codes):
+                    group_code = int(group_code)
+                    group_label = code_to_label[group_code]
+                    color = _color_for_label(group_label, fallback_idx=idx, palette=color_palette)
                     df_group = df[df['technical_group_code'] == group_code].copy()
 
                     if len(df_group) == 0:
@@ -2066,29 +2171,25 @@ def _plot_multinomial_multifeature(
                     props_group = props_raw[group_mask, :]
 
                     if corrected and has_technical_fit:
-                        # Apply logit-scale correction
-                        epsilon = 1e-6
-                        props_clipped = np.clip(props_group, epsilon, 1 - epsilon)
-                        logits = np.log(props_clipped)
-
-                        # Get correction
+                        # ---- Compute zero-category mask from the data used on THIS axis ----
+                        zero_cat_mask = (counts_filtered.sum(axis=0) == 0)  # (K,)
+                        
+                        # ---- Per-sample correction, averaged in probability space ----
                         alpha_y_add = modality.alpha_y_prefit_add
-                        if alpha_y_add.ndim == 4:
-                            alpha_correction = alpha_y_add[:, group_code, feat_idx, :].mean(axis=0)
-                        elif alpha_y_add.ndim == 3:
-                            alpha_correction = alpha_y_add[group_code, feat_idx, :]
-                        else:
-                            raise ValueError(f"Unexpected alpha_y_add shape: {alpha_y_add.shape}")
-
-                        if hasattr(alpha_correction, 'detach'):
-                            alpha_correction = alpha_correction.detach().cpu().numpy()
-
-                        # Apply correction and softmax
-                        logits_corrected = logits - alpha_correction
-                        logits_max = logits_corrected.max(axis=1, keepdims=True)
-                        exp_logits = np.exp(logits_corrected - logits_max)
-                        props_corrected = exp_logits / exp_logits.sum(axis=1, keepdims=True)
-
+                        # Align indices explicitly to avoid accidental reindexing issues
+                        df = df.reset_index(drop=True)
+                        props_raw = np.asarray(props_raw)  # (n_cells_filtered, K), same length as df now
+                        group_mask = (df['technical_group_code'] == group_code).values
+                        props_group = props_raw[group_mask, :]  # (n_group_cells, K)
+                        
+                        props_corrected = _multinomial_correct_mean_probs(
+                            props_group=props_group,
+                            alpha_y_add=alpha_y_add,
+                            group_code=group_code,
+                            feature_idx=feat_idx,
+                            zero_cat_mask=zero_cat_mask
+                        )  # (n_group_cells, K)
+                        
                         y_data = props_corrected[:, k]
                     else:
                         y_data = df_group[f'cat_{k}'].values
@@ -2098,7 +2199,6 @@ def _plot_multinomial_multifeature(
                     x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, y_data, knn)
 
                     # Plot
-                    color = color_palette.get(group_label, f'C{group_code}')
                     ax.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2,
                            label=group_label if cat_plot_idx == 0 and feat_i == 0 else None)
 

@@ -135,7 +135,7 @@ class TransFitter:
         # Now enter the trans_plate (T dimension)
         with trans_plate:
             
-            weight = o_y / (o_y + (beta_o_beta_tensor / beta_o_alpha_tensor))
+            weight = o_y / (o_y + (beta_o_beta_tensor / beta_o_alpha_tensor)).clamp_min(epsilon_tensor)
             Amean_adjusted = ((1 - weight) * Amean_tensor) + (weight * Vmax_mean_tensor) + epsilon_tensor
             A = pyro.sample("A", dist.Exponential(1 / Amean_adjusted))
 
@@ -175,7 +175,6 @@ class TransFitter:
         
                 Vmax_a = pyro.sample("Vmax_a", dist.Gamma((Vmax_mean_tensor ** 2) / (Vmax_sigma ** 2), Vmax_mean_tensor / (Vmax_sigma ** 2)))
                 K_a = pyro.sample("K_a", dist.Gamma(((K_max_tensor/2) ** 2) / (K_sigma ** 2), (K_max_tensor/2) / (K_sigma ** 2)))
-                Hill_func_a = Hill_based_positive(x_true.unsqueeze(-1), Vmax=Vmax_a, A=0, K=K_a, n=n_a, epsilon=epsilon_tensor)
                 # Sample all required parameters (same for all hill types)            
                 if function_type in ['additive_hill', 'nested_hill']:
                     beta = pyro.sample("beta", alpha_dist(temperature=temperature, probs=p_n_tensor))
@@ -610,6 +609,17 @@ class TransFitter:
 
         Vmax_mean_tensor = torch.max(torch.stack([torch.mean(y_obs_factored[guides_tensor == g, :], dim=0) for g in torch.unique(guides_tensor)]), dim=0)[0]
         Amean_tensor = torch.min(torch.stack([torch.mean(y_obs_factored[guides_tensor == g, :], dim=0) for g in torch.unique(guides_tensor)]), dim=0)[0]
+
+        Amean_tensor = torch.where(
+            torch.isfinite(Amean_tensor),
+            Amean_tensor.clamp_min(epsilon_tensor),
+            torch.full_like(Amean_tensor, 1.0)
+        )
+        Vmax_mean_tensor = torch.where(
+            torch.isfinite(Vmax_mean_tensor),
+            Vmax_mean_tensor.clamp_min(epsilon_tensor),
+            torch.full_like(Vmax_mean_tensor, 1.0)
+        )
 
         assert self.model.x_true.device == self.model.device
         if alpha_y_prefit is not None:

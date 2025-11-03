@@ -105,7 +105,7 @@ class TechnicalFitter:
             with pyro.plate("c_plate_multi", C - 1, dim=-3), \
                  pyro.plate("f_plate_multi", T, dim=-2), \
                  pyro.plate("k_plate", K, dim=-1):
-                alpha_logits_y = pyro.sample("alpha_logits_y", dist.StudentT(3, 0.0, 20.0))
+                alpha_logits_y = pyro.sample("alpha_logits_y", dist.StudentT(df=self._t(3), loc=self._t(0.0), scale=self._t(20.0)))
         
             # Force α to 0 where category is structurally absent
             alpha_logits_y = alpha_logits_y.masked_fill(zero_cat_mask.unsqueeze(0), 0.0)
@@ -992,15 +992,19 @@ class TechnicalFitter:
 
     
         if distribution == "multinomial":
-            # additive logits only
-            alpha_logits_fit = posterior_samples["alpha_logits_y"]       # [S?, C-1, T_fit, K]
-            alpha_add_full   = _reconstruct_full_3d(alpha_logits_fit, baseline_value=0.0, fit_mask_bool=fit_mask)
-
-            # store under consistent keys
-            posterior_samples["alpha_y_add"]   = alpha_add_full          # [S?, C, T_all, K]
-            posterior_samples["alpha_y_mult"]  = None
-            posterior_samples["alpha_y"]       = alpha_add_full          # canonical
-
+            # Use the logits that actually entered the likelihood
+            alpha_logits_fit = (
+                posterior_samples.get("alpha_logits_y_centered",
+                                      posterior_samples["alpha_logits_y"])
+            )  # [S?, C-1, T_fit, K]
+            alpha_add_full = _reconstruct_full_3d(
+                alpha_logits_fit, baseline_value=0.0, fit_mask_bool=fit_mask
+            )
+        
+            # Store consistently
+            posterior_samples["alpha_y_add"]  = alpha_add_full          # [S?, C, T_all, K]
+            posterior_samples["alpha_y_mult"] = None
+            posterior_samples["alpha_y"]      = alpha_add_full
         else:
             # existing path for 2D α
             alpha_y_mult_fit = posterior_samples["alpha_y"]
