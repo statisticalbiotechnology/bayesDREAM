@@ -719,7 +719,7 @@ class TechnicalFitter:
         
         def init_loc_fn(site):
             name = site["name"]
-        
+
             # Derive local shapes from the actual tensors used in the model
             if y_obs_ntc_tensor.dim() == 3:
                 T_local = int(y_obs_ntc_tensor.shape[1])
@@ -727,32 +727,81 @@ class TechnicalFitter:
             else:
                 T_local = int(y_obs_ntc_tensor.shape[1])
                 K_local = None
-        
+
             # -------------------------
             # Multinomial-only inits
             # -------------------------
             if distribution == 'multinomial':
-                # Robust init for Dirichlet (simplex)
+                # Robust init for Dirichlet (simplex) - use reference group empirical proportions
                 if name == "probs_baseline_raw":
                     # Use the site's own shapes to be robust to any future plate changes
                     T_local = int(site["fn"].batch_shape[0])
                     K_local = int(site["fn"].event_shape[0])
-        
-                    # Strictly interior uniform, slightly away from the boundary
+
+                    # Compute empirical proportions from reference group (group 0)
+                    baseline_mask = (groups_ntc_tensor == 0).cpu().numpy()
+                    if baseline_mask.sum() > 0:
+                        # Get reference group counts: [N_ref, T, K]
+                        y_ref = y_obs_ntc_tensor[baseline_mask, :, :].cpu().numpy()
+                        # Sum across cells: [T, K]
+                        total_counts_ref = y_ref.sum(axis=0) + 1.0  # Add pseudocount
+                        # Compute proportions
+                        p_empirical = total_counts_ref / total_counts_ref.sum(axis=1, keepdims=True)
+                        # Convert to torch
+                        p = torch.tensor(p_empirical, dtype=torch.float32, device=self.model.device)
+                    else:
+                        # Fallback to uniform if no reference group
+                        p = torch.full((T_local, K_local), 1.0 / K_local,
+                                       dtype=torch.float32, device=self.model.device)
+
+                    # Ensure strictly interior (move away from boundaries)
                     eps = 5e-3
-                    p = torch.full((T_local, K_local), 1.0 / K_local,
-                                   dtype=torch.float32, device=self.model.device)
                     p = (1.0 - K_local * eps) * p + eps
                     p = p / p.sum(dim=-1, keepdim=True)
-        
+
                     assert torch.isfinite(p).all(), "Dirichlet init produced non-finite entries"
                     assert (p > 0).all() and (p < 1).all(), "Dirichlet init not strictly interior"
                     return p
-        
+
                 if name == "alpha_logits_y":
-                    # Usually has batch_shape [C-1, T_fit, K]; zeros are a safe, centered start
-                    shape = site["fn"].batch_shape
-                    return torch.zeros(shape, dtype=torch.float32, device=self.model.device)
+                    # Initialize with logit-scale differences between groups vs reference
+                    shape = site["fn"].batch_shape  # [C-1, T_fit, K]
+                    if len(shape) != 3:
+                        # Fallback to zeros if unexpected shape
+                        return torch.zeros(shape, dtype=torch.float32, device=self.model.device)
+
+                    Cminus1, T_fit_local, K_local = shape
+
+                    # Compute empirical proportions per group
+                    group_codes_np = groups_ntc_tensor.cpu().numpy()
+                    y_obs_np = y_obs_ntc_tensor.cpu().numpy()  # [N, T, K]
+
+                    # Reference group (group 0) proportions
+                    ref_mask = (group_codes_np == 0)
+                    if ref_mask.sum() > 0:
+                        ref_counts = y_obs_np[ref_mask, :, :].sum(axis=0) + 0.5  # [T, K] with pseudocount
+                        ref_props = ref_counts / ref_counts.sum(axis=1, keepdims=True)
+                    else:
+                        # Fallback uniform
+                        ref_props = np.ones((T_fit_local, K_local)) / K_local
+
+                    # Initialize alpha for each non-reference group
+                    alpha_init = np.zeros((Cminus1, T_fit_local, K_local), dtype=np.float32)
+
+                    non_ref_groups = sorted(set(group_codes_np) - {0})
+                    for idx, g in enumerate(non_ref_groups[:Cminus1]):  # Ensure we don't exceed C-1
+                        group_mask = (group_codes_np == g)
+                        if group_mask.sum() > 0:
+                            group_counts = y_obs_np[group_mask, :, :].sum(axis=0) + 0.5  # [T, K]
+                            group_props = group_counts / group_counts.sum(axis=1, keepdims=True)
+
+                            # Logit-scale difference: log(P_group / P_ref)
+                            epsilon = 1e-6
+                            ref_clipped = np.clip(ref_props, epsilon, 1 - epsilon)
+                            group_clipped = np.clip(group_props, epsilon, 1 - epsilon)
+                            alpha_init[idx, :, :] = np.log(group_clipped / ref_clipped)
+
+                    return torch.tensor(alpha_init, dtype=torch.float32, device=self.model.device)
         
             # -------------------------
             # Other distributions — unchanged
