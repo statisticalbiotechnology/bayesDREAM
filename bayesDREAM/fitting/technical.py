@@ -229,16 +229,25 @@ class TechnicalFitter:
     
         elif distribution == 'binomial':
             # Empirical-Bayes Beta with bounded concentration (stable when denom >> counts)
-            y_sum  = y_obs_ntc_tensor.sum(dim=0).float()    # [T]
-            den_sum = denominator_ntc_tensor.sum(dim=0).float()  # [T]
+            # Use reference group (group 0) only for more accurate baseline
+            ref_mask = (groups_ntc_tensor == 0)
+
+            if ref_mask.sum() > 0:
+                # Compute from reference group only
+                y_sum_ref  = y_obs_ntc_tensor[ref_mask, :].sum(dim=0).float()    # [T]
+                den_sum_ref = denominator_ntc_tensor[ref_mask, :].sum(dim=0).float()  # [T]
+            else:
+                # Fallback to all data if no reference group
+                y_sum_ref  = y_obs_ntc_tensor.sum(dim=0).float()    # [T]
+                den_sum_ref = denominator_ntc_tensor.sum(dim=0).float()  # [T]
 
             # Smooth p-hat to keep it off 0/1 even if den_sum==0
-            p_hat = (y_sum + 0.5) / (den_sum + 1.0)         # [T] in (0,1)
+            p_hat = (y_sum_ref + 0.5) / (den_sum_ref + 1.0)         # [T] in (0,1)
             p_hat = torch.clamp(p_hat, 1e-6, 1 - 1e-6)
 
             # Cap effective sample size: informative but not razor-sharp
             # tune these if needed (e.g., 20..100)
-            kappa = torch.clamp(den_sum, min=20.0, max=200.0)
+            kappa = torch.clamp(den_sum_ref, min=20.0, max=200.0)
 
             # Tiny floor to avoid exactly 0 concentration parameters
             a = p_hat * kappa + 1e-3
@@ -804,7 +813,7 @@ class TechnicalFitter:
                     return torch.tensor(alpha_init, dtype=torch.float32, device=self.model.device)
         
             # -------------------------
-            # Other distributions — unchanged
+            # Other distributions — with binomial and negbinom inits
             # -------------------------
             if name == "log2_alpha_y":
                 if distribution == 'negbinom':
@@ -817,6 +826,49 @@ class TechnicalFitter:
                         init_values.append(np.log2(group_mean / baseline_mean))
                     init_arr = np.stack(init_values) if len(init_values) else np.zeros((0, T_local), dtype=np.float32)
                     return torch.tensor(init_arr, dtype=torch.float32, device=self.model.device)
+
+                elif distribution == 'binomial':
+                    # Initialize with logit-scale differences between groups (on logit scale)
+                    group_codes_np = groups_ntc_tensor.cpu().numpy()
+                    y_obs_np = y_obs_ntc_tensor.cpu().numpy()  # [N, T]
+                    denom_np = denominator_ntc_tensor.cpu().numpy()  # [N, T]
+
+                    # Compute PSI per group
+                    epsilon = 1e-6
+
+                    # Reference group (group 0) PSI
+                    ref_mask = (group_codes_np == 0)
+                    if ref_mask.sum() > 0:
+                        ref_numer = y_obs_np[ref_mask, :].sum(axis=0) + 0.5  # [T] with pseudocount
+                        ref_denom = denom_np[ref_mask, :].sum(axis=0) + 1.0   # [T] with pseudocount
+                        ref_psi = np.clip(ref_numer / ref_denom, epsilon, 1 - epsilon)
+                    else:
+                        # Fallback uniform
+                        ref_psi = np.ones(T_local) * 0.5
+
+                    # Compute logit of reference PSI
+                    ref_logit = np.log(ref_psi / (1 - ref_psi))
+
+                    # Initialize alpha for each non-reference group
+                    init_values = []
+                    non_ref_groups = sorted(set(group_codes_np) - {0})
+
+                    for g in non_ref_groups[:C-1]:  # Ensure we don't exceed C-1
+                        group_mask = (group_codes_np == g)
+                        if group_mask.sum() > 0:
+                            group_numer = y_obs_np[group_mask, :].sum(axis=0) + 0.5  # [T]
+                            group_denom = denom_np[group_mask, :].sum(axis=0) + 1.0   # [T]
+                            group_psi = np.clip(group_numer / group_denom, epsilon, 1 - epsilon)
+
+                            # Logit-scale difference: logit(PSI_group) - logit(PSI_ref)
+                            group_logit = np.log(group_psi / (1 - group_psi))
+                            init_values.append(group_logit - ref_logit)
+                        else:
+                            init_values.append(np.zeros(T_local, dtype=np.float32))
+
+                    init_arr = np.stack(init_values) if len(init_values) else np.zeros((0, T_local), dtype=np.float32)
+                    return torch.tensor(init_arr, dtype=torch.float32, device=self.model.device)
+
                 else:
                     return torch.zeros((C - 1, T_local), dtype=torch.float32, device=self.model.device)
         
