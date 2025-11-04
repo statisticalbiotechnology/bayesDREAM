@@ -143,7 +143,7 @@ class TechnicalFitter:
                         "log2_alpha_y",
                         dist.StudentT(df=self._t(3), loc=self._t(0.0), scale=self._t(20.0))
                     )
-                    alpha_y_mul = pyro.deterministic("alpha_y_mul", _t(2.0) ** log2_alpha_y)
+                    alpha_y_mul = pyro.deterministic("alpha_y_mul", self._t(2.0) ** log2_alpha_y)
                     delta_y_add = pyro.deterministic("delta_y_add", log2_alpha_y)
 
             if alpha_y_mul.ndim == 2:
