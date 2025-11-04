@@ -2108,22 +2108,15 @@ def _plot_multinomial_multifeature(
                 'target': model.meta['target'].values[valid_mask]
             })
 
+        # Keep raw counts for binning (don't compute proportions per-cell)
         counts_filtered = counts_3d[valid_mask, :]
         total_filtered = total_counts[valid_mask]
-
-        # Compute raw proportions
-        with np.errstate(divide='ignore', invalid='ignore'):
-            props_raw = np.where(total_filtered[:, None] > 0,
-                                 counts_filtered / total_filtered[:, None],
-                                 1.0 / K)
-
-        for k in range(K):
-            df[f'cat_{k}'] = props_raw[:, k]
 
         # Filter valid x_true
         valid = df['x_true'] > 0
         df = df[valid].copy()
-        props_raw = props_raw[valid, :]
+        counts_filtered = counts_filtered[valid, :]
+        total_filtered = total_filtered[valid]
 
         if len(df) == 0:
             # Hide axes for this feature (no data after filtering)
@@ -2160,44 +2153,47 @@ def _plot_multinomial_multifeature(
                         group_code = int(group_code)
                         group_label = code_to_label[group_code]
                         color = _color_for_label(group_label, fallback_idx=idx, palette=color_palette)
-                        df_group = df[df['technical_group_code'] == group_code].copy()
 
-                        if len(df_group) == 0:
+                        # Get data for this group
+                        group_mask = df['technical_group_code'] == group_code
+                        if group_mask.sum() == 0:
                             continue
 
-                        # Get proportions for this group
-                        group_mask = df['technical_group_code'] == group_code
-                        props_group = props_raw[group_mask, :]
+                        x_group = df.loc[group_mask, 'x_true'].values
+                        counts_group = counts_filtered[group_mask, :]  # (n_cells_group, K)
+                        totals_group = total_filtered[group_mask]      # (n_cells_group,)
+
+                        # Bin counts using k-NN
+                        knn = _knn_k(len(x_group), window)
+                        x_smooth, counts_binned, totals_binned = _smooth_knn_counts(
+                            x_group, counts_group, totals_group, knn
+                        )  # counts_binned: (n_bins, K), totals_binned: (n_bins,)
+
+                        # Compute proportions from binned counts
+                        epsilon = 1e-10
+                        with np.errstate(divide='ignore', invalid='ignore'):
+                            props_binned = np.where(totals_binned[:, None] > epsilon,
+                                                    counts_binned / totals_binned[:, None],
+                                                    1.0 / K)
 
                         if corrected and has_technical_fit:
-                            # ---- Compute zero-category mask from the data used on THIS axis ----
+                            # Compute zero-category mask
                             zero_cat_mask = (counts_filtered.sum(axis=0) == 0)  # (K,)
-                            
-                            # ---- Per-sample correction, averaged in probability space ----
+
+                            # Apply correction to binned proportions
                             alpha_y_add = modality.alpha_y_prefit_add
-                            # Align indices explicitly to avoid accidental reindexing issues
-                            df = df.reset_index(drop=True)
-                            props_raw = np.asarray(props_raw)  # (n_cells_filtered, K), same length as df now
-                            group_mask = (df['technical_group_code'] == group_code).values
-                            props_group = props_raw[group_mask, :]  # (n_group_cells, K)
-                            
-                            props_corrected = _multinomial_correct_mean_probs(
-                                props_group=props_group,
+                            props_corrected = _multinomial_correct_binned_probs(
+                                props_binned=props_binned,
                                 alpha_y_add=alpha_y_add,
                                 group_code=group_code,
                                 feature_idx=feat_idx,
                                 zero_cat_mask=zero_cat_mask
-                            )  # (n_group_cells, K)
-                            
-                            y_data = props_corrected[:, k]
+                            )  # (n_bins, K)
+                            y_smooth = props_corrected[:, k]
                         else:
-                            y_data = df_group[f'cat_{k}'].values
+                            y_smooth = props_binned[:, k]
 
-                        # k-NN smoothing
-                        knn = _knn_k(len(df_group), window)
-                        x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, y_data, knn)
-
-                        # Plot
+                        # Plot (no additional smoothing needed - already binned)
                         ax.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2,
                                label=group_label if cat_plot_idx == 0 and feat_i == 0 else None)
 
@@ -2216,44 +2212,47 @@ def _plot_multinomial_multifeature(
                     group_code = int(group_code)
                     group_label = code_to_label[group_code]
                     color = _color_for_label(group_label, fallback_idx=idx, palette=color_palette)
-                    df_group = df[df['technical_group_code'] == group_code].copy()
 
-                    if len(df_group) == 0:
+                    # Get data for this group
+                    group_mask = df['technical_group_code'] == group_code
+                    if group_mask.sum() == 0:
                         continue
 
-                    # Get proportions for this group
-                    group_mask = df['technical_group_code'] == group_code
-                    props_group = props_raw[group_mask, :]
+                    x_group = df.loc[group_mask, 'x_true'].values
+                    counts_group = counts_filtered[group_mask, :]  # (n_cells_group, K)
+                    totals_group = total_filtered[group_mask]      # (n_cells_group,)
+
+                    # Bin counts using k-NN
+                    knn = _knn_k(len(x_group), window)
+                    x_smooth, counts_binned, totals_binned = _smooth_knn_counts(
+                        x_group, counts_group, totals_group, knn
+                    )  # counts_binned: (n_bins, K), totals_binned: (n_bins,)
+
+                    # Compute proportions from binned counts
+                    epsilon = 1e-10
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        props_binned = np.where(totals_binned[:, None] > epsilon,
+                                                counts_binned / totals_binned[:, None],
+                                                1.0 / K)
 
                     if corrected and has_technical_fit:
-                        # ---- Compute zero-category mask from the data used on THIS axis ----
+                        # Compute zero-category mask
                         zero_cat_mask = (counts_filtered.sum(axis=0) == 0)  # (K,)
-                        
-                        # ---- Per-sample correction, averaged in probability space ----
+
+                        # Apply correction to binned proportions
                         alpha_y_add = modality.alpha_y_prefit_add
-                        # Align indices explicitly to avoid accidental reindexing issues
-                        df = df.reset_index(drop=True)
-                        props_raw = np.asarray(props_raw)  # (n_cells_filtered, K), same length as df now
-                        group_mask = (df['technical_group_code'] == group_code).values
-                        props_group = props_raw[group_mask, :]  # (n_group_cells, K)
-                        
-                        props_corrected = _multinomial_correct_mean_probs(
-                            props_group=props_group,
+                        props_corrected = _multinomial_correct_binned_probs(
+                            props_binned=props_binned,
                             alpha_y_add=alpha_y_add,
                             group_code=group_code,
                             feature_idx=feat_idx,
                             zero_cat_mask=zero_cat_mask
-                        )  # (n_group_cells, K)
-                        
-                        y_data = props_corrected[:, k]
+                        )  # (n_bins, K)
+                        y_smooth = props_corrected[:, k]
                     else:
-                        y_data = df_group[f'cat_{k}'].values
+                        y_smooth = props_binned[:, k]
 
-                    # k-NN smoothing
-                    knn = _knn_k(len(df_group), window)
-                    x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, y_data, knn)
-
-                    # Plot
+                    # Plot (no additional smoothing needed - already binned)
                     ax.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2,
                            label=group_label if cat_plot_idx == 0 and feat_i == 0 else None)
 
