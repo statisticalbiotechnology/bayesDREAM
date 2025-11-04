@@ -106,6 +106,73 @@ def _smooth_knn(
         return x_sorted.ravel(), y_hat
 
 
+def _smooth_knn_counts(
+    x: np.ndarray,
+    numerators: np.ndarray,
+    denominators: np.ndarray,
+    k: int
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    k-NN smoothing for count data by binning.
+
+    Aggregates numerators and denominators within k-NN windows,
+    allowing proportion calculation from aggregated counts.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        X values (1D, length n)
+    numerators : np.ndarray
+        Numerator counts (1D for binomial: length n, or 2D for multinomial: n × K)
+    denominators : np.ndarray
+        Denominator totals (1D, length n)
+    k : int
+        Number of nearest neighbors
+
+    Returns
+    -------
+    x_sorted : np.ndarray
+        Sorted x values (length n)
+    aggregated_num : np.ndarray
+        Aggregated numerators (1D or 2D matching input shape)
+    aggregated_denom : np.ndarray
+        Aggregated denominators (1D, length n)
+    """
+    if len(x) == 0:
+        return np.array([]), np.array([]), np.array([])
+
+    order = np.argsort(x)
+    x_sorted = np.asarray(x)[order].reshape(-1, 1)
+
+    k = max(1, min(k, len(x_sorted)))
+    tree = cKDTree(x_sorted)
+
+    # Handle 1D (binomial) vs 2D (multinomial) numerators
+    is_2d = numerators.ndim == 2
+    if is_2d:
+        num_sorted = np.asarray(numerators)[order, :]  # (n, K)
+        K = num_sorted.shape[1]
+        aggregated_num = np.zeros((len(x_sorted), K), dtype=float)
+    else:
+        num_sorted = np.asarray(numerators)[order]  # (n,)
+        aggregated_num = np.zeros(len(x_sorted), dtype=float)
+
+    denom_sorted = np.asarray(denominators)[order]
+    aggregated_denom = np.zeros(len(x_sorted), dtype=float)
+
+    for i in range(len(x_sorted)):
+        _, idx = tree.query(x_sorted[i], k=k)
+
+        if is_2d:
+            aggregated_num[i, :] = np.sum(num_sorted[idx, :], axis=0)
+        else:
+            aggregated_num[i] = np.sum(num_sorted[idx])
+
+        aggregated_denom[i] = np.sum(denom_sorted[idx])
+
+    return x_sorted.ravel(), aggregated_num, aggregated_denom
+
+
 def _to_2d(a):
     """
     Convert input to 2D numpy array.
@@ -309,26 +376,41 @@ def _to_scalar(val):
     # Already scalar
     return float(val)
 
-def _multinomial_correct_mean_probs(
-    props_group: np.ndarray,          # (n, K) proportions for this group
+def _multinomial_correct_binned_probs(
+    props_binned: np.ndarray,         # (n_bins, K) proportions from aggregated counts
     alpha_y_add,                      # [S, C, T, K] or [C, T, K]
     group_code: int,
     feature_idx: int,
     zero_cat_mask: np.ndarray         # (K,) True where category is globally zero
 ) -> np.ndarray:
     """
-    Apply multinomial technical correction the *same way as the model*:
-    For each posterior sample s: softmax(log(P) - alpha_s), then average across s.
-    Enforces a hard zero mask and renormalizes.
+    Apply multinomial technical correction to binned proportions.
+
+    For each bin: softmax(log(P) - alpha_s) for each posterior sample s,
+    then average across s.
+
+    Parameters
+    ----------
+    props_binned : np.ndarray
+        Proportions computed from aggregated counts in k-NN bins (n_bins, K)
+    alpha_y_add : torch.Tensor or np.ndarray
+        Technical correction parameters [S, C, T, K] or [C, T, K]
+    group_code : int
+        Technical group code for this data
+    feature_idx : int
+        Feature index in alpha array
+    zero_cat_mask : np.ndarray
+        Boolean mask (K,) indicating globally absent categories
 
     Returns
     -------
-    (n, K) corrected proportions
+    np.ndarray
+        Corrected proportions (n_bins, K)
     """
     epsilon = 1e-6
     # Clip and log
-    P = np.clip(props_group, epsilon, 1 - epsilon)   # (n, K)
-    logP = np.log(P)                                 # (n, K)
+    P = np.clip(props_binned, epsilon, 1 - epsilon)   # (n_bins, K)
+    logP = np.log(P)                                  # (n_bins, K)
 
     # Pull alpha with explicit samples dim
     if alpha_y_add.ndim == 4:        # [S, C, T, K]
@@ -341,11 +423,11 @@ def _multinomial_correct_mean_probs(
     if hasattr(A, "detach"):
         A = A.detach().cpu().numpy()
 
-    # Broadcast to (S, n, K)
+    # Broadcast to (S, n_bins, K)
     logP_S = logP[None, :, :]
     A_S    = A[:, None, :]
 
-    logits = logP_S - A_S                                 # (S, n, K)
+    logits = logP_S - A_S                                 # (S, n_bins, K)
 
     # Hard-mask zero categories
     logits[:, :, zero_cat_mask] = -np.inf
@@ -356,10 +438,10 @@ def _multinomial_correct_mean_probs(
     exps[:, :, zero_cat_mask] = 0.0
     Z = exps.sum(axis=-1, keepdims=True)
     Z[Z == 0] = 1.0
-    P_corr_S = exps / Z                                    # (S, n, K)
+    P_corr_S = exps / Z                                    # (S, n_bins, K)
 
     # Posterior mean in probability space
-    return P_corr_S.mean(axis=0)                           # (n, K)
+    return P_corr_S.mean(axis=0)                           # (n_bins, K)
 
 
 
@@ -1043,11 +1125,9 @@ def plot_binomial_xy(
             'target': model.meta['target'].values[valid_mask]
         })
 
-    # Compute PSI (as percentage: 0-100 scale)
-    df['PSI'] = (df['counts'] / df['denominator']) * 100.0
-
+    # Keep counts and denominators for binning (don't compute PSI per-cell)
     # Filter valid
-    valid = (df['x_true'] > 0) & np.isfinite(df['PSI'])
+    valid = (df['x_true'] > 0) & (df['denominator'] > 0)
     df = df[valid].copy()
 
     if len(df) == 0:
@@ -1110,21 +1190,37 @@ def plot_binomial_xy(
             group_code = int(group_code)
             group_label = code_to_label[group_code]
             color = _color_for_label(group_label, fallback_idx=idx, palette=color_palette)
-            df_group = df[df['technical_group_code'] == group_code].copy()
 
-            if len(df_group) == 0:
+            # Get data for this group
+            group_mask = df['technical_group_code'] == group_code
+            if group_mask.sum() == 0:
                 continue
 
-            y_plot = df_group['PSI'].values
+            x_group = df.loc[group_mask, 'x_true'].values
+            counts_group = df.loc[group_mask, 'counts'].values       # (n_cells_group,)
+            denom_group = df.loc[group_mask, 'denominator'].values   # (n_cells_group,)
+
+            # Bin counts using k-NN
+            k = _knn_k(len(x_group), window)
+            x_smooth, counts_binned, denom_binned = _smooth_knn_counts(
+                x_group, counts_group, denom_group, k
+            )  # counts_binned: (n_bins,), denom_binned: (n_bins,)
+
+            # Compute PSI from binned counts (as proportion [0, 1])
+            epsilon = 1e-10
+            with np.errstate(divide='ignore', invalid='ignore'):
+                p_binned = np.where(denom_binned > epsilon,
+                                    counts_binned / denom_binned,
+                                    0.5)  # Default to 0.5 if no data
 
             if corrected and has_technical_fit:
-                # Apply additive correction on LOGIT scale
-                # 1. Convert PSI (percentage) to proportion [0, 1]
-                epsilon = 1e-6  # Small constant to avoid log(0)
-                p = np.clip(y_plot / 100.0, epsilon, 1 - epsilon)
+                # Apply additive correction on LOGIT scale to binned proportions
+                # 1. Clip proportions to avoid log(0) or log(1)
+                epsilon_clip = 1e-6
+                p_clipped = np.clip(p_binned, epsilon_clip, 1 - epsilon_clip)
 
                 # 2. Calculate logit
-                logit_p = np.log(p / (1 - p))
+                logit_p = np.log(p_clipped / (1 - p_clipped))
 
                 # 3. Apply correction on logit scale
                 alpha_y_add = modality.alpha_y_prefit_add
@@ -1137,53 +1233,15 @@ def plot_binomial_xy(
                 # 4. Convert back to proportion
                 p_corrected = 1.0 / (1.0 + np.exp(-logit_corrected))
 
-                # 5. Convert back to percentage
-                y_plot = p_corrected * 100.0
-
-            # Get is_ntc for this group
-            is_ntc_group = is_ntc[df_group.index].values
-
-            # k-NN smoothing
-            k = _knn_k(len(df_group), window)
-            if show_ntc_gradient:
-                # Smoothing with NTC tracking
-                x_smooth, y_smooth, ntc_prop = _smooth_knn(
-                    df_group['x_true'].values,
-                    y_plot,
-                    k,
-                    is_ntc=is_ntc_group
-                )
-
-                # Use per-group gradient coloring (white → group color)
-                # Color value = 1 - ntc_prop: high NTC → 0 → white, low NTC → 1 → group color
-                group_cmap = group_cmaps.get(group_label, plt.cm.gray)
-                plot_colored_line(
-                    x=np.log2(x_smooth),
-                    y=y_smooth,
-                    color_values=1 - ntc_prop,  # Darker (group color) = fewer NTCs
-                    cmap=group_cmap,
-                    ax=ax_plot,
-                    linewidth=2
-                )
-
-                # Add dummy invisible line for legend label (using base group color)
-                ax_plot.plot([], [], color=color, linewidth=2, label=group_label)
-
-                # Add colorbar (once per axis) - use grayscale to show NTC gradient
-                if not colorbar_added:
-                    fig = ax_plot.get_figure()
-                    cmap_gray = LinearSegmentedColormap.from_list("gray_gradient", ["white", "black"])
-                    sm = ScalarMappable(cmap=cmap_gray, norm=Normalize(0, 1))
-                    sm.set_array([])
-                    cbar = fig.colorbar(sm, ax=ax_plot)
-                    cbar.set_label('1 - Proportion NTC (darker = fewer NTCs)')
-                    colorbar_added = True
+                # 5. Convert to percentage
+                y_smooth = p_corrected * 100.0
             else:
-                # Standard smoothing without NTC tracking
-                x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, y_plot, k)
+                # Convert uncorrected proportion to percentage
+                y_smooth = p_binned * 100.0
 
-                # Use standard coloring
-                ax_plot.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2, label=group_label)
+            # Plot (no additional smoothing needed - already binned)
+            # Note: We don't currently support NTC gradient for binned data
+            ax_plot.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2, label=group_label)
 
         # Trans function overlay (if trans model fitted)
         if show_trans_function and not corrected:
@@ -1314,24 +1372,15 @@ def plot_multinomial_xy(
             'target': model.meta['target'].values[valid_mask]
         })
 
-    # Store raw counts for each category (needed for correction)
+    # Store raw counts for each category (needed for binning)
     counts_filtered = counts_3d[valid_mask, :]  # (n_cells_filtered, K)
-
-    # Compute raw proportions
     total_filtered = total_counts[valid_mask]
-    with np.errstate(divide='ignore', invalid='ignore'):
-        props_raw = np.where(total_filtered[:, None] > 0,
-                             counts_filtered / total_filtered[:, None],
-                             1.0 / K)  # Uniform if no counts
-
-    # Add raw proportions for each category
-    for k in range(K):
-        df[f'cat_{k}'] = props_raw[:, k]
 
     # Filter valid x_true
     valid = df['x_true'] > 0
     df = df[valid].copy()
-    props_raw = props_raw[valid, :]
+    counts_filtered = counts_filtered[valid, :]
+    total_filtered = total_filtered[valid]
 
     if len(df) == 0:
         raise ValueError(f"No data remaining after filtering (min_counts={min_counts})")
@@ -1384,45 +1433,47 @@ def plot_multinomial_xy(
                     group_code = int(group_code)
                     group_label = code_to_label[group_code]
                     color = _color_for_label(group_label, fallback_idx=idx, palette=color_palette)
-                    df_group = df[df['technical_group_code'] == group_code].copy()
 
-                    if len(df_group) == 0:
+                    # Get data for this group
+                    group_mask = df['technical_group_code'] == group_code
+                    if group_mask.sum() == 0:
                         continue
 
-                    # Get proportions for this group and category
-                    group_mask = df['technical_group_code'] == group_code
-                    props_group = props_raw[group_mask, :]  # Shape: (n_cells_in_group, K)
+                    x_group = df.loc[group_mask, 'x_true'].values
+                    counts_group = counts_filtered[group_mask, :]  # (n_cells_group, K)
+                    totals_group = total_filtered[group_mask]      # (n_cells_group,)
+
+                    # Bin counts using k-NN
+                    knn = _knn_k(len(x_group), window)
+                    x_smooth, counts_binned, totals_binned = _smooth_knn_counts(
+                        x_group, counts_group, totals_group, knn
+                    )  # counts_binned: (n_bins, K), totals_binned: (n_bins,)
+
+                    # Compute proportions from binned counts
+                    epsilon = 1e-10
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        props_binned = np.where(totals_binned[:, None] > epsilon,
+                                                counts_binned / totals_binned[:, None],
+                                                1.0 / K)
 
                     if corrected and has_technical_fit:
-                        # ---- Compute zero-category mask from the data used on THIS axis ----
-                        # counts_3d was already subset by valid_mask above
+                        # Compute zero-category mask
                         zero_cat_mask = (counts_filtered.sum(axis=0) == 0)  # (K,)
-                        
-                        # ---- Per-sample correction, averaged in probability space ----
+
+                        # Apply correction to binned proportions
                         alpha_y_add = modality.alpha_y_prefit_add
-                        # Align indices explicitly to avoid accidental reindexing issues
-                        df = df.reset_index(drop=True)
-                        props_raw = np.asarray(props_raw)  # (n_cells_filtered, K), same length as df now
-                        group_mask = (df['technical_group_code'] == group_code).values
-                        props_group = props_raw[group_mask, :]  # (n_group_cells, K)
-                        
-                        props_corrected = _multinomial_correct_mean_probs(
-                            props_group=props_group,
+                        props_corrected = _multinomial_correct_binned_probs(
+                            props_binned=props_binned,
                             alpha_y_add=alpha_y_add,
                             group_code=group_code,
                             feature_idx=feature_idx,
                             zero_cat_mask=zero_cat_mask
-                        )  # (n_group_cells, K)
-                        
-                        y_data = props_corrected[:, k]
+                        )  # (n_bins, K)
+                        y_smooth = props_corrected[:, k]
                     else:
-                        y_data = df_group[f'cat_{k}'].values
+                        y_smooth = props_binned[:, k]
 
-                    # k-NN smoothing
-                    knn = _knn_k(len(df_group), window)
-                    x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, y_data, knn)
-
-                    # Plot
+                    # Plot (no additional smoothing needed - already binned)
                     ax.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2,
                            label=group_label if plot_idx == 0 else None)
 
@@ -1441,45 +1492,47 @@ def plot_multinomial_xy(
                 group_code = int(group_code)
                 group_label = code_to_label[group_code]
                 color = _color_for_label(group_label, fallback_idx=idx, palette=color_palette)
-                df_group = df[df['technical_group_code'] == group_code].copy()
 
-                if len(df_group) == 0:
+                # Get data for this group
+                group_mask = df['technical_group_code'] == group_code
+                if group_mask.sum() == 0:
                     continue
 
-                # Get proportions for this group and category
-                group_mask = df['technical_group_code'] == group_code
-                props_group = props_raw[group_mask, :]  # Shape: (n_cells_in_group, K)
+                x_group = df.loc[group_mask, 'x_true'].values
+                counts_group = counts_filtered[group_mask, :]  # (n_cells_group, K)
+                totals_group = total_filtered[group_mask]      # (n_cells_group,)
+
+                # Bin counts using k-NN
+                knn = _knn_k(len(x_group), window)
+                x_smooth, counts_binned, totals_binned = _smooth_knn_counts(
+                    x_group, counts_group, totals_group, knn
+                )  # counts_binned: (n_bins, K), totals_binned: (n_bins,)
+
+                # Compute proportions from binned counts
+                epsilon = 1e-10
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    props_binned = np.where(totals_binned[:, None] > epsilon,
+                                            counts_binned / totals_binned[:, None],
+                                            1.0 / K)
 
                 if corrected and has_technical_fit:
-                    # ---- Compute zero-category mask from the data used on THIS axis ----
-                    # counts_3d was already subset by valid_mask above
+                    # Compute zero-category mask
                     zero_cat_mask = (counts_filtered.sum(axis=0) == 0)  # (K,)
-                    
-                    # ---- Per-sample correction, averaged in probability space ----
+
+                    # Apply correction to binned proportions
                     alpha_y_add = modality.alpha_y_prefit_add
-                    # Align indices explicitly to avoid accidental reindexing issues
-                    df = df.reset_index(drop=True)
-                    props_raw = np.asarray(props_raw)  # (n_cells_filtered, K), same length as df now
-                    group_mask = (df['technical_group_code'] == group_code).values
-                    props_group = props_raw[group_mask, :]  # (n_group_cells, K)
-                    
-                    props_corrected = _multinomial_correct_mean_probs(
-                        props_group=props_group,
+                    props_corrected = _multinomial_correct_binned_probs(
+                        props_binned=props_binned,
                         alpha_y_add=alpha_y_add,
                         group_code=group_code,
                         feature_idx=feature_idx,
                         zero_cat_mask=zero_cat_mask
-                    )  # (n_group_cells, K)
-                    
-                    y_data = props_corrected[:, k]
+                    )  # (n_bins, K)
+                    y_smooth = props_corrected[:, k]
                 else:
-                    y_data = df_group[f'cat_{k}'].values
+                    y_smooth = props_binned[:, k]
 
-                # k-NN smoothing
-                knn = _knn_k(len(df_group), window)
-                x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, y_data, knn)
-
-                # Plot
+                # Plot (no additional smoothing needed - already binned)
                 ax.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2,
                        label=group_label if plot_idx == 0 else None)
 
