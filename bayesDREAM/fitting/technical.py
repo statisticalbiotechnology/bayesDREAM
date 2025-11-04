@@ -81,11 +81,21 @@ class TechnicalFitter:
         # ----------------------------
         if distribution == 'multinomial':
             assert K is not None, "multinomial requires K"
-        
-            # ---- zero-probability category mask per (T,K) from NTC counts ----
+
+            # ---- zero-probability category mask per (T,K) from ALL NTC counts ----
+            # (We need ALL NTC data to identify structurally absent categories)
             total_counts_per_feature = y_obs_ntc_tensor.sum(dim=0)  # [T, K]
             zero_cat_mask = (total_counts_per_feature == 0)         # [T, K] bool
             pyro.deterministic("zero_cat_mask", zero_cat_mask)
+
+            # ---- Compute counts from reference group (group 0) for Dirichlet prior ----
+            ref_mask = (groups_ntc_tensor == 0)
+            if ref_mask.sum() > 0:
+                # Use reference group only for more accurate baseline
+                total_counts_ref = y_obs_ntc_tensor[ref_mask, :, :].sum(dim=0)  # [T, K]
+            else:
+                # Fallback to all data if no reference group
+                total_counts_ref = total_counts_per_feature  # [T, K]
             # After computing zero_cat_mask = (total_counts_per_feature == 0)  # [T, K]
             active_k = (~zero_cat_mask).sum(dim=-1)  # [T]
             if (active_k == 0).any():
@@ -259,8 +269,8 @@ class TechnicalFitter:
     
         elif distribution == 'multinomial':
             # ---- Baseline category probabilities per feature: DO NOT wrap in a plate ----
-            # concentration is [T, K]; keep this as the batch shape of the Dirichlet.
-            concentration = total_counts_per_feature + 1.0  # [T, K], strictly > 0
+            # Use reference group counts for more accurate baseline (concentration is [T, K])
+            concentration = total_counts_ref + 1.0  # [T, K], strictly > 0
             #assert concentration.shape == (T, K), f"concentration {concentration.shape} != ({T},{K})"
             with f_plate:
                 probs0 = pyro.sample("probs_baseline_raw", dist.Dirichlet(concentration))  # [T, K]
