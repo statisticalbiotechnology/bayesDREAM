@@ -1404,12 +1404,14 @@ def plot_multinomial_xy(
     # Layout: if show_correction='both', then K_plot rows × 2 columns, else 1 row × K_plot columns
     if show_correction == 'both':
         if figsize is None:
-            figsize = (12, 4 * K_plot)  # 2 columns, K_plot rows
-        fig, axes = plt.subplots(K_plot, 2, figsize=figsize, squeeze=False)
+            figsize = (12, 3 * K_plot)  # 2 columns, K_plot rows
+        fig, axes = plt.subplots(K_plot, 2, figsize=figsize, squeeze=False,
+                                 constrained_layout=True)
     else:
         if figsize is None:
             figsize = (4 * K_plot, 5)  # K_plot columns, 1 row
-        fig, axes_row = plt.subplots(1, K_plot, figsize=figsize, squeeze=False)
+        fig, axes_row = plt.subplots(1, K_plot, figsize=figsize, squeeze=False,
+                                     constrained_layout=True)
         axes = axes_row  # Shape: (1, K_plot)
 
     # Get technical group labels
@@ -1544,8 +1546,6 @@ def plot_multinomial_xy(
                 ax.legend(frameon=False, loc='upper right')
 
     plt.suptitle(f"{model.cis_gene} → {feature} (min_counts={min_counts})")
-    plt.tight_layout(rect=[0, 0.03, 1, 0.96])  # Leave space for suptitle
-
     return fig
 
 
@@ -1817,9 +1817,11 @@ def plot_mvnormal_xy(
         figsize = (4 * D, 5) if show_correction != 'both' else (4 * D, 10)
 
     if show_correction == 'both':
-        fig, axes = plt.subplots(2, D, figsize=figsize, squeeze=False)
+        fig, axes = plt.subplots(2, D, figsize=figsize, squeeze=False,
+                                 constrained_layout=True)
     else:
-        fig, axes = plt.subplots(1, D, figsize=figsize, squeeze=False)
+        fig, axes = plt.subplots(1, D, figsize=figsize, squeeze=False,
+                                 constrained_layout=True)
 
     # Build dataframe
     if subset_mask is not None:
@@ -1909,8 +1911,6 @@ def plot_mvnormal_xy(
                 ax.legend(frameon=False, loc='upper right')
 
     plt.suptitle(f"{model.cis_gene} → {feature}")
-    plt.tight_layout()
-
     return fig
 
 
@@ -2044,7 +2044,8 @@ def _plot_multinomial_multifeature(
         if figsize is None:
             figsize = (4 * n_cols, 3 * n_rows)  # 4 inches per column, 3 inches per row
 
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, squeeze=False)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, squeeze=False,
+                             constrained_layout=True)
 
     # Get technical group labels
     group_labels = get_technical_group_labels(model)
@@ -2277,8 +2278,6 @@ def _plot_multinomial_multifeature(
                 axes[feat_i, cat_idx].axis('off')
 
     plt.suptitle(f"{model.cis_gene} → {gene_name} (gene, n={n_features} features, min_counts={min_counts})")
-    plt.tight_layout(rect=[0, 0.03, 1, 0.96])  # Leave space for suptitle
-
     return fig
 
 
@@ -2490,9 +2489,10 @@ def plot_xy_data(
         n_cols = 2  # Left = uncorrected, Right = corrected
 
         if figsize is None:
-            figsize = (12, 4 * n_rows)  # 12 inches wide (6 per subplot), 4 inches per row
+            figsize = (12, 3 * n_rows)  # 12 inches wide (6 per subplot), 3 inches per row
 
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, squeeze=False)
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, squeeze=False,
+                                 constrained_layout=True)
 
         # Plot each feature (one row per feature)
         for i, (feat_idx, feat_name) in enumerate(zip(feature_indices, feature_names_resolved)):
@@ -2559,7 +2559,6 @@ def plot_xy_data(
                                ha='center', va='center', transform=axes[i, 1].transAxes)
 
         plt.suptitle(f"{model.cis_gene} → {feature} (gene, n={n_features} features)")
-        plt.tight_layout()
         return fig
 
     # Single feature - use original code path

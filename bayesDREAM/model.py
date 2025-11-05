@@ -24,13 +24,15 @@ from .modalities import (
     TranscriptModalityMixin,
     SplicingModalityMixin,
     ATACModalityMixin,
-    CustomModalityMixin
+    CustomModalityMixin,
+    PlottingMixin
 )
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
 
 class bayesDREAM(
+    PlottingMixin,
     TranscriptModalityMixin,
     SplicingModalityMixin,
     ATACModalityMixin,
