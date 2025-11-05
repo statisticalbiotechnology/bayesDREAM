@@ -2057,16 +2057,16 @@ def _plot_multinomial_multifeature(
         non_zero_cats = non_zero_cats_per_feature[feat_i]
 
         if len(non_zero_cats) == 0:
-            # Hide axes for this feature (all its rows/columns)
+            # Remove axes for this feature (all its rows/columns)
             if show_correction == 'both':
-                # Hide all rows for this feature: feat_i * max_non_zero to (feat_i + 1) * max_non_zero
+                # Remove all rows for this feature: feat_i * max_non_zero to (feat_i + 1) * max_non_zero
                 for row_idx in range(feat_i * max_non_zero, (feat_i + 1) * max_non_zero):
                     for col_idx in range(2):
-                        axes[row_idx, col_idx].axis('off')
+                        fig.delaxes(axes[row_idx, col_idx])
             else:
-                # Hide all columns for this feature row
+                # Remove all columns for this feature row
                 for col_idx in range(max_non_zero):
-                    axes[feat_i, col_idx].axis('off')
+                    fig.delaxes(axes[feat_i, col_idx])
             continue  # Skip features with no non-zero categories
 
         # Get counts for this feature
@@ -2120,14 +2120,14 @@ def _plot_multinomial_multifeature(
         total_filtered = total_filtered[valid]
 
         if len(df) == 0:
-            # Hide axes for this feature (no data after filtering)
+            # Remove axes for this feature (no data after filtering)
             if show_correction == 'both':
                 for row_idx in range(feat_i * max_non_zero, (feat_i + 1) * max_non_zero):
                     for col_idx in range(2):
-                        axes[row_idx, col_idx].axis('off')
+                        fig.delaxes(axes[row_idx, col_idx])
             else:
                 for col_idx in range(max_non_zero):
-                    axes[feat_i, col_idx].axis('off')
+                    fig.delaxes(axes[feat_i, col_idx])
             continue
 
         # Map technical_group_code → label for THIS feature (after all filters)
@@ -2264,18 +2264,18 @@ def _plot_multinomial_multifeature(
                 if cat_plot_idx == 0 and feat_i == 0:
                     ax.legend(frameon=False, loc='upper right', fontsize=8)
 
-        # Hide unused subplots (if this feature has fewer non-zero cats than max_non_zero)
+        # Remove unused subplots (if this feature has fewer non-zero cats than max_non_zero)
         n_cats_this_feature = len(non_zero_cats)
         if show_correction == 'both':
-            # Hide unused rows for this feature
+            # Remove unused rows for this feature
             for cat_idx in range(n_cats_this_feature, max_non_zero):
                 row_idx = feat_i * max_non_zero + cat_idx
                 for col_idx in range(2):
-                    axes[row_idx, col_idx].axis('off')
+                    fig.delaxes(axes[row_idx, col_idx])
         else:
-            # Hide unused columns for this feature
+            # Remove unused columns for this feature
             for cat_idx in range(n_cats_this_feature, max_non_zero):
-                axes[feat_i, cat_idx].axis('off')
+                fig.delaxes(axes[feat_i, cat_idx])
 
     plt.suptitle(f"{model.cis_gene} → {gene_name} (gene, n={n_features} features, min_counts={min_counts})")
     return fig
