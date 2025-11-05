@@ -403,6 +403,7 @@ All documentation is in the `docs/` directory:
 
 - `API_REFERENCE.md`: Public API documentation
 - `ARCHITECTURE.md`: System architecture and design decisions
+- `INITIALIZATION.md`: Technical fitting initialization strategies (empirical Bayes for negbinom, binomial, multinomial)
 - `OUTSTANDING_TASKS.md`: **Current outstanding tasks and known issues**
 - `REFACTORING_PLAN.md`: Details of the modular refactoring
 - `SAVE_LOAD_GUIDE.md`: Guide to save/load functionality

@@ -2,7 +2,7 @@
 
 This document tracks remaining implementation tasks and known issues.
 
-Last updated: 2025-01-22
+Last updated: 2025-01-05
 
 ---
 
@@ -196,6 +196,9 @@ model.add_atac_modality(atac_counts, region_meta, cis_region='chr9:123-456')
 - ✅ Test cleanup and updates
 - ✅ Import fixes in trans.py (find_beta, Hill_based_positive, etc.)
 - ✅ Model-level posterior_samples_trans storage fix
+- ✅ Multinomial per-group zero-category masking (2025-01-05)
+- ✅ Binomial per-group boundary checking (2025-01-05)
+- ✅ Empirical Bayes initialization for binomial and multinomial (2025-01-04)
 
 ---
 

@@ -44,10 +44,20 @@ env/
 .DS_Store
 Thumbs.db
 
+# Plots and figures
+*.png
+*.pdf
+!*logo*.pdf
+
 # Output directories
 model_out/
 output/
 test_output/
+test_cis_fix/
+test_plotting/
+test_unit/
+test_xy_plotting/
+testing/
 logs/
 
 # Large data files

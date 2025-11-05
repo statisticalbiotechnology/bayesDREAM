@@ -20,6 +20,7 @@ Comprehensive documentation for the bayesDREAM multi-modal Bayesian framework.
 ### Technical Documentation
 
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - System architecture and design patterns
+- **[INITIALIZATION.md](INITIALIZATION.md)** - Technical fitting initialization strategies for all distributions
 - **[OUTSTANDING_TASKS.md](OUTSTANDING_TASKS.md)** - Current development priorities and known issues
 
 ## Usage Examples
