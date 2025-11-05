@@ -86,6 +86,19 @@ class TechnicalFitter:
             # (We need ALL NTC data to identify structurally absent categories)
             total_counts_per_feature = y_obs_ntc_tensor.sum(dim=0)  # [T, K]
             zero_cat_mask = (total_counts_per_feature == 0)         # [T, K] bool
+
+            # ---- Per-group zero-count masking ----
+            # Mask categories that are 0 in ANY technical group
+            # This prevents fitting corrections for categories with no data in some groups
+            any_group_zero_mask = torch.zeros_like(zero_cat_mask, dtype=torch.bool)
+            for g in range(C):
+                group_mask = (groups_ntc_tensor == g)
+                if group_mask.sum() > 0:
+                    group_counts = y_obs_ntc_tensor[group_mask, :, :].sum(dim=0)  # [T, K]
+                    any_group_zero_mask = any_group_zero_mask | (group_counts == 0)
+
+            # Combine: mask if zero across all data OR zero in any group
+            zero_cat_mask = zero_cat_mask | any_group_zero_mask
             pyro.deterministic("zero_cat_mask", zero_cat_mask)
 
             # ---- Compute counts from reference group (group 0) for Dirichlet prior ----
@@ -540,6 +553,10 @@ class TechnicalFitter:
             denom_ntc = denominator[:, ntc_indices] if denominator.ndim == 2 and modality.cells_axis == 1 else \
                         denominator[ntc_indices, :] if denominator.ndim == 2 else \
                         denominator[:, ntc_indices, :]
+
+            # Get technical group assignments for NTC cells
+            groups_ntc_codes = meta_ntc['technical_group_code'].values
+
             for f_idx in range(counts_ntc_array.shape[0]):
                 if modality.cells_axis == 0:
                     numer = counts_ntc_array[:, f_idx]
@@ -547,13 +564,50 @@ class TechnicalFitter:
                 else:
                     numer = counts_ntc_array[f_idx, :]
                     denom = denom_ntc[f_idx, :]
+
+                # Global check: all denominators zero
                 valid = denom > 0
                 if valid.sum() == 0:
                     zero_std_mask[f_idx] = True
-                else:
-                    ratios = numer[valid] / denom[valid]
-                    if ratios.std() == 0:
-                        zero_std_mask[f_idx] = True
+                    continue
+
+                # Global check: zero std across all valid cells
+                ratios = numer[valid] / denom[valid]
+                if ratios.std() == 0:
+                    zero_std_mask[f_idx] = True
+                    continue
+
+                # Per-group boundary checks
+                # Exclude if ANY group has all cells at a boundary (PSI=0, PSI=1, or denom=0)
+                exclude_feature = False
+                for g in np.unique(groups_ntc_codes):
+                    group_mask = (groups_ntc_codes == g)
+                    group_numer = numer[group_mask]
+                    group_denom = denom[group_mask]
+
+                    # Check 1: All denominators zero in this group
+                    if (group_denom == 0).all():
+                        exclude_feature = True
+                        break
+
+                    # Check 2: Among cells with valid denominators, check for boundary PSI
+                    group_valid = group_denom > 0
+                    if group_valid.sum() > 0:
+                        group_numer_valid = group_numer[group_valid]
+                        group_denom_valid = group_denom[group_valid]
+
+                        # All PSI=0 in this group (all numerators zero)
+                        if (group_numer_valid == 0).all():
+                            exclude_feature = True
+                            break
+
+                        # All PSI=1 in this group (all numerator==denominator)
+                        if (group_numer_valid == group_denom_valid).all():
+                            exclude_feature = True
+                            break
+
+                if exclude_feature:
+                    zero_std_mask[f_idx] = True
     
         elif distribution == 'mvnormal':
             for f_idx in range(counts_ntc_array.shape[0]):
