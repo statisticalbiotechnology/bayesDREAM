@@ -2013,9 +2013,6 @@ def _plot_multinomial_multifeature(
         else:
             raise ValueError(f"Expected 3D counts for multinomial, got {modality.counts.ndim}D")
 
-    # Use max number of non-zero categories (computed from subsetted data)
-    max_non_zero = max(len(nz) for nz in non_zero_cats_per_feature) if non_zero_cats_per_feature else 1
-
     # Check technical correction
     has_technical_fit = False
     if hasattr(modality, 'alpha_y_prefit_add') and modality.alpha_y_prefit_add is not None:
@@ -2030,26 +2027,35 @@ def _plot_multinomial_multifeature(
         warnings.warn(f"Technical fit not available for modality '{modality.name}' - showing uncorrected only")
         show_correction = 'uncorrected'
 
-    # Create figure layout based on non-zero categories only
+    # Create figure layout using GridSpec to allocate rows based on actual categories per feature
+    # This avoids blank space when features have different numbers of categories
     if show_correction == 'both':
-        # Layout: (n_features × max_non_zero) rows × 2 columns
-        n_rows = n_features * max_non_zero
+        # Layout: each feature gets rows for its actual non-zero categories × 2 columns
+        total_rows = sum(len(nz) for nz in non_zero_cats_per_feature)
         n_cols = 2
         if figsize is None:
-            figsize = (12, 3 * n_rows)  # 3 inches per row
+            figsize = (12, 3 * total_rows)  # 3 inches per row
     else:
-        # Layout: n_features rows × max_non_zero columns
-        n_rows = n_features
-        n_cols = max_non_zero
+        # Layout: each feature gets 1 row × columns for its actual non-zero categories
+        # Use GridSpec with variable column widths
+        max_cats = max(len(nz) for nz in non_zero_cats_per_feature) if non_zero_cats_per_feature else 1
+        total_rows = n_features
+        n_cols = max_cats
         if figsize is None:
-            figsize = (4 * n_cols, 3 * n_rows)  # 4 inches per column, 3 inches per row
+            figsize = (4 * max_cats, 3 * n_features)  # 4 inches per column, 3 inches per row
 
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, squeeze=False,
-                             constrained_layout=True)
+    fig = plt.figure(figsize=figsize, constrained_layout=True)
+    gs = fig.add_gridspec(total_rows, n_cols)
+
+    # Create axes dict to store subplot positions
+    axes_dict = {}
 
     # Get technical group labels
     group_labels = get_technical_group_labels(model)
     group_codes = sorted(model.meta['technical_group_code'].unique())
+
+    # Track current row position for GridSpec
+    current_row = 0
 
     # Plot each feature
     for feat_i, (feat_idx, feat_name) in enumerate(zip(feature_indices, feature_names)):
@@ -2057,16 +2063,6 @@ def _plot_multinomial_multifeature(
         non_zero_cats = non_zero_cats_per_feature[feat_i]
 
         if len(non_zero_cats) == 0:
-            # Remove axes for this feature (all its rows/columns)
-            if show_correction == 'both':
-                # Remove all rows for this feature: feat_i * max_non_zero to (feat_i + 1) * max_non_zero
-                for row_idx in range(feat_i * max_non_zero, (feat_i + 1) * max_non_zero):
-                    for col_idx in range(2):
-                        fig.delaxes(axes[row_idx, col_idx])
-            else:
-                # Remove all columns for this feature row
-                for col_idx in range(max_non_zero):
-                    fig.delaxes(axes[feat_i, col_idx])
             continue  # Skip features with no non-zero categories
 
         # Get counts for this feature
@@ -2120,14 +2116,10 @@ def _plot_multinomial_multifeature(
         total_filtered = total_filtered[valid]
 
         if len(df) == 0:
-            # Remove axes for this feature (no data after filtering)
+            # Skip to next feature if no data after filtering
+            # Note: we still need to advance current_row for 'both' mode
             if show_correction == 'both':
-                for row_idx in range(feat_i * max_non_zero, (feat_i + 1) * max_non_zero):
-                    for col_idx in range(2):
-                        fig.delaxes(axes[row_idx, col_idx])
-            else:
-                for col_idx in range(max_non_zero):
-                    fig.delaxes(axes[feat_i, col_idx])
+                current_row += len(non_zero_cats)
             continue
 
         # Map technical_group_code → label for THIS feature (after all filters)
@@ -2144,10 +2136,10 @@ def _plot_multinomial_multifeature(
                 cat_label = f"Cat{k}"
 
             if show_correction == 'both':
-                # Row: feat_i * max_non_zero + cat_plot_idx, Columns: 0 (uncorrected), 1 (corrected)
-                row = feat_i * max_non_zero + cat_plot_idx
+                # Create axes for this category row
+                row = current_row + cat_plot_idx
                 for col_idx, corrected in enumerate([False, True]):
-                    ax = axes[row, col_idx]
+                    ax = fig.add_subplot(gs[row, col_idx])
 
         
                     for idx, group_code in enumerate(group_codes):
@@ -2205,8 +2197,8 @@ def _plot_multinomial_multifeature(
                     if cat_plot_idx == 0 and feat_i == 0:
                         ax.legend(frameon=False, loc='upper right', fontsize=8)
             else:
-                # Row: feat_i, Column: cat_plot_idx
-                ax = axes[feat_i, cat_plot_idx]
+                # Create ax for this category column
+                ax = fig.add_subplot(gs[current_row, cat_plot_idx])
                 corrected = (show_correction == 'corrected')
         
                 for idx, group_code in enumerate(group_codes):
@@ -2264,18 +2256,11 @@ def _plot_multinomial_multifeature(
                 if cat_plot_idx == 0 and feat_i == 0:
                     ax.legend(frameon=False, loc='upper right', fontsize=8)
 
-        # Remove unused subplots (if this feature has fewer non-zero cats than max_non_zero)
-        n_cats_this_feature = len(non_zero_cats)
+        # Update current_row for next feature (only for 'both' mode)
         if show_correction == 'both':
-            # Remove unused rows for this feature
-            for cat_idx in range(n_cats_this_feature, max_non_zero):
-                row_idx = feat_i * max_non_zero + cat_idx
-                for col_idx in range(2):
-                    fig.delaxes(axes[row_idx, col_idx])
+            current_row += len(non_zero_cats)
         else:
-            # Remove unused columns for this feature
-            for cat_idx in range(n_cats_this_feature, max_non_zero):
-                fig.delaxes(axes[feat_i, cat_idx])
+            current_row += 1
 
     plt.suptitle(f"{model.cis_gene} → {gene_name} (gene, n={n_features} features, min_counts={min_counts})")
     return fig
