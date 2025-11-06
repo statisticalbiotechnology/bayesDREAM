@@ -44,7 +44,7 @@ class CustomModalityMixin:
         if isinstance(counts, pd.DataFrame):
             counts_array = counts.values
             is_dataframe = True
-            counts_index = counts.index
+            counts_index = counts.columns  # Get column names (cells), not row index
         else:
             counts_array = np.asarray(counts)
             is_dataframe = False

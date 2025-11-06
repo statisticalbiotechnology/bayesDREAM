@@ -289,49 +289,49 @@ def sample_normal_trans(
     C=None
 ):
     """
-    Sample observations from normal likelihood for trans model.
+    Normal likelihood with *masked* observations.
 
-    Cell-line effects: ADDITIVE on mu (not multiplicative).
-
-    Parameters
-    ----------
-    y_obs_tensor : torch.Tensor
-        Observed values, shape [N, T]
-    mu_y : torch.Tensor
-        Expected mean from f(x), shape [N, T]
-    sigma_y : torch.Tensor
-        Standard deviation, shape [1, T] or [T]
-    alpha_y_full : torch.Tensor or None
-        Cell-line effects (additive), shape [C, T] if provided
-    groups_tensor : torch.Tensor or None
-        Cell-line group codes, shape [N] if provided
-    N : int
-        Number of guides/observations
-    T : int
-        Number of features
-    C : int or None
-        Number of cell-line groups
-
-    Notes
-    -----
-    mu_final = mu_y + alpha_y[group]
-    For normal distributions, additive cell-line shifts make more sense
-    than multiplicative effects.
+    - NaNs / inf in y_obs_tensor are treated as missing
+      and contribute 0 to the log-likelihood (factor of 1 in prob).
+    - Cell-line effects are additive on the mean only; sigma_y is unchanged.
     """
-    # Apply cell-line effects if present (additive)
+
+    # Apply cell-line effects if present (additive on the mean)
     if alpha_y_full is not None and groups_tensor is not None:
         alpha_y_used = alpha_y_full[groups_tensor, :]  # [N, T]
-        mu_adjusted = mu_y + alpha_y_used
+        mu_adjusted = mu_y + alpha_y_used              # [N, T]
     else:
-        mu_adjusted = mu_y
+        mu_adjusted = mu_y                             # [N, T]
 
-    # Sample observations
-    with pyro.plate("obs_plate", N, dim=-2):
-        pyro.sample(
-            "y_obs",
-            dist.Normal(mu_adjusted, sigma_y.unsqueeze(0) if sigma_y.dim() == 1 else sigma_y),
-            obs=y_obs_tensor
-        )
+    # Broadcast sigma_y to [N, T]
+    if sigma_y.dim() == 1:
+        # [T] -> [N, T]
+        sigma_b = sigma_y.unsqueeze(0).expand(N, -1)
+    else:
+        # Assume already broadcastable to [N, T]
+        sigma_b = sigma_y
+
+    # Mask of *valid* entries: finite = observed, non-finite = missing
+    mask = torch.isfinite(y_obs_tensor)  # [N, T]
+    if not mask.any():
+        # Everything missing -> no likelihood contribution
+        return
+
+    # Replace missing y's by mu_adjusted so log_prob is defined;
+    # they will get zeroed out later via the mask.
+    y_clean = torch.where(mask, y_obs_tensor, mu_adjusted)
+
+    # Log-prob under Normal
+    dist_normal = dist.Normal(mu_adjusted, sigma_b)
+    log_prob = dist_normal.log_prob(y_clean)          # [N, T]
+
+    # Zero-out missing entries so they don't affect the joint density
+    log_prob = torch.where(mask, log_prob,
+                           torch.zeros_like(log_prob))
+
+    # Flatten and attach as a factor
+    with pyro.plate("obs_plate", N * T):
+        pyro.factor("y_obs", log_prob.reshape(-1))
 
 
 #######################################

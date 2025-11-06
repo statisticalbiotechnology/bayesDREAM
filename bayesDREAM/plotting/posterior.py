@@ -324,3 +324,218 @@ def plot_xtrue_density_by_guide(
         plt.show()
 
     return fig
+
+
+def plot_parameter_density_with_xtrue(
+    param_samps,
+    model,
+    cis_gene,
+    param_name='x_infl',
+    subset_mask=None,
+    log2=True,
+    cmap="viridis",
+    alpha_overall=0.45,
+    density_gamma=0.7,
+    norm_global=True,
+    grid_points=350,
+    linewidth=0.8,
+    show_xtrue=True,
+    color_scheme=None,
+    show=True,
+):
+    """
+    Two-panel density plot: parameter samples (left) + x_true distribution (right).
+
+    This is useful for comparing trans parameter distributions (e.g., x_infl, K_a, n_a)
+    with the observed x_true range to contextualize the parameter values.
+
+    Parameters
+    ----------
+    param_samps : np.ndarray
+        Parameter samples, shape (n_samples, n_features)
+    model : bayesDREAM
+        Fitted bayesDREAM model
+    cis_gene : str
+        Cis gene name
+    param_name : str
+        Parameter name for labeling (default: 'x_infl')
+    subset_mask : np.ndarray, optional
+        Boolean mask to subset features (e.g., dependent genes only)
+    log2 : bool
+        Whether to plot on log2 scale (default: True)
+    cmap : str
+        Colormap for density visualization (default: 'viridis')
+    alpha_overall : float
+        Overall alpha for density colors (default: 0.45)
+    density_gamma : float
+        Gamma correction for density intensity (default: 0.7)
+    norm_global : bool
+        If True, normalize density across all features (default: True)
+    grid_points : int
+        Number of grid points for KDE (default: 350)
+    linewidth : float
+        Width of density lines (default: 0.8)
+    show_xtrue : bool
+        Whether to show x_true panel on right (default: True)
+    color_scheme : ColorScheme, optional
+        Custom color scheme for x_true target colors
+    show : bool
+        Whether to display the plot (default: True)
+
+    Returns
+    -------
+    fig : matplotlib figure
+
+    Examples
+    --------
+    >>> from bayesDREAM.plotting import (plot_parameter_density_with_xtrue,
+    ...                                   hill_xinf_samples, dependency_mask_from_n)
+    >>> K_samps = model['GFI1B'].posterior_samples_trans['K_a'][:, 0, :].detach().cpu().numpy()
+    >>> n_samps = model['GFI1B'].posterior_samples_trans['n_a'][:, 0, :].detach().cpu().numpy()
+    >>> xinf_samps = hill_xinf_samples(K_samps, n_samps, tol_n=0.2)
+    >>> mask = dependency_mask_from_n(n_samps)
+    >>> fig = plot_parameter_density_with_xtrue(
+    ...     xinf_samps, model, 'GFI1B',
+    ...     param_name='x_infl',
+    ...     subset_mask=mask,
+    ...     log2=True
+    ... )
+    """
+    from scipy.stats import gaussian_kde
+
+    if color_scheme is None:
+        color_scheme = ColorScheme()
+
+    # Convert to numpy and apply log2 if requested
+    param_samps = np.asarray(param_samps)
+    if log2:
+        from .utils import log2_pos
+        param_samps = log2_pos(param_samps)
+
+    # Get x_true samples and metadata
+    df_meta = model[cis_gene].meta.copy()
+    x_true_samps = to_np(model[cis_gene].x_true)  # [S, N_cells]
+    xtrue_mean_per_cell = x_true_samps.mean(axis=0)  # [N_cells]
+
+    if log2:
+        from .utils import log2_pos
+        xtrue_mean_per_cell = log2_pos(xtrue_mean_per_cell)
+
+    # Compute y-range from x_true distribution (central 99% of cells)
+    vals_all = xtrue_mean_per_cell[~np.isnan(xtrue_mean_per_cell)]
+    if vals_all.size > 0:
+        y_min = np.percentile(vals_all, 0.5)
+        y_max = np.percentile(vals_all, 99.5)
+    else:
+        y_min, y_max = 0, 1
+    y_range = (y_min, y_max)
+
+    # Global 95% CI of parameter (for reference lines)
+    param_vals_all = param_samps.flatten()
+    param_vals_all = param_vals_all[~np.isnan(param_vals_all)]
+    if param_vals_all.size > 0:
+        ci_lo, ci_hi = np.percentile(param_vals_all, [2.5, 97.5])
+    else:
+        ci_lo, ci_hi = y_min, y_max
+
+    # Create figure layout
+    if show_xtrue:
+        fig, (ax_main, ax_side) = plt.subplots(
+            1, 2,
+            figsize=(8, 5),
+            gridspec_kw={"width_ratios": [4, 1], "wspace": 0.05},
+            sharey=True,
+        )
+    else:
+        fig, ax_main = plt.subplots(figsize=(10, 5))
+        ax_side = None
+
+    # ----- Main panel: parameter posterior density -----
+    ylabel = f'$\\log_2$ {param_name}' if log2 else param_name
+    title = f"{cis_gene} — posterior of {ylabel}"
+    if subset_mask is not None:
+        n_total = param_samps.shape[1]
+        n_subset = np.sum(subset_mask)
+        title += f" ({n_subset}/{n_total} features)"
+
+    ax_main = plot_posterior_density_lines(
+        param_samps,
+        title=title,
+        subset_mask=subset_mask,
+        cmap=cmap,
+        alpha_overall=alpha_overall,
+        density_gamma=density_gamma,
+        norm_global=norm_global,
+        add_median_lines=True,
+        y_label=ylabel,
+        ax=ax_main,
+        show=False,
+        y_range=y_range,
+        grid_points=grid_points,
+        linewidth=linewidth,
+    )
+
+    ax_main.set_xlabel("Features (ordered by median)")
+    ax_main.set_ylim(y_min, y_max)
+
+    # Left y ticks
+    ax_main.set_yticks(np.linspace(y_min, y_max, 5))
+    ax_main.yaxis.set_ticks_position('left')
+    ax_main.tick_params(axis='y', which='both', length=4)
+
+    # Indicate global 95% CI region
+    ax_main.axhline(ci_lo, color='white', linestyle=':', linewidth=0.7, alpha=0.7)
+    ax_main.axhline(ci_hi, color='white', linestyle=':', linewidth=0.7, alpha=0.7)
+
+    # ----- Side panel: x_true density by target -----
+    if show_xtrue and ax_side is not None:
+        ax_side.set_xlabel(f'density of\n$\\log_2$ x_true' if log2 else 'density of\nx_true',
+                          fontsize=9)
+        ax_side.xaxis.set_label_position('top')
+
+        targets = df_meta['target'].astype(str).to_numpy()
+        uniq_targets = sorted(np.unique(targets))
+
+        y_grid = np.linspace(y_min, y_max, 400)
+
+        for t in uniq_targets:
+            mask_t = targets == t
+            vals_t = xtrue_mean_per_cell[mask_t]
+            vals_t = vals_t[~np.isnan(vals_t)]
+            if vals_t.size == 0:
+                continue
+
+            color = color_scheme.get_target_color(t, 'grey')
+
+            if vals_t.size < 2:
+                # Tiny bump if no variance
+                y0 = vals_t[0]
+                bump = np.exp(-0.5 * ((y_grid - y0) / 0.05) ** 2)
+                bump /= bump.max() + 1e-12
+                ax_side.fill_betweenx(y_grid, 0, bump, color=color, alpha=0.45)
+                ax_side.plot(bump, y_grid, color=color, linewidth=1.0)
+            else:
+                kde = gaussian_kde(vals_t)
+                dens_t = kde(y_grid)
+                dens_t /= dens_t.max() + 1e-12
+                ax_side.fill_betweenx(y_grid, 0, dens_t, color=color, alpha=0.45)
+                ax_side.plot(dens_t, y_grid, color=color, linewidth=1.0, label=t)
+
+        ax_side.set_xlim(0, 1.05)
+
+        # Right y-axis
+        ax_side.yaxis.set_ticks_position('right')
+        ax_side.yaxis.set_label_position('right')
+        ax_side.set_yticks(np.linspace(y_min, y_max, 5))
+        ax_side.tick_params(axis='y', which='both', length=4)
+        ax_side.set_ylabel("")  # Keep only left label
+
+        # Legend for targets
+        ax_side.legend(title='target', fontsize=8, loc='upper right', frameon=False)
+
+    fig.tight_layout()
+
+    if show:
+        plt.show()
+
+    return fig

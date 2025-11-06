@@ -441,3 +441,198 @@ def compute_log2fc_vs_overlap(
         })
 
     return pd.DataFrame(results)
+
+
+# ============================================================================
+# Hill function and parameter analysis helpers
+# ============================================================================
+
+def hill_xinf_samples(K_samps: np.ndarray, n_samps: np.ndarray, tol_n: float = 0.0) -> np.ndarray:
+    """
+    Compute Hill function inflection points from parameter samples.
+
+    The inflection point for a Hill function y = A + alpha * x^n / (K^n + x^n)
+    is:
+        x_inf = K * ((n-1)/(n+1))^(1/n)
+
+    This is only defined when |n| > 1. For |n| <= 1 + tol_n, returns NaN.
+
+    Parameters
+    ----------
+    K_samps : np.ndarray
+        K parameter samples, shape (n_samples, n_features)
+    n_samps : np.ndarray
+        n parameter samples, shape (n_samples, n_features)
+    tol_n : float
+        Tolerance for n. Inflection point is NaN when |n| <= 1 + tol_n
+        (default: 0.0, meaning |n| must be > 1)
+
+    Returns
+    -------
+    np.ndarray
+        Inflection points, shape (n_samples, n_features)
+        NaN where |n| <= 1 + tol_n
+
+    Examples
+    --------
+    >>> K_samps = np.array([[1.0, 2.0], [1.5, 2.5]])
+    >>> n_samps = np.array([[2.0, 3.0], [2.5, 3.5]])
+    >>> xinf = hill_xinf_samples(K_samps, n_samps, tol_n=0.2)
+    """
+    K_samps = np.asarray(K_samps)
+    n_samps = np.asarray(n_samps)
+
+    m = np.abs(n_samps)
+    base = (m - 1.0) / (m + 1.0)  # in (0,1) when |n| > 1
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        log_xinf = np.log(K_samps) + (1.0 / n_samps) * np.log(base)
+        xinf = np.exp(log_xinf)
+
+    # Set to NaN where |n| <= 1 + tol_n
+    xinf[m <= (1.0 + tol_n)] = np.nan
+
+    return xinf
+
+
+def dependency_mask_from_n(n_samps: np.ndarray, ci: float = 95.0) -> np.ndarray:
+    """
+    Check if Hill coefficient n shows dependency (credible interval excludes 0).
+
+    A gene is "dependent" if the CI of n excludes 0, meaning there's clear
+    evidence for either positive (n > 0) or negative (n < 0) regulation.
+
+    Parameters
+    ----------
+    n_samps : np.ndarray
+        n parameter samples, shape (n_samples, n_features)
+    ci : float
+        Credible interval level (default: 95.0)
+
+    Returns
+    -------
+    np.ndarray
+        Boolean mask, shape (n_features,)
+        True where CI excludes 0 (dependent), False otherwise
+
+    Examples
+    --------
+    >>> n_samps = np.array([[2.0, 0.5], [2.5, -0.3], [1.8, 0.1]])
+    >>> mask = dependency_mask_from_n(n_samps, ci=95.0)
+    >>> # First feature: CI likely excludes 0 (all values > 0)
+    >>> # Second feature: CI likely includes 0 (values span 0)
+    """
+    lo_q = (100 - ci) / 2.0
+    hi_q = 100 - lo_q
+    lo, hi = np.percentile(n_samps, [lo_q, hi_q], axis=0)
+    return (lo > 0) | (hi < 0)
+
+
+def abs_n_gt_tol_mask(n_samps: np.ndarray, tol: float = 1.0) -> np.ndarray:
+    """
+    Check if absolute median of n exceeds threshold.
+
+    Filters for features where |median(n)| > 1 + tol, which is useful for
+    identifying features with steep Hill curves (high cooperativity) and
+    for which inflection points are well-defined.
+
+    Parameters
+    ----------
+    n_samps : np.ndarray
+        n parameter samples, shape (n_samples, n_features)
+    tol : float
+        Tolerance above 1.0 (default: 1.0, meaning |median(n)| > 2.0)
+
+    Returns
+    -------
+    np.ndarray
+        Boolean mask, shape (n_features,)
+        True where |median(n)| > 1 + tol
+
+    Examples
+    --------
+    >>> n_samps = np.array([[2.5, 0.8], [2.3, 0.9], [2.7, 0.7]])
+    >>> mask = abs_n_gt_tol_mask(n_samps, tol=1.0)
+    >>> # First feature: |median(n)| ≈ 2.5 > 2.0, True
+    >>> # Second feature: |median(n)| ≈ 0.8 < 2.0, False
+    """
+    med_abs = np.abs(np.median(n_samps, axis=0))
+    return med_abs > (1.0 + tol)
+
+
+def log2_pos(a: np.ndarray) -> np.ndarray:
+    """
+    Compute log2 of array, returning NaN for non-positive values.
+
+    Parameters
+    ----------
+    a : np.ndarray
+        Input array
+
+    Returns
+    -------
+    np.ndarray
+        log2(a) where a > 0, NaN elsewhere
+
+    Examples
+    --------
+    >>> a = np.array([1.0, 2.0, -1.0, 0.0, 4.0])
+    >>> log2_pos(a)
+    array([ 0.,  1., nan, nan,  2.])
+    """
+    a = np.asarray(a)
+    out = np.full_like(a, np.nan, dtype=float)
+    mask = a > 0
+    out[mask] = np.log2(a[mask])
+    return out
+
+
+def hill_y(x: np.ndarray, A: np.ndarray, alpha: np.ndarray, K: np.ndarray,
+           n: np.ndarray, eps: float = 1e-8) -> np.ndarray:
+    """
+    Vectorized Hill function evaluation.
+
+    Computes: y = A + alpha * x^n / (K^n + x^n)
+
+    Supports broadcasting across sample and feature dimensions.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        x values (can be scalar or array)
+    A : np.ndarray
+        Baseline parameter, shape (n_samples, n_features) or broadcastable
+    alpha : np.ndarray
+        Scale parameter, shape (n_samples, n_features) or broadcastable
+    K : np.ndarray
+        Half-max parameter, shape (n_samples, n_features) or broadcastable
+    n : np.ndarray
+        Hill coefficient, shape (n_samples, n_features) or broadcastable
+    eps : float
+        Small constant to avoid division by zero (default: 1e-8)
+
+    Returns
+    -------
+    np.ndarray
+        y values, shape depends on input broadcasting
+
+    Examples
+    --------
+    >>> x = np.array([0.1, 1.0, 10.0])
+    >>> A = np.array([[1.0]])
+    >>> alpha = np.array([[2.0]])
+    >>> K = np.array([[1.0]])
+    >>> n = np.array([[2.0]])
+    >>> y = hill_y(x, A, alpha, K, n)
+    """
+    x = np.asarray(x, dtype=float)
+
+    # Ensure broadcasting: add trailing axes if needed
+    while A.ndim > x.ndim:
+        x = np.expand_dims(x, axis=0)
+
+    x_n = np.power(x, n)
+    K_n = np.power(K, n)
+    y = A + alpha * x_n / (K_n + x_n + eps)
+
+    return y

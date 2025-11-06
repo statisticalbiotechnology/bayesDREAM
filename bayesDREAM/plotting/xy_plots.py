@@ -19,6 +19,80 @@ import torch
 
 
 # ============================================================================
+# Cell Alignment Utilities
+# ============================================================================
+
+def _align_cells_to_modality(
+    model,
+    modality,
+    x_true: np.ndarray,
+    y_data: np.ndarray,
+    subset_mask: Optional[np.ndarray] = None
+) -> Tuple[np.ndarray, np.ndarray, pd.DataFrame]:
+    """
+    Align model.meta cells with modality cells, handling the case where
+    the modality has fewer cells than model.meta.
+
+    Parameters
+    ----------
+    model : bayesDREAM
+        The model instance
+    modality : Modality
+        The modality instance
+    x_true : np.ndarray
+        x_true values for ALL cells in model.meta
+    y_data : np.ndarray
+        y values for cells in the modality (may be fewer than model.meta)
+    subset_mask : Optional[np.ndarray]
+        Optional boolean mask for subsetting (length = len(model.meta))
+
+    Returns
+    -------
+    x_true_aligned : np.ndarray
+        x_true values aligned to final cell set
+    y_data_aligned : np.ndarray
+        y values aligned to final cell set
+    meta_aligned : pd.DataFrame
+        Metadata aligned to final cell set
+    """
+    # Get cell identifiers
+    if 'cell' in model.meta.columns:
+        model_cells = model.meta['cell'].values
+    else:
+        model_cells = model.meta.index.values
+
+    modality_cells = modality.cell_names
+    if modality_cells is None:
+        raise ValueError(f"Modality '{modality.name}' does not have cell_names set. Cannot align cells.")
+
+    # Create mask for cells in model.meta that are also in modality
+    modality_mask = np.isin(model_cells, modality_cells)
+
+    # Combine with subset_mask if provided
+    if subset_mask is not None:
+        final_mask = modality_mask & subset_mask
+    else:
+        final_mask = modality_mask
+
+    # Get final set of cells
+    final_cells = model_cells[final_mask]
+
+    # Subset x_true and metadata using final_mask
+    x_true_aligned = x_true[final_mask]
+    meta_aligned = model.meta[final_mask].copy()
+
+    # Map final_cells to indices in modality
+    # Create a lookup dictionary for efficiency
+    modality_cell_to_idx = {cell: idx for idx, cell in enumerate(modality_cells)}
+    y_indices = np.array([modality_cell_to_idx[cell] for cell in final_cells])
+
+    # Subset y_data using these indices
+    y_data_aligned = y_data[y_indices]
+
+    return x_true_aligned, y_data_aligned, meta_aligned
+
+
+# ============================================================================
 # k-NN Smoothing Utilities
 # ============================================================================
 
@@ -858,34 +932,24 @@ def plot_negbinom_xy(
     else:
         y_obs = modality.counts[:, feature_idx]
 
-    # Apply subset mask if provided
-    if subset_mask is not None:
-        y_obs = y_obs[subset_mask]
-
-    # Build dataframe
     # Check if sum_factor_col exists
     if sum_factor_col not in model.meta.columns:
         raise ValueError(f"Sum factor column '{sum_factor_col}' not found in model.meta. "
                         f"Available columns: {list(model.meta.columns)}")
 
-    # Get metadata arrays (already subsetted in plot_xy_data if subset_mask provided)
-    if subset_mask is not None:
-        meta_subset = model.meta[subset_mask]
-        df = pd.DataFrame({
-            'x_true': x_true,
-            'y_obs': y_obs,
-            'technical_group_code': meta_subset['technical_group_code'].values,
-            'target': meta_subset['target'].values,
-            'sum_factor': meta_subset[sum_factor_col].values
-        })
-    else:
-        df = pd.DataFrame({
-            'x_true': x_true,
-            'y_obs': y_obs,
-            'technical_group_code': model.meta['technical_group_code'].values,
-            'target': model.meta['target'].values,
-            'sum_factor': model.meta[sum_factor_col].values
-        })
+    # Align cells between model.meta and modality
+    x_true_aligned, y_obs_aligned, meta_aligned = _align_cells_to_modality(
+        model, modality, x_true, y_obs, subset_mask
+    )
+
+    # Build dataframe
+    df = pd.DataFrame({
+        'x_true': x_true_aligned,
+        'y_obs': y_obs_aligned,
+        'technical_group_code': meta_aligned['technical_group_code'].values,
+        'target': meta_aligned['target'].values,
+        'sum_factor': meta_aligned[sum_factor_col].values
+    })
 
     # Technical correction
     has_technical_fit = modality.alpha_y_prefit is not None
@@ -1098,32 +1162,26 @@ def plot_binomial_xy(
         counts = modality.counts[:, feature_idx]
         denom = modality.denominator[:, feature_idx]
 
-    # Apply subset mask if provided
-    if subset_mask is not None:
-        counts = counts[subset_mask]
-        denom = denom[subset_mask]
+    # Align cells between model.meta and modality
+    x_true_aligned, counts_aligned, meta_aligned = _align_cells_to_modality(
+        model, modality, x_true, counts, subset_mask
+    )
+    # Also align denominator (same cell alignment)
+    _, denom_aligned, _ = _align_cells_to_modality(
+        model, modality, x_true, denom, subset_mask
+    )
 
     # Filter by min_counts
-    valid_mask = denom >= min_counts
+    valid_mask = denom_aligned >= min_counts
 
     # Build dataframe
-    if subset_mask is not None:
-        meta_subset = model.meta[subset_mask]
-        df = pd.DataFrame({
-            'x_true': x_true[valid_mask],
-            'counts': counts[valid_mask],
-            'denominator': denom[valid_mask],
-            'technical_group_code': meta_subset['technical_group_code'].values[valid_mask],
-            'target': meta_subset['target'].values[valid_mask]
-        })
-    else:
-        df = pd.DataFrame({
-            'x_true': x_true[valid_mask],
-            'counts': counts[valid_mask],
-            'denominator': denom[valid_mask],
-            'technical_group_code': model.meta['technical_group_code'].values[valid_mask],
-            'target': model.meta['target'].values[valid_mask]
-        })
+    df = pd.DataFrame({
+        'x_true': x_true_aligned[valid_mask],
+        'counts': counts_aligned[valid_mask],
+        'denominator': denom_aligned[valid_mask],
+        'technical_group_code': meta_aligned['technical_group_code'].values[valid_mask],
+        'target': meta_aligned['target'].values[valid_mask]
+    })
 
     # Keep counts and denominators for binning (don't compute PSI per-cell)
     # Filter valid
@@ -1324,11 +1382,32 @@ def plot_multinomial_xy(
     else:
         raise ValueError(f"Expected 3D counts for multinomial, got {modality.counts.ndim}D")
 
-    # Apply subset mask if provided
-    if subset_mask is not None:
-        counts_3d = counts_3d[subset_mask, :]
-
     K = counts_3d.shape[1]
+
+    # Align cells between model.meta and modality
+    # For multinomial, we need to align the first dimension (cells) of the 3D array
+    # We'll use the total counts across categories for alignment
+    total_counts_all = counts_3d.sum(axis=1)
+    x_true_aligned, total_aligned, meta_aligned = _align_cells_to_modality(
+        model, modality, x_true, total_counts_all, subset_mask
+    )
+
+    # Now we need to align the full 3D counts array using the same cell mapping
+    # Get the cell mapping
+    if 'cell' in model.meta.columns:
+        model_cells = model.meta['cell'].values
+    else:
+        model_cells = model.meta.index.values
+    modality_cells = modality.cell_names
+    modality_mask = np.isin(model_cells, modality_cells)
+    if subset_mask is not None:
+        final_mask = modality_mask & subset_mask
+    else:
+        final_mask = modality_mask
+    final_cells = model_cells[final_mask]
+    modality_cell_to_idx = {cell: idx for idx, cell in enumerate(modality_cells)}
+    y_indices = np.array([modality_cell_to_idx[cell] for cell in final_cells])
+    counts_3d = counts_3d[y_indices, :]  # Align 3D array
 
     # Get category labels if available in feature_meta
     category_labels = None
@@ -1358,19 +1437,11 @@ def plot_multinomial_xy(
     valid_mask = total_counts >= min_counts
 
     # Build dataframe
-    if subset_mask is not None:
-        meta_subset = model.meta[subset_mask]
-        df = pd.DataFrame({
-            'x_true': x_true[valid_mask],
-            'technical_group_code': meta_subset['technical_group_code'].values[valid_mask],
-            'target': meta_subset['target'].values[valid_mask]
-        })
-    else:
-        df = pd.DataFrame({
-            'x_true': x_true[valid_mask],
-            'technical_group_code': model.meta['technical_group_code'].values[valid_mask],
-            'target': model.meta['target'].values[valid_mask]
-        })
+    df = pd.DataFrame({
+        'x_true': x_true_aligned[valid_mask],
+        'technical_group_code': meta_aligned['technical_group_code'].values[valid_mask],
+        'target': meta_aligned['target'].values[valid_mask]
+    })
 
     # Store raw counts for each category (needed for binning)
     counts_filtered = counts_3d[valid_mask, :]  # (n_cells_filtered, K)
@@ -1587,26 +1658,18 @@ def plot_normal_xy(
     else:
         y_vals = modality.counts[:, feature_idx]
 
-    # Apply subset mask if provided
-    if subset_mask is not None:
-        y_vals = y_vals[subset_mask]
+    # Align cells between model.meta and modality
+    x_true_aligned, y_vals_aligned, meta_aligned = _align_cells_to_modality(
+        model, modality, x_true, y_vals, subset_mask
+    )
 
     # Build dataframe
-    if subset_mask is not None:
-        meta_subset = model.meta[subset_mask]
-        df = pd.DataFrame({
-            'x_true': x_true,
-            'y_val': y_vals,
-            'technical_group_code': meta_subset['technical_group_code'].values,
-            'target': meta_subset['target'].values
-        })
-    else:
-        df = pd.DataFrame({
-            'x_true': x_true,
-            'y_val': y_vals,
-            'technical_group_code': model.meta['technical_group_code'].values,
-            'target': model.meta['target'].values
-        })
+    df = pd.DataFrame({
+        'x_true': x_true_aligned,
+        'y_val': y_vals_aligned,
+        'technical_group_code': meta_aligned['technical_group_code'].values,
+        'target': meta_aligned['target'].values
+    })
 
     # Filter valid
     valid = (df['x_true'] > 0) & np.isfinite(df['y_val'])
@@ -1800,11 +1863,31 @@ def plot_mvnormal_xy(
     else:
         raise ValueError(f"Expected 3D counts for mvnormal, got {modality.counts.ndim}D")
 
-    # Apply subset mask if provided
-    if subset_mask is not None:
-        values_3d = values_3d[subset_mask, :]
-
     D = values_3d.shape[1]
+
+    # Align cells between model.meta and modality
+    # For mvnormal, we need to align the first dimension (cells) of the 3D array
+    # We'll use the first dimension for alignment
+    first_dim = values_3d[:, 0]
+    x_true_aligned, first_dim_aligned, meta_aligned = _align_cells_to_modality(
+        model, modality, x_true, first_dim, subset_mask
+    )
+
+    # Now we need to align the full 3D array using the same cell mapping
+    if 'cell' in model.meta.columns:
+        model_cells = model.meta['cell'].values
+    else:
+        model_cells = model.meta.index.values
+    modality_cells = modality.cell_names
+    modality_mask = np.isin(model_cells, modality_cells)
+    if subset_mask is not None:
+        final_mask = modality_mask & subset_mask
+    else:
+        final_mask = modality_mask
+    final_cells = model_cells[final_mask]
+    modality_cell_to_idx = {cell: idx for idx, cell in enumerate(modality_cells)}
+    y_indices = np.array([modality_cell_to_idx[cell] for cell in final_cells])
+    values_3d = values_3d[y_indices, :]  # Align 3D array
 
     # Check technical correction
     has_technical_fit = modality.alpha_y_prefit is not None
@@ -1824,19 +1907,11 @@ def plot_mvnormal_xy(
                                  constrained_layout=True)
 
     # Build dataframe
-    if subset_mask is not None:
-        meta_subset = model.meta[subset_mask]
-        df = pd.DataFrame({
-            'x_true': x_true,
-            'technical_group_code': meta_subset['technical_group_code'].values,
-            'target': meta_subset['target'].values
-        })
-    else:
-        df = pd.DataFrame({
-            'x_true': x_true,
-            'technical_group_code': model.meta['technical_group_code'].values,
-            'target': model.meta['target'].values
-        })
+    df = pd.DataFrame({
+        'x_true': x_true_aligned,
+        'technical_group_code': meta_aligned['technical_group_code'].values,
+        'target': meta_aligned['target'].values
+    })
 
     for d in range(D):
         df[f'dim_{d}'] = values_3d[:, d]

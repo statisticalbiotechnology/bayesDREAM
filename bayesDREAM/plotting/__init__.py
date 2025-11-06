@@ -23,19 +23,28 @@ from .colors import ColorScheme, build_guide_colors, lighten, darken
 
 # Helper utilities
 from .helpers import to_np, per_cell_mean_std
+from .utils import (
+    hill_xinf_samples,
+    dependency_mask_from_n,
+    abs_n_gt_tol_mask,
+    log2_pos,
+    hill_y
+)
 
 # Basic x_true plots
 from .basic import (
     scatter_by_guide,
     scatter_ci95_by_guide,
     violin_by_guide_log2,
-    filled_density_by_guide_log2
+    filled_density_by_guide_log2,
+    scatter_param_mean_vs_ci
 )
 
 # Posterior density plots
 from .posterior import (
     plot_posterior_density_lines,
-    plot_xtrue_density_by_guide
+    plot_xtrue_density_by_guide,
+    plot_parameter_density_with_xtrue
 )
 
 # DE comparison plots
@@ -65,14 +74,20 @@ __all__ = [
     # Helpers
     'to_np',
     'per_cell_mean_std',
+    'hill_xinf_samples',
+    'abs_n_gt_tol_mask',
+    'log2_pos',
+    'hill_y',
     # Basic plots
     'scatter_by_guide',
     'scatter_ci95_by_guide',
     'violin_by_guide_log2',
     'filled_density_by_guide_log2',
+    'scatter_param_mean_vs_ci',
     # Posterior plots
     'plot_posterior_density_lines',
     'plot_xtrue_density_by_guide',
+    'plot_parameter_density_with_xtrue',
     # DE comparison
     'compute_log2fc_metrics',
     'compute_log2fc_obs_for_cells',

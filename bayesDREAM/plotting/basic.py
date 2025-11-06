@@ -281,3 +281,175 @@ def filled_density_by_guide_log2(model, cis_gene, bw=None, color_scheme=None,
         plt.show()
 
     return ax
+
+
+def scatter_param_mean_vs_ci(
+    param_samps,
+    param_name='parameter',
+    subset_mask=None,
+    color_by=None,
+    color_label='color metric',
+    cmap='Blues_r',
+    vmin=None,
+    vmax=None,
+    log2=False,
+    ax=None,
+    show=True,
+    title=None,
+    figsize=(7, 5),
+):
+    """
+    Scatter plot of parameter mean vs 95% CI width, with optional color coding.
+
+    This is useful for visualizing parameter uncertainty vs magnitude, with
+    optional coloring by dependency masks, NaN fractions, or other metrics.
+
+    Parameters
+    ----------
+    param_samps : np.ndarray
+        Parameter samples, shape (n_samples, n_features)
+    param_name : str
+        Parameter name for axis labels (default: 'parameter')
+    subset_mask : np.ndarray, optional
+        Boolean mask to subset features. If provided, plots two groups:
+        masked (colored) and unmasked (grey).
+    color_by : np.ndarray, optional
+        Values to color points by (length n_features). Requires subset_mask.
+        Common uses:
+        - NaN fraction: color by how many samples are NaN
+        - Dependency metric: color by strength of effect
+    color_label : str
+        Label for colorbar (default: 'color metric')
+    cmap : str
+        Colormap name (default: 'Blues_r' for darker = fewer NaNs)
+    vmin, vmax : float, optional
+        Color scale limits. If None, uses data range.
+    log2 : bool
+        Whether param_samps are on log2 scale (affects axis label only)
+    ax : matplotlib axes, optional
+        Axes to plot on
+    show : bool
+        Whether to display the plot (default: True)
+    title : str, optional
+        Plot title. If None, auto-generates from param_name.
+    figsize : tuple
+        Figure size (default: (7, 5))
+
+    Returns
+    -------
+    ax : matplotlib axes
+
+    Examples
+    --------
+    >>> # Example 1: Inflection point with NaN fraction coloring
+    >>> xinf_samps = hill_xinf_samples(K_samps, n_samps, tol_n=0.2)
+    >>> dep_mask = dependency_mask_from_n(n_samps)
+    >>> frac_nan = np.mean(np.isnan(xinf_samps), axis=0)
+    >>> fig = scatter_param_mean_vs_ci(
+    ...     xinf_samps,
+    ...     param_name='x_infl',
+    ...     subset_mask=dep_mask,
+    ...     color_by=frac_nan,
+    ...     color_label='fraction NaN (lighter = more NaN)',
+    ...     cmap='Blues_r',
+    ...     log2=True
+    ... )
+
+    >>> # Example 2: Hill coefficient n with dependency coloring
+    >>> n_samps = model['GFI1B'].posterior_samples_trans['n_a'][:, 0, :].detach().cpu().numpy()
+    >>> dep_mask = dependency_mask_from_n(n_samps)
+    >>> fig = scatter_param_mean_vs_ci(
+    ...     n_samps,
+    ...     param_name='n (Hill coefficient)',
+    ...     subset_mask=dep_mask,
+    ...     log2=False
+    ... )
+    """
+    param_samps = np.asarray(param_samps)
+
+    # Compute mean and CI width
+    param_mean = np.nanmean(param_samps, axis=0)
+    param_lo = np.nanpercentile(param_samps, 2.5, axis=0)
+    param_hi = np.nanpercentile(param_samps, 97.5, axis=0)
+    param_ci_width = param_hi - param_lo
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+
+    # Case 1: No subsetting - plot all points in one color
+    if subset_mask is None:
+        ax.scatter(param_mean, param_ci_width, s=8, alpha=0.6, color='blue')
+
+    # Case 2: Subsetting without color coding
+    elif color_by is None:
+        # Plot non-masked points in grey
+        if not np.all(subset_mask):
+            ax.scatter(
+                param_mean[~subset_mask],
+                param_ci_width[~subset_mask],
+                s=5, alpha=0.3, color='grey', label='not selected'
+            )
+
+        # Plot masked points in blue
+        ax.scatter(
+            param_mean[subset_mask],
+            param_ci_width[subset_mask],
+            s=5, alpha=0.2, color='blue', label='selected'
+        )
+        ax.legend(frameon=False, loc='best')
+
+    # Case 3: Subsetting with color coding
+    else:
+        color_by = np.asarray(color_by)
+        if len(color_by) != len(subset_mask):
+            raise ValueError(f"color_by length ({len(color_by)}) must match subset_mask length ({len(subset_mask)})")
+
+        # Plot non-masked points in grey
+        if not np.all(subset_mask):
+            ax.scatter(
+                param_mean[~subset_mask],
+                param_ci_width[~subset_mask],
+                s=5, alpha=0.3, color='grey'
+            )
+
+        # Plot masked points with color coding
+        valid_mask = subset_mask & np.isfinite(param_mean) & np.isfinite(param_ci_width)
+
+        if vmin is None:
+            vmin = np.nanmin(color_by[valid_mask])
+        if vmax is None:
+            vmax = np.nanmax(color_by[valid_mask])
+
+        sc = ax.scatter(
+            param_mean[valid_mask],
+            param_ci_width[valid_mask],
+            c=color_by[valid_mask],
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+            s=8,
+            alpha=0.9
+        )
+
+        # Add colorbar
+        cbar = plt.colorbar(sc, ax=ax, pad=0.02)
+        cbar.set_label(color_label)
+
+    # Labels and formatting
+    xlabel = f'Mean {param_name}' + (' (log₂)' if log2 else '')
+    ylabel = f'95% CI width of {param_name}' + (' (log₂)' if log2 else '')
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+
+    if title is None:
+        title = f'{param_name}: mean vs uncertainty'
+    ax.set_title(title)
+
+    ax.axhline(0, color='black', linestyle=':', linewidth=1)
+    ax.grid(True, linewidth=0.5, alpha=0.3)
+    plt.tight_layout()
+
+    if show:
+        plt.show()
+
+    return ax
