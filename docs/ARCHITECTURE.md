@@ -86,7 +86,7 @@ bayesDREAM uses a **separate 'cis' modality** for modeling direct perturbation e
 │  self.counts:  DataFrame(92 genes × 4,281 cells)               │
 │                includes GFI1B for fit_technical                 │
 │                                                                  │
-│  self.primary_modality: 'gene'                                  │
+│  self.primary_modality: 'gene'  # Set by modality_name parameter│
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -276,7 +276,8 @@ mvnormal                  3D: (F, C, D)          SpliZVD
 ┌─────────────────────────────────────────────────────────────────┐
 │                          User Code                               │
 │                                                                  │
-│  model = bayesDREAM(meta, counts, cis_gene='GFI1B')  │
+│  model = bayesDREAM(meta, counts, cis_gene='GFI1B',            │
+│                     guide_covariates=['cell_line'])             │
 │  model.add_splicing_modality(sj_counts, sj_meta, [...])        │
 │  model.add_custom_modality('spliz', scores, meta, 'normal')     │
 └──────────────────────┬──────────────────────────────────────────┘
@@ -399,8 +400,8 @@ mvnormal                  3D: (F, C, D)          SpliZVD
 │  Adds multi-modal support via mixins                            │
 ├─────────────────────────────────────────────────────────────────┤
 │  Additional Attributes:                                          │
-│    - modalities: Dict[str, Modality] (includes 'cis', 'gene')   │
-│    - primary_modality: str (default: 'gene')                    │
+│    - modalities: Dict[str, Modality] (includes 'cis', primary)  │
+│    - primary_modality: str (set by modality_name parameter)     │
 │    - counts_meta: pd.DataFrame (metadata for technical fit)     │
 │                                                                  │
 │  Additional Methods (from mixins):                               │

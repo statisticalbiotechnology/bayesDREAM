@@ -817,8 +817,9 @@ For ATAC or other modalities:
 model = bayesDREAM(
     meta=meta,
     counts=atac_counts,
+    modality_name='atac',
     cis_feature='chr9:132283881-132284881',  # Use cis_feature instead of cis_gene
-    primary_modality='atac'
+    guide_covariates=['cell_line']
 )
 
 # Access cis ATAC region

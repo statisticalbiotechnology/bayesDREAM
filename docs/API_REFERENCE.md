@@ -22,13 +22,13 @@ The main class for multi-modal Bayesian modeling of perturbation effects.
 bayesDREAM(
     meta,
     counts=None,
-    gene_meta=None,
-    modalities=None,
+    modality_name='gene',
+    feature_meta=None,
     cis_gene=None,
     cis_feature=None,
-    primary_modality='gene',
-    guide_covariates=['cell_line'],
+    guide_covariates=None,
     guide_covariates_ntc=None,
+    sum_factor_col='sum_factor',
     output_dir='./model_out',
     label=None,
     device=None,
@@ -42,29 +42,32 @@ bayesDREAM(
   - `cell`: Cell barcode
   - `guide`: Guide RNA identifier
   - `target`: Target gene (use `'ntc'` for non-targeting controls)
-  - `sum_factor`: Normalization factor per cell
-  - `cell_line`: Cell line identifier
+  - `sum_factor`: Normalization factor per cell (column name set by `sum_factor_col`)
+  - Additional covariates (e.g., `cell_line`) as needed
 - `counts` (pd.DataFrame, optional): Count matrix for primary modality (features × cells)
-  - For `'gene'`: gene counts
-  - For `'atac'`: region counts (not yet implemented as primary)
-- `gene_meta` (pd.DataFrame, optional): Gene metadata DataFrame
-  - Recommended columns: `gene`, `gene_name`, `gene_id`
-  - Can use index as gene identifier if named
-  - If not provided, minimal metadata will be created from counts.index
-- `modalities` (Dict[str, Modality], optional): Pre-constructed modalities (advanced usage)
-- `cis_gene` (str, optional): Gene name to extract as 'cis' modality (for gene modality)
-  - Alias for `cis_feature` when `primary_modality='gene'`
+  - Must represent negbinom count data for cis/trans modeling
+  - If not provided, you must add a primary modality via `add_custom_modality()` before fitting
+- `modality_name` (str): Name/type of the primary modality. Default: `'gene'`
+  - Pre-set types: `'gene'`, `'atac'` (gene is most common)
+  - Custom types: Any string (creates custom negbinom modality with that name)
+  - The primary modality MUST be negative binomial for cis/trans modeling
+- `feature_meta` (pd.DataFrame, optional): Feature-level metadata for primary modality
+  - For `modality_name='gene'`: Recommended columns: `gene`, `gene_name`, `gene_id`
+  - For other modalities: Relevant feature annotations
+  - If not provided, minimal metadata created from `counts.index`
+- `cis_gene` (str, optional): Feature to extract as 'cis' modality (gene name when `modality_name='gene'`)
   - Example: `cis_gene='GFI1B'`
-- `cis_feature` (str, optional): Generic parameter for cis feature extraction (any modality)
-  - For `'gene'`: gene name (same as `cis_gene`)
+  - Alias for `cis_feature` when `modality_name='gene'`
+  - The cis feature will be extracted as a separate 'cis' modality and removed from primary modality
+- `cis_feature` (str, optional): Alternative to `cis_gene` for non-gene modalities
   - For `'atac'`: region ID (e.g., `'chr9:132283881-132284881'`)
+  - For custom modalities: feature identifier
   - Note: Cannot specify both `cis_gene` and `cis_feature`
-- `primary_modality` (str): Which modality to use for trans effects. Default: `'gene'`
-  - The 'cis' modality will be extracted from this modality during initialization
-- `guide_covariates` (list): Covariates for guide grouping. Default: `['cell_line']`
-- `guide_covariates_ntc` (list, optional): Covariates for NTC guide grouping
+- `guide_covariates` (list, optional): Covariates for guide grouping (e.g., `['cell_line', 'batch']`)
+- `guide_covariates_ntc` (list, optional): Covariates for NTC guide grouping (if different from `guide_covariates`)
+- `sum_factor_col` (str): Column name in meta containing size factors. Default: `'sum_factor'`
 - `output_dir` (str): Output directory. Default: `'./model_out'`
-- `label` (str, optional): Run label
+- `label` (str, optional): Run label for organizing outputs
 - `device` (str, optional): PyTorch device (`'cpu'` or `'cuda'`). Auto-detects if None
 - `random_seed` (int): Random seed for reproducibility. Default: 2402
 - `cores` (int): Number of CPU cores for parallelization. Default: 1
@@ -74,27 +77,37 @@ bayesDREAM(
 **Cis Modality Extraction:**
 - The 'cis' modality is **ONLY** extracted during `bayesDREAM()` initialization
 - The primary modality will contain **trans features only** (cis feature excluded)
-- All modalities are automatically subset to cells present in the 'cis' modality
-- When calling `add_*_modality()` later, **NO** cis extraction occurs (except special case for ATAC if no cis exists)
+- All modalities are automatically subset to cells present in the filtered metadata
+- When calling `add_*_modality()` later, **NO** cis extraction occurs
 
-**Example:**
+**Examples:**
 ```python
 # Basic usage with gene expression
 model = bayesDREAM(
     meta=meta,
     counts=gene_counts,
-    gene_meta=gene_meta,
     cis_gene='GFI1B',
+    guide_covariates=['cell_line'],
     output_dir='./output'
 )
 # Creates: 'cis' modality (GFI1B) + 'gene' modality (all other genes)
 
-# Using cis_feature for consistency
+# With feature metadata
 model = bayesDREAM(
     meta=meta,
     counts=gene_counts,
-    cis_feature='GFI1B',  # Equivalent to cis_gene
-    primary_modality='gene'
+    feature_meta=gene_metadata,
+    cis_gene='GFI1B',
+    guide_covariates=['cell_line']
+)
+
+# Custom negbinom modality
+model = bayesDREAM(
+    meta=meta,
+    counts=my_counts,
+    modality_name='my_custom_modality',
+    cis_feature='feature_123',
+    guide_covariates=['batch']
 )
 ```
 

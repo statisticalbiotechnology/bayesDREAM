@@ -86,8 +86,9 @@ gene_counts = pd.read_csv('gene_counts.csv', index_col=0)
 model = bayesDREAM(
     meta=meta,
     counts=gene_counts,
-    gene_meta=gene_meta,  # Optional: gene annotations (gene, gene_name, gene_id)
+    feature_meta=gene_meta,  # Optional: gene annotations (gene, gene_name, gene_id)
     cis_gene='GFI1B',
+    guide_covariates=['cell_line'],
     output_dir='./output',
     label='my_run'
 )
@@ -109,12 +110,13 @@ model.save_trans_fit()
 ```python
 from bayesDREAM import bayesDREAM
 
-# Initialize with genes (gene_meta optional but recommended)
+# Initialize with genes (feature_meta optional but recommended)
 model = bayesDREAM(
     meta=meta,
     counts=gene_counts,
-    gene_meta=gene_meta,  # Optional: gene, gene_name, gene_id
-    cis_gene='GFI1B'
+    feature_meta=gene_meta,  # Optional: gene, gene_name, gene_id
+    cis_gene='GFI1B',
+    guide_covariates=['cell_line']
 )
 
 # Add ATAC-seq data
@@ -157,9 +159,10 @@ atac_mod = model.get_modality('atac')
 model = bayesDREAM(
     meta=meta,
     counts=atac_counts,
-    atac_meta=atac_meta,
-    primary_modality='atac',
+    feature_meta=atac_meta,
+    modality_name='atac',
     cis_feature='chr9:132283881-132284881',  # Regulatory region
+    guide_covariates=['cell_line'],
     output_dir='./output'
 )
 
@@ -195,8 +198,9 @@ prior_guide_effects = pd.DataFrame({
 current_atac_model = bayesDREAM(
     meta=current_meta,
     counts=current_atac_counts,
-    primary_modality='atac',
-    cis_feature='chr9:132283881-132284881'
+    modality_name='atac',
+    cis_feature='chr9:132283881-132284881',
+    guide_covariates=['cell_line']
 )
 
 # Fit with guide-level priors (🚧 NOT YET FUNCTIONAL)
@@ -254,13 +258,15 @@ model.fit_technical(sum_factor_col='sum_factor')
 model.save_technical_fit()
 
 # Stage 2: Cis fit (in new session)
-model2 = bayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B')
+model2 = bayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B',
+                    guide_covariates=['cell_line'])
 model2.load_technical_fit()
 model2.fit_cis(sum_factor_col='sum_factor')
 model2.save_cis_fit()
 
 # Stage 3: Trans fit (in new session)
-model3 = bayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B')
+model3 = bayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B',
+                    guide_covariates=['cell_line'])
 model3.load_technical_fit()
 model3.load_cis_fit()
 model3.fit_trans(sum_factor_col='sum_factor_adj')
@@ -300,11 +306,13 @@ See **[docs/SAVE_LOAD_GUIDE.md](docs/SAVE_LOAD_GUIDE.md)** for complete save/loa
 - Splice junctions: rows = junctions, columns = cells
 - Transcripts: rows = transcripts, columns = cells
 
-### Gene Metadata (Optional but Recommended)
-- Rows correspond to genes in counts matrix
-- Recommended columns: `gene`, `gene_name`, `gene_id`
-- Can use index as gene identifier if named
-- Enables gene-level annotations for downstream analysis
+### Feature Metadata (Optional but Recommended)
+- Rows correspond to features in counts matrix
+- For genes, recommended columns: `gene`, `gene_name`, `gene_id`
+- For ATAC, include: `chrom`, `start`, `end`, peak annotations
+- Can use index as feature identifier if named
+- Enables feature-level annotations for downstream analysis
+- Passed via `feature_meta` parameter during initialization
 
 See [docs/QUICKSTART_MULTIMODAL.md](docs/QUICKSTART_MULTIMODAL.md) for detailed format specifications.
 

@@ -65,11 +65,10 @@ class bayesDREAM(
         self,
         meta: pd.DataFrame,
         counts: pd.DataFrame = None,
-        gene_meta: pd.DataFrame = None,
-        modalities: Dict[str, Modality] = None,
+        modality_name: str = 'gene',
+        feature_meta: pd.DataFrame = None,
         cis_gene: str = None,
         cis_feature: str = None,
-        primary_modality: str = 'gene',
         guide_covariates: list = None,
         guide_covariates_ntc: list = None,
         sum_factor_col: str = 'sum_factor',
@@ -87,58 +86,125 @@ class bayesDREAM(
         meta : pd.DataFrame
             Cell-level metadata with columns: cell, guide, target, sum_factor, etc.
         counts : pd.DataFrame, optional
-            Count matrix for primary modality. Shape and interpretation depend on primary_modality:
-            - For 'gene': genes × cells (negbinom)
-            - For 'atac': regions × cells (negbinom)
-            - For other modalities: see add_*_modality() methods
-        gene_meta : pd.DataFrame, optional
-            Gene metadata DataFrame (only used if primary_modality='gene').
-            Recommended columns: 'gene', 'gene_name', 'gene_id'.
-            If not provided, minimal metadata will be created from counts.index.
-        modalities : Dict[str, Modality], optional
-            Pre-constructed modalities. Not commonly used.
+            Count matrix for the primary modality (features × cells). This will be used
+            for trans modeling and must represent negbinom count data.
+
+            The modality_name parameter determines how this data is interpreted:
+            - 'gene': Gene expression counts (most common)
+            - 'atac': ATAC-seq peak counts
+            - Custom name: User-defined count modality
+
+            Additional modalities can be added after initialization using add_*_modality() methods.
+        modality_name : str, default='gene'
+            Name/type of the primary modality provided in counts parameter.
+
+            Pre-set types:
+            - 'gene': Gene expression (default, use with feature_meta for gene annotations)
+            - 'atac': ATAC-seq peaks
+
+            Custom types:
+            - Any string: Creates a custom negbinom modality with that name
+
+            The primary modality MUST be negative binomial (count data) for cis/trans modeling.
+        feature_meta : pd.DataFrame, optional
+            Feature-level metadata for the primary modality.
+
+            For modality_name='gene':
+            - Recommended columns: 'gene', 'gene_name', 'gene_id'
+            - If not provided, minimal metadata created from counts.index
+
+            For other modalities:
+            - Should contain relevant feature annotations
+            - If not provided, minimal metadata created from counts.index
         cis_gene : str, optional
-            For gene modality: gene name to extract as 'cis' modality (e.g., 'GFI1B')
-            Alias for cis_feature when primary_modality='gene'
+            Feature to extract as 'cis' modality. When modality_name='gene', this is
+            a gene name (e.g., 'GFI1B'). For other modality types, use cis_feature instead.
+
+            The cis feature will be:
+            1. Extracted as a separate 'cis' modality (1 feature)
+            2. Removed from the primary modality (which becomes trans-only)
+            3. Used for cis effect modeling in fit_cis()
         cis_feature : str, optional
-            Feature identifier to extract as 'cis' modality from primary modality.
-            - For 'gene': gene name (same as cis_gene)
-            - For 'atac': region ID (e.g., 'chr9:132283881-132284881')
-            - For other modalities: feature identifier from that modality
-        primary_modality : str
-            Which modality to use for trans effects (default: 'gene')
-            The 'cis' modality will be extracted from this modality during initialization.
-        guide_covariates : list
-            Covariates for guide grouping
+            Alternative to cis_gene for non-gene modalities. Specifies which feature
+            to extract as the 'cis' modality.
+        guide_covariates : list, optional
+            Covariates for guide grouping (e.g., ['cell_line', 'batch'])
         guide_covariates_ntc : list, optional
-            Covariates for NTC guide grouping
-        output_dir : str
-            Output directory
-        label : str
-            Run label
-        device : str
-            'cpu' or 'cuda'
-        random_seed : int
-            Random seed
-        cores : int
-            Number of CPU cores
+            Covariates for NTC guide grouping (if different from guide_covariates)
+        sum_factor_col : str, default='sum_factor'
+            Column name in meta containing size factors
+        output_dir : str, default="./model_out"
+            Output directory for saving results
+        label : str, optional
+            Run label for organizing outputs
+        device : str, optional
+            'cpu' or 'cuda'. If None, auto-detects.
+        random_seed : int, default=2402
+            Random seed for reproducibility
+        cores : int, default=1
+            Number of CPU cores for parallel operations
+
+        Raises
+        ------
+        ValueError
+            - If cis_feature is specified but counts is None
+            - If cis_feature not found in counts
+            - If cis_feature has zero variance
+            - If primary modality would be empty after filtering
+
+        Examples
+        --------
+        Basic gene expression analysis:
+        >>> model = bayesDREAM(
+        ...     meta=cell_metadata,
+        ...     counts=gene_counts,
+        ...     cis_gene='GFI1B'
+        ... )
+
+        With gene metadata:
+        >>> model = bayesDREAM(
+        ...     meta=cell_metadata,
+        ...     counts=gene_counts,
+        ...     feature_meta=gene_metadata,
+        ...     cis_gene='GFI1B',
+        ...     guide_covariates=['cell_line']
+        ... )
+
+        ATAC-seq analysis:
+        >>> model = bayesDREAM(
+        ...     meta=cell_metadata,
+        ...     counts=atac_counts,
+        ...     modality_name='atac',
+        ...     feature_meta=peak_metadata,
+        ...     cis_feature='chr9:132283881-132284881'
+        ... )
+
+        Custom modality:
+        >>> model = bayesDREAM(
+        ...     meta=cell_metadata,
+        ...     counts=my_counts,
+        ...     modality_name='my_custom_modality',
+        ...     cis_feature='feature_123'
+        ... )
 
         Notes
         -----
-        The 'cis' modality is ONLY extracted during initialization from the primary modality.
-        When you call add_*_modality() methods later, NO cis extraction occurs.
+        - The 'cis' modality is ONLY extracted during initialization from the primary modality
+        - When you call add_*_modality() methods later, NO cis extraction occurs
+        - The primary modality MUST be negbinom (count data) for cis/trans modeling
+        - Additional modalities (transcripts, splicing, etc.) are added via add_*_modality() methods
         """
-        # Initialize modalities dict
-        self.modalities = modalities if modalities is not None else {}
+        # Initialize modalities dict (always start empty, build from counts)
+        self.modalities = {}
 
-        # Resolve cis_feature: cis_gene is an alias for cis_feature when primary_modality='gene'
+        # Resolve cis_feature: cis_gene is an alias for cis_feature when modality_name='gene'
         if cis_gene is not None and cis_feature is not None:
             raise ValueError("Provide either cis_gene or cis_feature, not both")
         if cis_gene is not None:
-            if primary_modality != 'gene':
+            if modality_name != 'gene':
                 warnings.warn(
-                    f"cis_gene parameter is intended for primary_modality='gene'. "
-                    f"You have primary_modality='{primary_modality}'. Use cis_feature instead.",
+                    f"cis_gene parameter is intended for modality_name='gene'. "
+                    f"You have modality_name='{modality_name}'. Use cis_feature instead.",
                     UserWarning
                 )
             cis_feature = cis_gene
@@ -146,95 +212,59 @@ class bayesDREAM(
         # Store original counts for base class initialization
         counts_for_base = counts
 
-        # Extract 'cis' modality from primary modality (if provided)
+        # Validate that counts is provided if cis_feature is specified
+        if cis_feature is not None and counts is None:
+            raise ValueError("Cannot specify cis_feature without providing counts")
+
+        # Extract 'cis' modality from primary modality (if both counts and cis_feature provided)
         if counts is not None and cis_feature is not None:
-            if primary_modality == 'gene':
+            if modality_name == 'gene':
                 self._extract_cis_from_gene(counts, cis_feature)
-            elif primary_modality == 'atac':
-                raise NotImplementedError(
-                    "ATAC as primary modality during initialization is not yet implemented.\n"
-                    "Use primary_modality='gene' and then call model.add_atac_modality(..., cis_region='...')"
-                )
             else:
-                raise NotImplementedError(
-                    f"Cis extraction from primary_modality='{primary_modality}' is not yet implemented.\n"
-                    f"Currently supported: 'gene'"
-                )
+                # Generic cis extraction for any negbinom modality
+                self._extract_cis_generic(counts, cis_feature, modality_name)
 
         # Create primary modality
         if counts is not None:
-            if primary_modality == 'gene':
-                self._create_gene_modality(counts, cis_feature)
-            elif primary_modality == 'atac':
-                raise NotImplementedError(
-                    "ATAC as primary modality during initialization is not yet implemented.\n"
-                    "Use primary_modality='gene' and then call model.add_atac_modality()"
-                )
+            if modality_name == 'gene':
+                # Use gene-specific creation (with gene_meta handling)
+                self._create_gene_modality(counts, cis_feature, gene_meta=feature_meta)
             else:
-                raise NotImplementedError(
-                    f"Primary modality '{primary_modality}' is not yet implemented.\n"
-                    f"Currently supported: 'gene'"
-                )
+                # Generic negbinom modality creation
+                self._create_negbinom_modality(counts, modality_name, cis_feature, feature_meta)
 
-        # Validate primary modality exists (or will be added later)
-        if primary_modality not in self.modalities:
-            if counts_for_base is not None:
-                # counts provided but primary_modality missing - this is an error
-                raise ValueError(f"primary_modality '{primary_modality}' not found in modalities. "
-                               f"Available: {list(self.modalities.keys())}")
-            else:
-                # No counts and no primary modality yet - will be added via add_*_modality()
-                print(f"[INFO] Primary modality '{primary_modality}' not yet present. "
-                      f"Add it via add_*_modality() before fitting.")
-                primary_counts = None  # Will be set when modality is added
-
-        self.primary_modality = primary_modality
+        # Store primary modality name
+        self.primary_modality = modality_name
 
         # ========================================================================
-        # CRITICAL VALIDATION: Primary modality MUST be negative binomial when cis is present
+        # CRITICAL VALIDATION: Primary modality MUST be negative binomial
         # ========================================================================
-        if cis_feature is not None:
-            # Check if primary modality exists and validate its distribution
-            if primary_modality in self.modalities:
-                primary_distribution = self.modalities[primary_modality].distribution
-                if primary_distribution != 'negbinom':
-                    raise ValueError(
-                        f"Primary modality '{primary_modality}' has distribution '{primary_distribution}', "
-                        f"but cis modeling requires primary modality to be 'negbinom'. "
-                        f"The cis feature/gene must represent count data that follows a negative binomial distribution."
-                    )
-                print(f"[VALIDATION] Primary modality '{primary_modality}' is 'negbinom' - cis modeling is valid")
-            elif counts_for_base is not None:
-                # Counts were provided, so we're creating the primary modality now
-                # For 'gene' primary modality, distribution is always 'negbinom', so we're good
-                # For other modalities, they haven't been implemented yet anyway
-                if primary_modality == 'gene':
-                    # Gene modality is always negbinom, validation passes
-                    print(f"[VALIDATION] Creating primary modality '{primary_modality}' as 'negbinom' for cis modeling")
-                else:
-                    # Other primary modalities are not implemented for cis extraction yet
-                    # This should be caught earlier, but add a check just in case
-                    warnings.warn(
-                        f"Primary modality '{primary_modality}' is not 'gene'. "
-                        f"Ensure this modality uses 'negbinom' distribution for cis modeling.",
-                        UserWarning
-                    )
-            else:
-                # No counts and no primary modality yet - will be validated when modality is added
-                warnings.warn(
-                    f"Cannot validate primary modality distribution yet (modality not loaded). "
-                    f"Ensure primary modality '{primary_modality}' uses 'negbinom' distribution for cis modeling.",
-                    UserWarning
+        if modality_name in self.modalities:
+            primary_distribution = self.modalities[modality_name].distribution
+            if primary_distribution != 'negbinom':
+                raise ValueError(
+                    f"Primary modality '{modality_name}' has distribution '{primary_distribution}', "
+                    f"but bayesDREAM requires primary modality to be 'negbinom' for cis/trans modeling. "
+                    f"The primary modality must represent count data that follows a negative binomial distribution."
                 )
+            if cis_feature is not None:
+                print(f"[VALIDATION] Primary modality '{modality_name}' is 'negbinom' - cis modeling is valid")
+        elif counts is None:
+            # No counts provided - user will add modalities later
+            warnings.warn(
+                f"No counts provided during initialization. Primary modality '{modality_name}' must be added "
+                f"via add_custom_modality() with distribution='negbinom' before fitting.",
+                UserWarning
+            )
 
         # Get counts for base class initialization
-        # Use original counts (with cis gene) if provided, otherwise get from primary modality
+        # Use original counts (with cis feature) if provided, otherwise get from primary modality
         if counts_for_base is None:
-            if primary_modality in self.modalities:
-                primary_counts = self.modalities[primary_modality].count_df
+            if modality_name in self.modalities:
+                primary_counts = self.modalities[modality_name].count_df
                 if primary_counts is None:
                     # Convert array to DataFrame
-                    mod = self.modalities[primary_modality]
+                    mod = self.modalities[modality_name]
                     if mod.cells_axis == 1:
                         primary_counts = pd.DataFrame(
                             mod.counts,
@@ -252,23 +282,27 @@ class bayesDREAM(
                 # Will be replaced when modality is added
                 print("[INFO] Creating placeholder counts - will be replaced when modality is added")
                 # Use meta['cell'] as columns to pass validation
-                # Use cis_gene as index if provided, otherwise use placeholder
-                placeholder_index = [cis_gene] if cis_gene is not None else ['_placeholder_']
+                # Use cis_feature as index if provided, otherwise use placeholder
+                placeholder_index = [cis_feature] if cis_feature is not None else ['_placeholder_']
                 primary_counts = pd.DataFrame(
                     np.ones((1, len(meta))),  # Use 1s instead of 0s to avoid zero-count error
                     index=placeholder_index,
                     columns=meta['cell'].values
                 )
         else:
-            # Use original counts (includes cis gene for cis modeling)
+            # Use original counts (includes cis feature for cis modeling)
             primary_counts = counts_for_base
 
-        # Initialize base bayesDREAM with original counts (including cis gene)
+        # Prepare gene_meta for base class
+        # Only pass feature_meta as gene_meta if modality_name is 'gene', otherwise None
+        gene_meta_for_base = feature_meta if modality_name == 'gene' else None
+
+        # Initialize base bayesDREAM with original counts (including cis feature)
         super().__init__(
             meta=meta,
             counts=primary_counts,
-            gene_meta=gene_meta,
-            cis_gene=cis_gene,
+            gene_meta=gene_meta_for_base,
+            cis_gene=cis_feature,  # Pass resolved cis_feature as cis_gene
             guide_covariates=guide_covariates,
             guide_covariates_ntc=guide_covariates_ntc,
             sum_factor_col=sum_factor_col,
@@ -340,7 +374,112 @@ class bayesDREAM(
             cells_axis=1
         )
 
-    def _create_gene_modality(self, counts: pd.DataFrame, cis_gene: Optional[str] = None):
+    def _extract_cis_generic(self, counts: pd.DataFrame, cis_feature: str, modality_name: str):
+        """
+        Extract 'cis' modality from a generic negbinom modality.
+
+        Parameters
+        ----------
+        counts : pd.DataFrame
+            Feature counts (features × cells)
+        cis_feature : str
+            Feature name to extract as cis modality
+        modality_name : str
+            Name of the modality type (for error messages)
+        """
+        if cis_feature not in counts.index:
+            raise ValueError(
+                f"cis_feature '{cis_feature}' not found in counts.\n"
+                f"Available features: {counts.index[:10].tolist()}..."
+            )
+
+        # Check if cis feature has zero variance (critical for cis modeling)
+        cis_feature_std = counts.loc[cis_feature].std()
+        if cis_feature_std == 0:
+            raise ValueError(
+                f"Cis feature '{cis_feature}' has zero standard deviation across all cells. "
+                f"Cannot model cis effects for a feature with constant values."
+            )
+
+        print(f"[INFO] Extracting 'cis' modality from feature '{cis_feature}' ({modality_name})")
+        cis_feature_meta = pd.DataFrame({
+            'feature': [cis_feature],
+            'modality_type': [modality_name]
+        }, index=[cis_feature])
+        self.modalities['cis'] = Modality(
+            name='cis',
+            counts=counts.loc[[cis_feature]],
+            feature_meta=cis_feature_meta,
+            distribution='negbinom',
+            cells_axis=1
+        )
+
+    def _create_negbinom_modality(
+        self,
+        counts: pd.DataFrame,
+        modality_name: str,
+        cis_feature: Optional[str] = None,
+        feature_meta: Optional[pd.DataFrame] = None
+    ):
+        """
+        Create a generic negbinom modality (excluding cis feature if specified).
+
+        Parameters
+        ----------
+        counts : pd.DataFrame
+            Feature counts (features × cells)
+        modality_name : str
+            Name for this modality
+        cis_feature : str, optional
+            If provided, this feature will be excluded from the modality
+        feature_meta : pd.DataFrame, optional
+            Feature metadata. If None, creates minimal metadata from counts.index
+        """
+        if modality_name in self.modalities:
+            warnings.warn(f"Modality '{modality_name}' already exists. Overwriting.")
+
+        # Exclude cis feature from modality (trans features only)
+        if cis_feature is not None and cis_feature in counts.index:
+            print(f"[INFO] Creating '{modality_name}' modality with trans features (excluding '{cis_feature}')")
+            counts_trans = counts.drop(index=cis_feature)
+        else:
+            counts_trans = counts
+
+        # Filter features with zero standard deviation across ALL cells
+        feature_stds = counts_trans.std(axis=1)
+        zero_std_mask = feature_stds == 0
+        num_zero_std = zero_std_mask.sum()
+
+        if num_zero_std > 0:
+            print(f"[INFO] Filtering {num_zero_std} feature(s) with zero standard deviation across all cells")
+            counts_trans = counts_trans.loc[~zero_std_mask]
+
+        if len(counts_trans) == 0:
+            raise ValueError(f"No features left in '{modality_name}' after filtering features with zero standard deviation!")
+
+        # Create or use provided feature metadata
+        if feature_meta is None:
+            mod_feature_meta = pd.DataFrame({
+                'feature': counts_trans.index.tolist()
+            }, index=counts_trans.index)
+        else:
+            # Use provided metadata, but subset to remaining features
+            mod_feature_meta = feature_meta.loc[counts_trans.index].copy()
+
+        self.modalities[modality_name] = Modality(
+            name=modality_name,
+            counts=counts_trans,
+            feature_meta=mod_feature_meta,
+            distribution='negbinom',
+            cells_axis=1
+        )
+
+    def _create_gene_modality(
+        self,
+        counts: pd.DataFrame,
+        cis_gene: Optional[str] = None,
+        gene_meta: Optional[pd.DataFrame] = None
+    ):
         """
         Create 'gene' modality from gene counts (excluding cis gene if specified).
 
@@ -350,6 +489,8 @@ class bayesDREAM(
             Gene counts (genes × cells)
         cis_gene : str, optional
             If provided, this gene will be excluded from the gene modality
+        gene_meta : pd.DataFrame, optional
+            Gene metadata. If None, creates minimal metadata from counts.index
         """
         if 'gene' in self.modalities:
             warnings.warn("Gene modality already exists. Overwriting.")
@@ -373,10 +514,15 @@ class bayesDREAM(
         if len(counts_trans) == 0:
             raise ValueError("No genes left after filtering genes with zero standard deviation!")
 
-        # Create gene modality (trans genes only)
-        gene_feature_meta = pd.DataFrame({
-            'gene': counts_trans.index.tolist()
-        }, index=counts_trans.index)
+        # Create or use provided gene metadata
+        if gene_meta is None:
+            gene_feature_meta = pd.DataFrame({
+                'gene': counts_trans.index.tolist()
+            }, index=counts_trans.index)
+        else:
+            # Use provided gene_meta, but subset to remaining genes
+            gene_feature_meta = gene_meta.loc[counts_trans.index].copy()
+
         self.modalities['gene'] = Modality(
             name='gene',
             counts=counts_trans,

@@ -292,7 +292,7 @@ model.save_trans_fit()
 
 ```python
 # Stage 1: Fit technical on gene expression (primary modality)
-model = bayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B', primary_modality='gene')
+model = bayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B', guide_covariates=['cell_line'])
 model.add_atac_modality(atac_counts, region_meta)
 
 model.set_technical_groups(['cell_line'])
@@ -300,7 +300,7 @@ model.fit_technical(modality_name='gene', sum_factor_col='sum_factor')
 model.save_technical_fit()  # Saves alpha_x_prefit, alpha_y_prefit, alpha_y_prefit_atac
 
 # Stage 2: Load and fit cis
-model2 = bayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B', primary_modality='gene')
+model2 = bayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B', guide_covariates=['cell_line'])
 model2.add_atac_modality(atac_counts, region_meta)
 
 model2.load_technical_fit()  # Loads all technical parameters including per-modality
@@ -308,7 +308,7 @@ model2.fit_cis(sum_factor_col='sum_factor')
 model2.save_cis_fit()
 
 # Stage 3: Load and fit trans
-model3 = bayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B', primary_modality='gene')
+model3 = bayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B', guide_covariates=['cell_line'])
 model3.add_atac_modality(atac_counts, region_meta)
 
 model3.load_technical_fit()

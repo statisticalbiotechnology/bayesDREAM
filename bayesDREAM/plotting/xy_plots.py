@@ -2503,8 +2503,8 @@ def plot_xy_data(
 
         print(f"[SUBSET] Filtering {n_cells_before} → {n_cells_after} cells based on {subset_meta}")
 
-        # Apply mask to x_true
-        x_true = x_true[subset_mask]
+        # NOTE: Don't subset x_true here - let _align_cells_to_modality() handle it
+        # (subsetting here causes IndexError when mask is applied again in alignment)
 
     # Get modality
     if modality_name is None:

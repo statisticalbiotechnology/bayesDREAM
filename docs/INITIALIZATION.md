@@ -379,6 +379,7 @@ model = bayesDREAM(
     meta=meta,
     counts=gene_counts,
     cis_gene='GFI1B',
+    guide_covariates=['cell_line'],
     output_dir='./output'
 )
 
@@ -389,7 +390,6 @@ model.set_technical_groups(['cell_line'])
 # Fit technical model (uses reference group for initialization)
 model.fit_technical(
     sum_factor_col='sum_factor',
-    modality_name='gene',
     num_steps=5000,
     learning_rate=0.01
 )

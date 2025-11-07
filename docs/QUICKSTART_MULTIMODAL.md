@@ -29,8 +29,9 @@ gene_meta = pd.read_csv('gene_meta.csv')  # Optional: gene annotations
 model = bayesDREAM(
     meta=meta,
     counts=gene_counts,
-    gene_meta=gene_meta,  # Optional: gene, gene_name, gene_id
+    feature_meta=gene_meta,  # Optional: gene, gene_name, gene_id
     cis_gene='GFI1B',
+    guide_covariates=['cell_line'],
     output_dir='./output',
     label='my_run'
 )
@@ -58,8 +59,9 @@ sj_meta = pd.read_csv('SJ_meta.csv')
 model = bayesDREAM(
     meta=meta,
     counts=gene_counts,
-    gene_meta=gene_meta,  # Optional: provide gene annotations
+    feature_meta=gene_meta,  # Optional: provide gene annotations
     cis_gene='GFI1B',
+    guide_covariates=['cell_line'],
     output_dir='./output',
     label='with_splicing'
 )
@@ -162,23 +164,26 @@ model.add_custom_modality(
 from bayesDREAM import bayesDREAM
 
 # Example 1: Gene counts (negbinom) - DEFAULT
-model = bayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B')
+model = bayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B', guide_covariates=['cell_line'])
 model.set_technical_groups(['cell_line'])
 model.fit_technical(sum_factor_col='sum_factor', distribution='negbinom')
 model.fit_trans(sum_factor_col='sum_factor_adj', distribution='negbinom', function_type='additive_hill')
 
 # Example 2: Continuous measurements (normal) - e.g., SpliZ scores
-model = bayesDREAM(meta=meta, counts=spliz_scores, cis_gene='GFI1B')
+model = bayesDREAM(meta=meta, counts=spliz_scores, modality_name='spliz',
+                   cis_gene='GFI1B', guide_covariates=['cell_line'])
 model.set_technical_groups(['cell_line'])
 model.fit_technical(distribution='normal')
 model.fit_trans(distribution='normal', function_type='polynomial')
 
 # Example 3: Exon skipping PSI (binomial)
-model = bayesDREAM(meta=meta, counts=inclusion_counts, cis_gene='GFI1B')
+model = bayesDREAM(meta=meta, counts=inclusion_counts, modality_name='exon_skip',
+                   cis_gene='GFI1B', guide_covariates=['cell_line'])
 model.fit_trans(distribution='binomial', denominator=total_counts, function_type='single_hill')
 
 # Example 4: Donor usage (multinomial)
-model = bayesDREAM(meta=meta, counts=donor_usage_3d, cis_gene='GFI1B')
+model = bayesDREAM(meta=meta, counts=donor_usage_3d, modality_name='donor_usage',
+                   cis_gene='GFI1B', guide_covariates=['cell_line'])
 model.fit_trans(distribution='multinomial', function_type='additive_hill')
 ```
 
@@ -295,7 +300,8 @@ subset = mod.get_cell_subset(['cell1', 'cell2', 'cell3'])
 ### Workflow 1: Genes + Splicing
 ```python
 # 1. Create model with genes
-model = bayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B')
+model = bayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B',
+                   guide_covariates=['cell_line'])
 
 # 2. Add splicing (all types including raw SJ counts)
 model.add_splicing_modality(
@@ -319,7 +325,8 @@ donor_mod = model.get_modality('splicing_donor')  # Donor usage
 ### Workflow 2: Genes + Transcripts + Splicing
 ```python
 # 1. Create model
-model = bayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B')
+model = bayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B',
+                   guide_covariates=['cell_line'])
 
 # 2. Add transcripts (both counts and usage)
 model.add_transcript_modality(
@@ -345,33 +352,23 @@ tx_usage_mod = model.get_modality('transcript_usage')
 exon_mod = model.get_modality('splicing_exon_skip')
 ```
 
-### Workflow 3: Custom Modalities Only
+### Workflow 3: Custom Negbinom Modality
 ```python
-# Create modalities manually
-from bayesDREAM import Modality
-
-gene_mod = Modality(
-    name='gene',
-    counts=gene_counts,
-    feature_meta=pd.DataFrame({'gene': gene_counts.index}),
-    distribution='negbinom',
-    cells_axis=1
+# Use custom modality name for primary modality
+model = bayesDREAM(
+    meta=meta,
+    counts=my_custom_counts,
+    modality_name='my_custom_negbinom',  # Custom name instead of 'gene'
+    cis_feature='feature_123',           # Use cis_feature for non-gene modalities
+    guide_covariates=['cell_line']
 )
 
-spliz_mod = Modality(
+# Add additional custom modalities
+model.add_custom_modality(
     name='spliz',
     counts=spliz_scores,
     feature_meta=pd.DataFrame({'gene': spliz_scores.index}),
-    distribution='normal',
-    cells_axis=1
-)
-
-# Initialize with pre-built modalities
-model = bayesDREAM(
-    meta=meta,
-    modalities={'gene': gene_mod, 'spliz': spliz_mod},
-    cis_gene='GFI1B',
-    primary_modality='gene'
+    distribution='normal'
 )
 ```
 

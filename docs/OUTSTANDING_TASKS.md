@@ -2,7 +2,7 @@
 
 This document tracks remaining implementation tasks and known issues.
 
-Last updated: 2025-01-05
+Last updated: 2025-01-07
 
 ---
 
@@ -24,15 +24,57 @@ Last updated: 2025-01-05
 
 **Parameters**:
 ```python
-# For gene modality
-model = bayesDREAM(counts=gene_counts, cis_gene='GFI1B', ...)
+# For gene modality (default)
+model = bayesDREAM(
+    meta=meta,
+    counts=gene_counts,
+    cis_gene='GFI1B',
+    guide_covariates=['cell_line']
+)
 # Creates: 'cis' modality (just GFI1B) + 'gene' modality (trans genes)
 
-# For ATAC (not yet implemented as primary, use add_atac_modality with cis_region)
-model = bayesDREAM(counts=gene_counts, cis_gene=None)
-model.add_atac_modality(atac_counts, region_meta, cis_region='chr9:123-456')
-# Creates/updates: 'cis' modality (chr9:123-456)
+# For ATAC as primary modality (implemented via generic negbinom)
+model = bayesDREAM(
+    meta=meta,
+    counts=atac_counts,
+    modality_name='atac',
+    cis_feature='chr9:123-456',
+    feature_meta=region_meta,
+    guide_covariates=['cell_line']
+)
+# Creates: 'cis' modality (chr9:123-456) + 'atac' modality (other regions)
+
+# For any custom negbinom modality as primary
+model = bayesDREAM(
+    meta=meta,
+    counts=custom_counts,
+    modality_name='my_custom_modality',
+    cis_feature='feature_123',
+    feature_meta=feature_meta,
+    guide_covariates=['cell_line']
+)
+# Creates: 'cis' modality (feature_123) + 'my_custom_modality' (other features)
 ```
+
+### API Refactoring (2025-01-07)
+
+**Change**: Cleaned up initialization parameters for clarity and extensibility.
+
+**Removed Parameters**:
+- `modalities` - Always start with empty dict, build from counts
+- `primary_modality` - Replaced with `modality_name`
+- `gene_meta` - Replaced with `feature_meta`
+
+**New/Renamed Parameters**:
+- `modality_name` (default='gene') - Name/type of primary modality
+- `feature_meta` - General feature-level metadata for any modality
+- `guide_covariates` - Now explicitly visible in signature (was implicit)
+
+**Benefits**:
+- Clearer intent: `modality_name='atac'` vs `primary_modality='atac'`
+- More general: `feature_meta` works for genes, ATAC, transcripts, etc.
+- Explicit parameters: `guide_covariates` no longer hidden
+- Validation: Primary modality MUST be negbinom (enforced at initialization)
 
 ---
 
@@ -80,19 +122,23 @@ model.add_atac_modality(atac_counts, region_meta, cis_region='chr9:123-456')
 
 ### 2. Modality-Specific Cis/Trans Fitting
 
-**Status**: Not implemented
+**Status**: Partially implemented
 
-**Description**: Currently, `fit_cis()` and `fit_trans()` primarily use the primary modality. Should support fitting cis/trans effects for non-primary modalities.
+**Description**: Currently, `fit_cis()` and `fit_trans()` use the primary modality (which can now be any negbinom modality). Support for fitting cis/trans on non-primary modalities is limited.
+
+**What Works**:
+- Any negbinom modality can be primary (gene, ATAC, custom)
+- `fit_cis()` extracts 'cis' modality and fits on it (works for all primary types)
+- `fit_trans()` can fit any modality using `modality_name` parameter
 
 **Current Limitations**:
-- `fit_cis()` always uses primary modality (by design - see line 237-244)
-- `fit_trans()` can fit any modality but requires manual setup
-- No standardized workflow for fitting ATAC or splicing modalities
+- No standardized workflow for fitting splicing or other non-negbinom modalities
+- No examples showing multi-modality cis/trans workflows
 
 **What's Needed**:
-1. Determine if cis modeling makes sense for non-gene modalities
-2. If yes, generalize `fit_cis()` to handle different modality types
-3. Add examples showing how to fit_trans for splicing/ATAC/custom modalities
+1. Add examples showing how to fit_trans for splicing/custom modalities
+2. Document best practices for multi-modal cis/trans workflows
+3. Consider whether cis modeling makes sense for multinomial/binomial distributions
 
 ---
 
@@ -130,18 +176,23 @@ model.add_atac_modality(atac_counts, region_meta, cis_region='chr9:123-456')
 
 ### 5. Documentation Updates
 
-**Status**: Partially complete
+**Status**: Mostly complete
 
 **What's Done**:
-- CLAUDE.md updated with modular structure
-- README.md updated with refactoring note
+- CLAUDE.md updated with modular structure and new API
+- README.md updated with refactoring note and new API examples
 - REFACTORING_PLAN.md marked complete
+- API_REFERENCE.md updated with new initialization parameters (2025-01-07)
+- QUICKSTART_MULTIMODAL.md updated with new API examples (2025-01-07)
+- ARCHITECTURE.md updated with new parameter references (2025-01-07)
+- INITIALIZATION.md updated with new API examples (2025-01-07)
+- OUTSTANDING_TASKS.md updated with recent changes (2025-01-07)
 
 **What's Needed**:
-- Add API reference documentation for all public methods
+- Add comprehensive API reference for all public methods
 - Create usage examples for each modality type
-- Document distribution-specific requirements
 - Add troubleshooting guide
+- Document common error messages and solutions
 
 ---
 
@@ -199,6 +250,11 @@ model.add_atac_modality(atac_counts, region_meta, cis_region='chr9:123-456')
 - ✅ Multinomial per-group zero-category masking (2025-01-05)
 - ✅ Binomial per-group boundary checking (2025-01-05)
 - ✅ Empirical Bayes initialization for binomial and multinomial (2025-01-04)
+- ✅ Feature_names preservation bug fix in get_cell_subset() (2025-01-07)
+- ✅ Plotting double-subsetting bug fix in xy_plots.py (2025-01-07)
+- ✅ API refactoring: modality_name, feature_meta, guide_covariates parameters (2025-01-07)
+- ✅ Generic negbinom modality creation - ATAC/custom as primary now supported (2025-01-07)
+- ✅ Documentation updates for new API across 5 major docs (2025-01-07)
 
 ---
 

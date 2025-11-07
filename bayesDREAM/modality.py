@@ -319,6 +319,7 @@ class Modality:
             distribution=self.distribution,
             denominator=new_denom,
             cells_axis=self.cells_axis,
+            feature_names=self.feature_names,  # Preserve feature names during cell subsetting
             cell_names=new_cell_names,
             inc1=new_inc1,
             inc2=new_inc2,
