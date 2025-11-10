@@ -58,11 +58,8 @@ class TransFitter:
         Vmax_mean_tensor,
         Vmax_alpha_tensor,
         n_mu_tensor,
-        n_sigma_base_tensor,
         Amean_tensor,
         p_n_tensor,
-        threshold,
-        slope,
         epsilon_tensor,
         x_true_sample,
         log2_x_true_sample,
@@ -71,7 +68,6 @@ class TransFitter:
         alpha_y_sample=None,
         C=None,
         groups_tensor=None,
-        predictive_mode=False,
         temperature=1.0,
         use_straight_through=False,
         function_type='single_hill',
@@ -86,8 +82,6 @@ class TransFitter:
         if use_alpha:
             alpha_dist = dist.RelaxedBernoulliStraightThrough if use_straight_through else dist.RelaxedBernoulli
 
-        if groups_tensor is not None:
-            cfull_plate = pyro.plate("cfull_plate", C, dim=-2)  # <-- Store it as a variable
         trans_plate = pyro.plate("trans_plate", T, dim=-1)
         
         ##########
@@ -103,7 +97,7 @@ class TransFitter:
         if alpha_y_sample is not None:
             alpha_y = alpha_y_sample
         elif groups_tensor is not None:
-            with pyro.plate("cell_lines_plate", C-1, dim=-2):  # **Now correctly uses C-1**
+            with pyro.plate("technical_groups_plate", C-1, dim=-2):  # **Now correctly uses C-1**
                 with trans_plate:
                     alpha_alpha = pyro.sample("alpha_alpha", dist.Exponential(1 / alpha_alpha_mu_tensor))  # shape = [C-1, T]
                     alpha_mu = pyro.sample("alpha_mu", dist.Gamma(1, 1))  # shape = [C-1, T]
@@ -244,7 +238,7 @@ class TransFitter:
             else:
                 log_y_true = log_y_true_mu #+ 1e-10
     
-            # Now we sample y_obs which is NxT (or NxTxK for multinomial, NxTxD for mvnormal)
+            # Now we sample y_obs which is NxT (or NxTxK for multinomial)
             # Use data_plate for N dimension
 
             # Compute mu_y from log_y_true (this is the dose-response function output)
@@ -270,10 +264,10 @@ class TransFitter:
                     check_tensor("coeffs", coeffs)
 
             # Call distribution-specific observation sampler
-            from ..distributions import get_observation_sampler
+            from .distributions import get_observation_sampler
             observation_sampler = get_observation_sampler(distribution, 'trans')
 
-            # Prepare alpha_y_full (full C cell lines, including reference)
+            # Prepare alpha_y_full (full C technical groups, including reference)
             if alpha_y is not None and groups_tensor is not None:
                 if alpha_y.dim() == 3:  # Predictive: (S, C-1, T)
                     ones_shape = (alpha_y.shape[0], 1, T)
@@ -332,22 +326,6 @@ class TransFitter:
                     T=T,
                     C=C
                 )
-            elif distribution == 'mvnormal':
-                # For mvnormal, mu_y should be [N, T, D] and we need covariance
-                # Use phi_y to construct covariance (for now, diagonal)
-                sigma_y = 1.0 / torch.sqrt(phi_y)  # [T]
-                cov_y = torch.diag_embed(sigma_y.unsqueeze(-1).expand(T, D))  # [T, D, D]
-                observation_sampler(
-                    y_obs_tensor=y_obs_tensor,
-                    mu_y=mu_y,  # Should be [N, T, D]
-                    cov_y=cov_y,
-                    alpha_y_full=alpha_y_full,
-                    groups_tensor=groups_tensor,
-                    N=N,
-                    T=T,
-                    D=D,
-                    C=C
-                )
             else:
                 raise ValueError(f"Unknown distribution: {distribution}")
 
@@ -370,11 +348,8 @@ class TransFitter:
         K_alpha: float = 2,
         Vmax_alpha: float = 2,
         n_mu: float = 0,
-        n_sigma_base: float = 5,
         p_n: float = 1e-6,
         epsilon: float = 1e-6,
-        threshold: float = 0.1,
-        slope: float = 50,
         init_temp: float = 1.0,
         #final_temp: float = 1e-8,
         final_temp: float = 0.1,
@@ -392,7 +367,7 @@ class TransFitter:
         modality_name : str, optional
             Name of modality to fit. If None, uses primary modality.
         distribution : str, optional
-            Distribution type: 'negbinom', 'multinomial', 'binomial', 'normal', 'mvnormal'
+            Distribution type: 'negbinom', 'multinomial', 'binomial', 'normal'
             If None, auto-detected from modality.
         sum_factor_col : str, optional
             Sum factor column name. Required for negbinom, ignored for others.
@@ -436,8 +411,8 @@ class TransFitter:
         # Set conditional default for niters
         # ---------------------------
         if niters is None:
-            # Default: 100,000 unless multivariate (multinomial or mvnormal) OR polynomial function, then 200,000
-            if distribution in ('multinomial', 'mvnormal'):
+            # Default: 100,000 unless multinomial OR polynomial function, then 200,000
+            if distribution == 'multinomial':
                 niters = 200_000
                 print(f"[INFO] Using default niters=200,000 for multivariate distribution '{distribution}'")
             elif function_type == 'polynomial':
@@ -472,7 +447,7 @@ class TransFitter:
         print(f"[INFO] Fitting trans model for modality '{modality_name}' (distribution: {distribution})")
 
         # Validate distribution-specific requirements
-        from ..distributions import requires_sum_factor, requires_denominator
+        from .distributions import requires_sum_factor, requires_denominator
 
         if requires_sum_factor(distribution) and sum_factor_col is None:
             raise ValueError(f"Distribution '{distribution}' requires sum_factor_col parameter")
@@ -548,16 +523,14 @@ class TransFitter:
                 denominator_subset = denominator[:, cell_indices, :].transpose(1, 0, 2)
                 denominator_tensor = torch.tensor(denominator_subset, dtype=torch.float32, device=self.model.device)
 
-        # Detect data dimensions (for multinomial and mvnormal)
-        from ..distributions import is_3d_distribution
+        # Detect data dimensions (for multinomial)
+        from .distributions import is_3d_distribution
         K = None
         D = None
         if is_3d_distribution(distribution):
             if y_obs.ndim == 3:
                 if distribution == 'multinomial':
                     K = y_obs.shape[2]  # Number of categories
-                elif distribution == 'mvnormal':
-                    D = y_obs.shape[2]  # Dimensionality
             else:
                 raise ValueError(f"Distribution '{distribution}' requires 3D data but got shape {y_obs.shape}")
         if self.model.x_true_type == 'point':
@@ -570,7 +543,6 @@ class TransFitter:
         K_alpha_tensor = torch.tensor(K_alpha, dtype=torch.float32, device=self.model.device)
         Vmax_alpha_tensor = torch.tensor(Vmax_alpha, dtype=torch.float32, device=self.model.device)
         n_mu_tensor = torch.tensor(n_mu, dtype=torch.float32, device=self.model.device)
-        n_sigma_base_tensor = torch.tensor(n_sigma_base, dtype=torch.float32, device=self.model.device)
         y_obs_tensor = torch.tensor(y_obs, dtype=torch.float32, device=self.model.device)
         epsilon_tensor = torch.tensor(epsilon, dtype=torch.float32, device=self.model.device)
         p_n_tensor = torch.tensor(p_n, dtype=torch.float32, device=self.model.device)
@@ -652,11 +624,8 @@ class TransFitter:
                 Vmax_mean_tensor,
                 Vmax_alpha_tensor,
                 n_mu_tensor,
-                n_sigma_base_tensor,
                 Amean_tensor,
                 p_n_tensor,
-                threshold,
-                slope,
                 epsilon_tensor,
                 x_true_sample = self.model.x_true.mean(dim=0) if self.model.x_true_type == "posterior" else self.model.x_true,
                 log2_x_true_sample = self.log2_x_true.mean(dim=0) if self.log2_x_true_type == "posterior" else self.log2_x_true,
@@ -665,7 +634,6 @@ class TransFitter:
                 alpha_y_sample = alpha_y_prefit.mean(dim=0) if alpha_y_type == "posterior" else alpha_y_prefit,
                 C = C,
                 groups_tensor=groups_tensor,
-                predictive_mode=False,
                 temperature=torch.tensor(init_temp, dtype=torch.float32, device=self.model.device),
                 use_straight_through=False,
                 function_type=function_type,
@@ -781,11 +749,8 @@ class TransFitter:
                 Vmax_mean_tensor,
                 Vmax_alpha_tensor,
                 n_mu_tensor,
-                n_sigma_base_tensor,
                 Amean_tensor,
                 p_n_tensor,
-                threshold,
-                slope,
                 epsilon_tensor,
                 x_true_sample = x_true_sample,
                 log2_x_true_sample = log2_x_true_sample,
@@ -794,7 +759,6 @@ class TransFitter:
                 alpha_y_sample = alpha_y_sample,
                 C = C,
                 groups_tensor=groups_tensor,
-                predictive_mode=False,
                 temperature=torch.tensor(current_temp, dtype=torch.float32, device=self.model.device),
                 use_straight_through=use_straight_through,
                 function_type=function_type,
@@ -837,11 +801,8 @@ class TransFitter:
                 "Vmax_mean_tensor": self._to_cpu(Vmax_mean_tensor),
                 "Vmax_alpha_tensor": self._to_cpu(Vmax_alpha_tensor),
                 "n_mu_tensor": self._to_cpu(n_mu_tensor),
-                "n_sigma_base_tensor": self._to_cpu(n_sigma_base_tensor),
                 "Amean_tensor": self._to_cpu(Amean_tensor),
                 "p_n_tensor": self._to_cpu(p_n_tensor),
-                "threshold": threshold,     # plain Python ok
-                "slope": slope,
                 "epsilon_tensor": self._to_cpu(epsilon_tensor),
                 "x_true_sample": self._to_cpu(self.model.x_true.mean(dim=0) if self.model.x_true_type == "posterior" else self.model.x_true),
                 "log2_x_true_sample": self._to_cpu(self.log2_x_true.mean(dim=0) if self.log2_x_true_type == "posterior" else self.log2_x_true),
@@ -851,7 +812,6 @@ class TransFitter:
                 "alpha_y_sample": self._to_cpu(alpha_y_prefit.mean(dim=0) if alpha_y_type == "posterior" else alpha_y_prefit) if alpha_y_prefit is not None else None,
                 "C": C,
                 "groups_tensor": self._to_cpu(groups_tensor) if groups_tensor is not None else None,
-                "predictive_mode": True,
                 # create on CPU explicitly since we just set self.model.device="cpu"
                 "temperature": torch.tensor(final_temp, dtype=torch.float32, device=torch.device("cpu")),
                 "use_straight_through": True,
@@ -877,11 +837,8 @@ class TransFitter:
                 "Vmax_mean_tensor": Vmax_mean_tensor,
                 "Vmax_alpha_tensor": Vmax_alpha_tensor,
                 "n_mu_tensor": n_mu_tensor,
-                "n_sigma_base_tensor": n_sigma_base_tensor,
                 "Amean_tensor": Amean_tensor,
                 "p_n_tensor": p_n_tensor,
-                "threshold": threshold,
-                "slope": slope,
                 "epsilon_tensor": epsilon_tensor,
                 "x_true_sample": self.model.x_true.mean(dim=0) if self.model.x_true_type == "posterior" else self.model.x_true,
                 "log2_x_true_sample": self.log2_x_true.mean(dim=0) if self.log2_x_true_type == "posterior" else self.log2_x_true,
@@ -890,7 +847,6 @@ class TransFitter:
                 "alpha_y_sample": alpha_y_prefit.mean(dim=0) if alpha_y_type == "posterior" else alpha_y_prefit if alpha_y_prefit is not None else None,
                 "C": C,
                 "groups_tensor": groups_tensor if groups_tensor is not None else None,
-                "predictive_mode": True,
                 "temperature": torch.tensor(final_temp, dtype=torch.float32, device=self.model.device),
                 "use_straight_through": True,
                 "function_type": function_type,
@@ -955,18 +911,55 @@ class TransFitter:
         for k, v in posterior_samples_y.items():
             posterior_samples_y[k] = self._to_cpu(v)
 
+        # ----------------------------------------
+        # Store nmin/nmax and check boundaries
+        # ----------------------------------------
+        posterior_samples_y['nmin'] = self._to_cpu(nmin)
+        posterior_samples_y['nmax'] = self._to_cpu(nmax)
+
+        # Warn if fitted n_a parameters are close to boundaries
+        if 'n_a' in posterior_samples_y and function_type in ['single_hill', 'additive_hill', 'nested_hill']:
+            n_a_samples = posterior_samples_y['n_a']  # Shape: [S, T]
+            nmin_val = nmin.item()
+            nmax_val = nmax.item()
+
+            # Define "close to boundary" threshold (e.g., within 10% of range)
+            boundary_threshold = 0.1 * (nmax_val - nmin_val)
+
+            # Check how many samples are close to boundaries
+            close_to_min = (n_a_samples < (nmin_val + boundary_threshold)).float().mean().item()
+            close_to_max = (n_a_samples > (nmax_val - boundary_threshold)).float().mean().item()
+
+            # Warn if >10% of samples are at boundaries
+            if close_to_min > 0.1:
+                warnings.warn(
+                    f"[WARNING] {close_to_min*100:.1f}% of n_a samples are close to lower boundary (nmin={nmin_val:.2f}). "
+                    f"Consider: (1) checking if x_true range is appropriate, or (2) relaxing nmin constraint.",
+                    UserWarning
+                )
+            if close_to_max > 0.1:
+                warnings.warn(
+                    f"[WARNING] {close_to_max*100:.1f}% of n_a samples are close to upper boundary (nmax={nmax_val:.2f}). "
+                    f"Consider: (1) checking if x_true range is appropriate, or (2) relaxing nmax constraint.",
+                    UserWarning
+                )
+
+            # Summary statistics
+            print(f"[INFO] n_a boundary check: nmin={nmin_val:.2f}, nmax={nmax_val:.2f}")
+            print(f"[INFO]   {close_to_min*100:.1f}% of samples near lower bound, {close_to_max*100:.1f}% near upper bound")
+
         # Store results
         # Store in modality
         modality.posterior_samples_trans = posterior_samples_y
 
-        # Update alpha_y_prefit in modality if it was None
-        if modality.alpha_y_prefit is None and groups_tensor is not None:
+        # Update alpha_y_prefit in modality if it was None and alpha_y was sampled
+        if modality.alpha_y_prefit is None and groups_tensor is not None and "alpha_y" in posterior_samples_y:
             modality.alpha_y_prefit = posterior_samples_y["alpha_y"].mean(dim=0)
 
         # If primary modality, also store at model level (backward compatibility)
         if modality_name == self.model.primary_modality:
             self.model.posterior_samples_trans = posterior_samples_y
-            if self.model.alpha_y_prefit is None and groups_tensor is not None:
+            if self.model.alpha_y_prefit is None and groups_tensor is not None and "alpha_y" in posterior_samples_y:
                 self.model.alpha_y_prefit = posterior_samples_y["alpha_y"].mean(dim=0)
             print(f"[INFO] Stored results in modality '{modality_name}' and at model level (primary modality)")
         else:

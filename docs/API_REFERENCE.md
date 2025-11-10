@@ -249,15 +249,15 @@ Add a custom modality with user-defined measurements.
 **Parameters:**
 - `name` (str): Name for this modality
 - `counts` (np.ndarray or pd.DataFrame): Measurement data
-  - 2D for: `negbinom`, `normal`, `binomial`
-  - 3D for: `multinomial`, `mvnormal`
+  - 2D for: `negbinom`, `normal`, `studentt`, `binomial`
+  - 3D for: `multinomial`
 - `feature_meta` (pd.DataFrame): Feature-level metadata
 - `distribution` (str): Distribution type:
   - `'negbinom'`: Negative binomial (count data)
   - `'normal'`: Normal (continuous measurements)
+  - `'studentt'`: Student's t (heavy-tailed continuous)
   - `'binomial'`: Binomial (proportions with denominator)
   - `'multinomial'`: Multinomial (categorical)
-  - `'mvnormal'`: Multivariate normal (multi-dimensional)
 - `denominator` (np.ndarray, optional): Required for `binomial` distribution
 
 **Example:**
@@ -268,14 +268,6 @@ model.add_custom_modality(
     counts=spliz_scores,
     feature_meta=gene_meta,
     distribution='normal'
-)
-
-# SpliZVD (multivariate normal, 3D)
-model.add_custom_modality(
-    name='splizvd',
-    counts=splizvd_array,  # shape: (genes, cells, 3)
-    feature_meta=gene_meta,
-    distribution='mvnormal'
 )
 ```
 
@@ -320,7 +312,6 @@ Get a summary table of all modalities.
 - `n_features`: Number of features
 - `n_cells`: Number of cells
 - `n_categories` (if applicable): Number of categories (multinomial)
-- `n_dims` (if applicable): Number of dimensions (mvnormal)
 
 **Example:**
 ```python
@@ -389,7 +380,7 @@ Fit technical model to estimate baseline overdispersion and cell-line effects fr
 **Parameters:**
 - `sum_factor_col` (str): Column in `meta` with normalization factors. Default: `'sum_factor'`
   - Required for `negbinom` distribution
-  - Not used for `normal`/`mvnormal`
+  - Not used for `normal`
 - `lr` (float): Learning rate. Default: 1e-3
 - `niters` (int): Number of optimization steps. Default: 50,000
 - `nsamples` (int): Number of posterior samples. Default: 1,000
@@ -402,9 +393,9 @@ Fit technical model to estimate baseline overdispersion and cell-line effects fr
 - `distribution` (str, optional): Distribution type. Defaults to modality's distribution
   - `'negbinom'`: Negative binomial (count data)
   - `'normal'`: Normal (continuous measurements)
+  - `'studentt'`: Student's t (heavy-tailed continuous)
   - `'binomial'`: Binomial (proportions)
   - `'multinomial'`: Multinomial (categorical)
-  - `'mvnormal'`: Multivariate normal (multi-dimensional)
 - `denominator` (np.ndarray, optional): Required for `binomial` distribution
 - `modality_name` (str, optional): Modality to fit. Defaults to primary modality
 
@@ -679,11 +670,10 @@ Modality(
 **Parameters:**
 - `name` (str): Modality name
 - `counts` (np.ndarray): Measurement data
-  - 2D `(features, cells)`: negbinom, normal, binomial
+  - 2D `(features, cells)`: negbinom, normal, studentt, binomial
   - 3D `(features, cells, categories)`: multinomial
-  - 3D `(features, cells, dims)`: mvnormal
 - `feature_meta` (pd.DataFrame): Feature-level metadata
-- `distribution` (str): One of: `'negbinom'`, `'normal'`, `'binomial'`, `'multinomial'`, `'mvnormal'`
+- `distribution` (str): One of: `'negbinom'`, `'normal'`, `'studentt'`, `'binomial'`, `'multinomial'`
 - `denominator` (np.ndarray, optional): For binomial only
 
 **Attributes:**
@@ -700,7 +690,6 @@ Modality(
   - `n_features`: Number of features
   - `n_cells`: Number of cells
   - `n_categories` (multinomial): Number of categories
-  - `n_dims` (mvnormal): Number of dimensions
 
 ---
 
@@ -866,7 +855,7 @@ Check if distribution uses 3D data.
 **Parameters:**
 - `distribution` (str): Distribution name
 
-**Returns:** bool (True for `'multinomial'` and `'mvnormal'`)
+**Returns:** bool (True for `'multinomial'`)
 
 ---
 
@@ -898,7 +887,7 @@ Get how cell-line effects are applied for a distribution.
 
 **Returns:** str - One of:
 - `'multiplicative'`: Effect multiplies mu (negbinom)
-- `'additive'`: Effect adds to mu (normal, mvnormal)
+- `'additive'`: Effect adds to mu (normal)
 - `'logit'`: Effect on logit scale (binomial)
 - `None`: Not supported (multinomial)
 
@@ -1101,7 +1090,7 @@ The `DISTRIBUTION_REGISTRY` dictionary maps distribution names to their samplers
 from bayesDREAM import DISTRIBUTION_REGISTRY
 
 print(DISTRIBUTION_REGISTRY.keys())
-# dict_keys(['negbinom', 'multinomial', 'binomial', 'normal', 'mvnormal'])
+# dict_keys(['negbinom', 'multinomial', 'binomial', 'normal', 'studentt'])
 ```
 
 Each entry contains:

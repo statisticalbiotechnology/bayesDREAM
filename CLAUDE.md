@@ -177,12 +177,11 @@ The `Modality` class (`bayesDREAM/modality.py`) provides a standardized containe
 - `multinomial`: Categorical/proportional data (isoform usage, donor/acceptor usage)
 - `binomial`: Binary outcomes with denominators (exon skipping PSI)
 - `normal`: Continuous measurements (SpliZ scores)
-- `mvnormal`: Multivariate normal (SpliZVD with 3D vectors)
+- `studentt`: Heavy-tailed continuous (robust SpliZ)
 
 **Data Structures:**
-- **2D data** (negbinom, normal, binomial): `(features, cells)` or `(cells, features)`
+- **2D data** (negbinom, normal, studentt, binomial): `(features, cells)` or `(cells, features)`
 - **3D multinomial**: `(features, cells, categories)` - e.g., donor sites × cells × acceptor options
-- **3D mvnormal**: `(features, cells, dimensions)` - e.g., genes × cells × 3 (z0, z1, z2)
 - **Binomial**: 2D counts + 2D denominator array
 
 **Key Features:**
@@ -241,7 +240,7 @@ model = bayesDREAM(
    )
    ```
 
-3. **Custom modalities** (SpliZ, SpliZVD, etc.):
+3. **Custom modalities** (SpliZ, etc.):
    ```python
    # SpliZ scores (normal distribution)
    model.add_custom_modality(
@@ -249,14 +248,6 @@ model = bayesDREAM(
        counts=spliz_scores,          # 2D: genes × cells
        feature_meta=gene_meta,
        distribution='normal'
-   )
-
-   # SpliZVD (multivariate normal, 3D)
-   model.add_custom_modality(
-       name='splizvd',
-       counts=splizvd_array,         # 3D: genes × cells × 3
-       feature_meta=gene_meta,
-       distribution='mvnormal'
    )
    ```
 

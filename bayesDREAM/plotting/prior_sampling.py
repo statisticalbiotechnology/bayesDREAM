@@ -76,8 +76,6 @@ def _compute_data_driven_priors(model, modality, distribution, epsilon=1e-6):
     if counts_ntc.ndim == 3:
         if distribution == 'multinomial':
             y_obs_ntc_for_priors = counts_ntc.sum(axis=2)  # [T, N] or [N, T]
-        elif distribution == 'mvnormal':
-            y_obs_ntc_for_priors = counts_ntc.mean(axis=2)
         else:
             y_obs_ntc_for_priors = counts_ntc.sum(axis=2)
     else:
@@ -108,18 +106,6 @@ def _compute_data_driven_priors(model, modality, distribution, epsilon=1e-6):
         guide_means = np.array([np.mean(y_obs_ntc_factored[guides_ntc == g], axis=0)
                                for g in np.unique(guides_ntc)])
         mu_x_sd = np.std(guide_means, axis=0) + epsilon
-
-    elif distribution == 'mvnormal':
-        # Compute per-dimension: [T, D]
-        if modality.cells_axis == 1:
-            y_obs_ntc_mv = counts_ntc.transpose(1, 0, 2)  # [T, N, D] -> [N, T, D]
-        else:
-            y_obs_ntc_mv = counts_ntc
-
-        mu_x_mean = np.mean(y_obs_ntc_mv, axis=0)  # [T, D]
-        guide_means = np.stack([np.mean(y_obs_ntc_mv[guides_ntc == g], axis=0)
-                               for g in np.unique(guides_ntc)], axis=0)  # [G, T, D]
-        mu_x_sd = np.std(guide_means, axis=0) + epsilon  # [T, D]
 
     else:
         # binomial & multinomial: not used
@@ -326,20 +312,6 @@ def sample_technical_priors(
             probs_list.append(probs_feat)
         probs_baseline = torch.stack(probs_list, dim=1)  # (nsamples, T, K)
         prior_samples['probs_baseline'] = probs_baseline
-
-    elif distribution == 'mvnormal':
-        # Get D from modality
-        D = modality.counts.shape[2] if modality.counts.ndim == 3 else None
-        if D is None:
-            raise ValueError("Cannot determine D for mvnormal distribution")
-
-        # sigma_y_mv ~ HalfCauchy(10.0)
-        sigma_y_mv = dist.HalfCauchy(10.0).sample((nsamples, T, D))
-        prior_samples['sigma_y_mv'] = sigma_y_mv
-
-        # mu_ntc_mv ~ Normal(mu_x_mean, mu_x_sd) with data-driven parameters [T, D]
-        mu_ntc_mv = dist.Normal(mu_x_mean_tensor, mu_x_sd_tensor).sample((nsamples,))
-        prior_samples['mu_ntc_mv'] = mu_ntc_mv
 
     return prior_samples
 

@@ -1141,6 +1141,7 @@ def create_splicing_modality(sj_counts: pd.DataFrame,
                              gene_counts: pd.DataFrame,
                              min_cell_total: int = 1,
                              min_total_exon: int = 2,
+                             cell_names: Optional[List[str]] = None,
                              **kwargs) -> Modality:
     """
     Create a Modality object for splicing data.
@@ -1160,6 +1161,8 @@ def create_splicing_modality(sj_counts: pd.DataFrame,
         Minimum reads for donor/acceptor usage
     min_total_exon : int
         Minimum reads for exon skipping
+    cell_names : list of str, optional
+        Cell identifiers (extracted from DataFrame or explicitly provided)
     **kwargs
         Additional arguments (e.g., method, fallback_genomic for exon_skip)
 
@@ -1189,13 +1192,18 @@ def create_splicing_modality(sj_counts: pd.DataFrame,
             sj_counts, sj_meta, gene_counts
         )
 
+        # Extract cell_names if not provided
+        if cell_names is None:
+            cell_names = sj_filtered.columns.tolist()
+
         return Modality(
             name='splicing_sj',
             counts=sj_filtered,
             feature_meta=sj_meta_filtered,
             distribution='binomial',
             denominator=gene_denom.values,
-            cells_axis=1
+            cells_axis=1,
+            cell_names=cell_names
         )
 
     elif splicing_type == 'donor':

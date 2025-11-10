@@ -9,12 +9,12 @@ Supported distributions:
 - negbinom: Negative binomial (gene counts, transcript counts)
 - multinomial: Categorical/proportional data (isoform usage, donor/acceptor usage)
 - binomial: Binary outcomes with denominator (exon skipping PSI, raw SJ counts)
-- normal: Continuous measurements (SpliZ scores)
-- mvnormal: Multivariate normal (SpliZVD with z0, z1, z2)
+- normal: Continuous measurements
+- studentt: Heavy-tailed, continuous measurements (SpliZ scores)
 
-Cell-line covariate handling:
+Technical group covariate handling:
 - negbinom: Multiplicative effects on mu via alpha_y
-- normal/mvnormal: Additive effects on mu
+- normal/studentt: Additive effects on mu
 - binomial: Effects on logit scale
 - multinomial: Not supported yet (complex - need to maintain probability simplex)
 """
@@ -42,7 +42,7 @@ def sample_negbinom_trans(
     """
     Sample observations from negative binomial likelihood for trans model.
 
-    Cell-line effects: Multiplicative on mu (via alpha_y parameter).
+    Technical group effects: Multiplicative on mu (via alpha_y parameter).
 
     Parameters
     ----------
@@ -53,9 +53,9 @@ def sample_negbinom_trans(
     phi_y_used : torch.Tensor
         Overdispersion parameter, shape [1, T] or [T]
     alpha_y_full : torch.Tensor or None
-        Cell-line effects, shape [C, T] if provided
+        Technical group effects, shape [C, T] if provided
     groups_tensor : torch.Tensor or None
-        Cell-line group codes, shape [N] if provided
+        Technical group codes, shape [N] if provided
     sum_factor_tensor : torch.Tensor
         Size factors, shape [N]
     N : int
@@ -63,13 +63,13 @@ def sample_negbinom_trans(
     T : int
         Number of features (trans genes)
     C : int or None
-        Number of cell-line groups
+        Number of technical groups
 
     Notes
     -----
     mu_final = mu_y * alpha_y[group] * sum_factor
     """
-    # Apply cell-line effects if present (multiplicative)
+    # Apply technical group effects if present (multiplicative)
     if alpha_y_full is not None and groups_tensor is not None:
         alpha_y_used = alpha_y_full[groups_tensor, :]  # [N, T]
         mu_adjusted = mu_y * alpha_y_used
@@ -227,7 +227,7 @@ def sample_binomial_trans(
     """
     Sample observations from binomial likelihood for trans model.
 
-    Cell-line effects: Applied on LOGIT scale to maintain p ∈ [0, 1].
+    Technical group effects: Applied on LOGIT scale to maintain p ∈ [0, 1].
 
     Parameters
     ----------
@@ -239,15 +239,15 @@ def sample_binomial_trans(
         Expected probability from f(x), shape [N, T]
         Should be in [0, 1] but we'll apply sigmoid anyway
     alpha_y_full : torch.Tensor or None
-        Cell-line effects (additive on logit scale), shape [C, T] if provided
+        Technical group effects (additive on logit scale), shape [C, T] if provided
     groups_tensor : torch.Tensor or None
-        Cell-line group codes, shape [N] if provided
+        Technical group codes, shape [N] if provided
     N : int
         Number of guides/observations
     T : int
         Number of features
     C : int or None
-        Number of cell-line groups
+        Number of technical groups
 
     Notes
     -----
@@ -258,7 +258,7 @@ def sample_binomial_trans(
     mu_y_clamped = torch.clamp(mu_y, min=1e-6, max=1-1e-6)
     logit_mu = torch.log(mu_y_clamped) - torch.log(1 - mu_y_clamped)
 
-    # Apply cell-line effects on logit scale (additive)
+    # Apply technical group effects on logit scale (additive)
     if alpha_y_full is not None and groups_tensor is not None:
         alpha_y_used = alpha_y_full[groups_tensor, :]  # [N, T]
         logit_final = logit_mu + alpha_y_used
@@ -293,10 +293,10 @@ def sample_normal_trans(
 
     - NaNs / inf in y_obs_tensor are treated as missing
       and contribute 0 to the log-likelihood (factor of 1 in prob).
-    - Cell-line effects are additive on the mean only; sigma_y is unchanged.
+    - Technical group effects are additive on the mean only; sigma_y is unchanged.
     """
 
-    # Apply cell-line effects if present (additive on the mean)
+    # Apply technical group effects if present (additive on the mean)
     if alpha_y_full is not None and groups_tensor is not None:
         alpha_y_used = alpha_y_full[groups_tensor, :]  # [N, T]
         mu_adjusted = mu_y + alpha_y_used              # [N, T]
@@ -333,71 +333,61 @@ def sample_normal_trans(
     with pyro.plate("obs_plate", N * T):
         pyro.factor("y_obs", log_prob.reshape(-1))
 
-
 #######################################
-# MULTIVARIATE NORMAL
+# STUDENT-T
 #######################################
 
-def sample_mvnormal_trans(
+def sample_studentt_trans(
     y_obs_tensor,
     mu_y,
-    cov_y,
+    sigma_y,
+    nu_y,
     alpha_y_full,
     groups_tensor,
     N,
     T,
-    D,
-    C=None
+    C=None,
 ):
     """
-    Sample observations from multivariate normal likelihood for trans model.
+    Student-T likelihood with *masked* observations.
 
-    Cell-line effects: ADDITIVE on mu (not multiplicative).
-
-    Parameters
-    ----------
-    y_obs_tensor : torch.Tensor
-        Observed values, shape [N, T, D] where D is dimensionality
-    mu_y : torch.Tensor
-        Expected mean from f(x), shape [N, T, D]
-    cov_y : torch.Tensor
-        Covariance matrix, shape [T, D, D] or [1, T, D, D]
-    alpha_y_full : torch.Tensor or None
-        Cell-line effects (additive), shape [C, T, D] if provided
-    groups_tensor : torch.Tensor or None
-        Cell-line group codes, shape [N] if provided
-    N : int
-        Number of guides/observations
-    T : int
-        Number of features
-    D : int
-        Dimensionality (e.g., 3 for SpliZVD)
-    C : int or None
-        Number of cell-line groups
-
-    Notes
-    -----
-    mu_final = mu_y + alpha_y[group]
+    - NaNs / inf in y_obs_tensor are treated as missing and contribute 0
+      to the log-likelihood.
+    - Technical group effects are additive on the mean only (same as Normal).
+    - df (nu_y) can be a scalar or tensor; we just pass it through.
     """
-    # If additive alpha is [C, T], expand to [C, T, D] so it can add to mu
-    if alpha_y_full is not None and alpha_y_full.dim() == 2:
-        alpha_y_full = alpha_y_full.unsqueeze(-1).expand(-1, -1, D)  # [C, T, D]
-    
-    # Apply cell-line effects if present (additive)
-    if alpha_y_full is not None and groups_tensor is not None:
-        alpha_y_used = alpha_y_full[groups_tensor, :, :]  # [N, T, D]
-        mu_adjusted = mu_y + alpha_y_used
-    else:
-        mu_adjusted = mu_y
 
-    # Sample observations
-    with pyro.plate("feature_plate", T, dim=-2):
-        with pyro.plate("obs_plate", N, dim=-3):
-            pyro.sample(
-                "y_obs",
-                dist.MultivariateNormal(mu_adjusted, cov_y),
-                obs=y_obs_tensor
-            )
+    # Apply technical group effects if present (additive on the mean)
+    if alpha_y_full is not None and groups_tensor is not None:
+        alpha_y_used = alpha_y_full[groups_tensor, :]  # [N, T]
+        mu_adjusted = mu_y + alpha_y_used              # [N, T]
+    else:
+        mu_adjusted = mu_y                             # [N, T]
+
+    # Broadcast sigma_y to [N, T]
+    if sigma_y.dim() == 1:
+        sigma_b = sigma_y.unsqueeze(0).expand(N, -1)   # [N, T]
+    else:
+        sigma_b = sigma_y
+
+    # Mask of *valid* entries
+    mask = torch.isfinite(y_obs_tensor)  # [N, T]
+    if not mask.any():
+        return
+
+    # Replace missing y's so log_prob is defined; then mask them out
+    y_clean = torch.where(mask, y_obs_tensor, mu_adjusted)
+
+    # Student-T log-prob
+    dist_t = dist.StudentT(df=nu_y, loc=mu_adjusted, scale=sigma_b)
+    log_prob = dist_t.log_prob(y_clean)               # [N, T]
+
+    # Zero-out missing entries
+    log_prob = torch.where(mask, log_prob,
+                           torch.zeros_like(log_prob))
+
+    with pyro.plate("obs_plate", N * T):
+        pyro.factor("y_obs", log_prob.reshape(-1))
 
 
 #######################################
@@ -410,41 +400,41 @@ DISTRIBUTION_REGISTRY = {
         'requires_denominator': False,
         'requires_sum_factor': True,
         'is_3d': False,
-        'supports_cell_line': True,
-        'cell_line_type': 'multiplicative'
+        'supports_technical_group': True,
+        'technical_group_type': 'multiplicative'
     },
     'multinomial': {
         'trans': sample_multinomial_trans,
         'requires_denominator': False,
         'requires_sum_factor': False,
         'is_3d': True,
-        'supports_cell_line': True,     # <- change to True
-        'cell_line_type': 'logit'
+        'supports_technical_group': True,
+        'technical_group_type': 'logit'
     },
     'binomial': {
         'trans': sample_binomial_trans,
         'requires_denominator': True,
         'requires_sum_factor': False,
         'is_3d': False,
-        'supports_cell_line': True,
-        'cell_line_type': 'logit'
+        'supports_technical_group': True,
+        'technical_group_type': 'logit'
     },
     'normal': {
         'trans': sample_normal_trans,
         'requires_denominator': False,
         'requires_sum_factor': False,
         'is_3d': False,
-        'supports_cell_line': True,
-        'cell_line_type': 'additive'
+        'supports_technical_group': True,
+        'technical_group_type': 'additive'
     },
-    'mvnormal': {
-        'trans': sample_mvnormal_trans,
+    'studentt': {
+        'trans': sample_studentt_trans,
         'requires_denominator': False,
         'requires_sum_factor': False,
-        'is_3d': True,
-        'supports_cell_line': True,
-        'cell_line_type': 'additive'
-    }
+        'is_3d': False,
+        'supports_technical_group': True,
+        'technical_group_type': 'additive',
+    },
 }
 
 
@@ -455,7 +445,7 @@ def get_observation_sampler(distribution, model_type='trans'):
     Parameters
     ----------
     distribution : str
-        Distribution type: 'negbinom', 'multinomial', 'binomial', 'normal', 'mvnormal'
+        Distribution type: 'negbinom', 'multinomial', 'binomial', 'normal', 'studentt'
     model_type : str
         Model type: currently only 'trans' is fully supported
 
@@ -499,22 +489,22 @@ def requires_sum_factor(distribution):
 
 
 def is_3d_distribution(distribution):
-    """Check if a distribution uses 3D data structure (multinomial, mvnormal)."""
+    """Check if a distribution uses 3D data structure (multinomial)."""
     if distribution not in DISTRIBUTION_REGISTRY:
         raise ValueError(f"Unknown distribution: {distribution}")
     return DISTRIBUTION_REGISTRY[distribution]['is_3d']
 
 
-def supports_cell_line_effects(distribution):
-    """Check if cell-line covariate effects are supported for this distribution."""
+def supports_technical_group_effects(distribution):
+    """Check if technical group covariate effects are supported for this distribution."""
     if distribution not in DISTRIBUTION_REGISTRY:
         raise ValueError(f"Unknown distribution: {distribution}")
-    return DISTRIBUTION_REGISTRY[distribution]['supports_cell_line']
+    return DISTRIBUTION_REGISTRY[distribution]['supports_technical_group']
 
 
-def get_cell_line_effect_type(distribution):
+def get_technical_group_effect_type(distribution):
     """
-    Get the type of cell-line effects for this distribution.
+    Get the type of technical group effects for this distribution.
 
     Returns
     -------
@@ -523,4 +513,9 @@ def get_cell_line_effect_type(distribution):
     """
     if distribution not in DISTRIBUTION_REGISTRY:
         raise ValueError(f"Unknown distribution: {distribution}")
-    return DISTRIBUTION_REGISTRY[distribution]['cell_line_type']
+    return DISTRIBUTION_REGISTRY[distribution]['technical_group_type']
+
+
+# Backward compatibility aliases
+supports_cell_line_effects = supports_technical_group_effects
+get_cell_line_effect_type = get_technical_group_effect_type

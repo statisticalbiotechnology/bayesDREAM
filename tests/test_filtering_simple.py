@@ -114,45 +114,7 @@ print("✓ Custom multinomial filtering works!")
 
 print()
 print("=" * 80)
-print("Test 3: MVNormal filtering (all dimensions)")
-print("=" * 80)
-
-# Feature 1: dimension 0 varies, dimension 1 constant - KEEP (not all dims constant)
-#   Dim 0: [1, 2, 3, 4, 5] - VARIES
-#   Dim 1: [1, 1, 1, 1, 1] - CONSTANT
-# Feature 2: ALL dimensions constant - FILTER
-#   Dim 0: [1, 1, 1, 1, 1] - CONSTANT
-#   Dim 1: [2, 2, 2, 2, 2] - CONSTANT
-
-mvn_counts = np.array([
-    [[1, 1], [2, 1], [3, 1], [4, 1], [5, 1], [6, 1], [7, 1], [8, 1], [9, 1], [10, 1]],  # Feature 1: dim 0 varies, dim 1 constant
-    [[1, 2], [1, 2], [1, 2], [1, 2], [1, 2], [1, 2], [1, 2], [1, 2], [1, 2], [1, 2]]   # Feature 2: ALL dims constant - FILTER
-])  # Shape: (2 features, 10 cells, 2 dimensions)
-
-mvn_meta = pd.DataFrame({
-    'feature': ['feat1_partial_var', 'feat2_all_constant']
-})
-
-print("Adding custom mvnormal modality with 2 features:")
-print("  - feat1_partial_var: dim0 varies, dim1 constant - should KEEP (not ALL constant)")
-print("  - feat2_all_constant: ALL dims constant - should FILTER")
-
-model.add_custom_modality(
-    name='custom_mvn',
-    counts=mvn_counts,
-    feature_meta=mvn_meta,
-    distribution='mvnormal'
-)
-
-mvn_mod = model.get_modality('custom_mvn')
-print(f"\n✓ Features after filtering: {mvn_mod.dims['n_features']}")
-print(f"✓ Expected: 1 (kept feat1_partial_var, filtered feat2_all_constant)")
-assert mvn_mod.dims['n_features'] == 1, f"Expected 1 feature, got {mvn_mod.dims['n_features']}"
-print("✓ MVNormal filtering works (filters only when ALL dims have zero variance)!")
-
-print()
-print("=" * 80)
-print("Test 4: Normal filtering (standard std=0)")
+print("Test 3: Normal filtering (standard std=0)")
 print("=" * 80)
 
 normal_counts = np.array([
@@ -189,5 +151,4 @@ print()
 print("Summary:")
 print("  ✓ Binomial: Filters when numerator/denominator ratio has std=0")
 print("  ✓ Multinomial: Filters when ALL category ratios (k/total) have std=0")
-print("  ✓ MVNormal: Filters when ALL dimensions have std=0")
 print("  ✓ Normal: Filters when raw values have std=0")

@@ -106,7 +106,7 @@ class ModelLoader:
                     # For negbinom, saved value is multiplicative
                     mod.alpha_y_prefit_mult = alpha_y_to_set
                 else:
-                    # For normal, binomial, mvnormal, multinomial: additive
+                    # For normal, binomial, multinomial: additive
                     mod.alpha_y_prefit_add = alpha_y_to_set
 
                 loaded[f'alpha_y_prefit_{mod_name}'] = mod.alpha_y_prefit

@@ -66,9 +66,6 @@ class CisFitter:
         independent_mu_sigma=False,
     ):
 
-        if groups_tensor is not None:
-            cfull_plate = pyro.plate("cfull_plate", C, dim=-2)  # <-- Store it as a variable
-            
         ###################################
         ## Technical covariate modelling ##
         ###################################

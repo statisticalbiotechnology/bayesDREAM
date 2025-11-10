@@ -40,7 +40,7 @@ from .utils import (
 )
 from .modality import Modality
 from .splicing import create_splicing_modality
-from .distributions import get_observation_sampler, requires_denominator, is_3d_distribution
+from .fitting.distributions import get_observation_sampler, requires_denominator, is_3d_distribution
 
 # Import fitters
 from .fitting import TechnicalFitter, CisFitter, TransFitter
@@ -54,7 +54,7 @@ class _BayesDREAMCore(PlottingMixin):
     """
     Internal core class for the three-step Bayesian Dosage Response Effects Across Modalities framework:
 
-    1) Optional cell-line prefit (modeling alpha_y for NTC),
+    1) Optional technical group prefit (modeling alpha_y for NTC),
     2) Fitting cis effects (model_x),
     3) Fitting trans effects (model_y).
     """
@@ -80,7 +80,8 @@ class _BayesDREAMCore(PlottingMixin):
         Parameters
         ----------
         meta : pd.DataFrame
-            Cell metadata DataFrame (includes columns: cell, guide, target, cell_line, sum_factor, etc.)
+            Cell metadata DataFrame (includes columns: cell, guide, target, sum_factor, etc.
+            May optionally include technical group identifiers like 'cell_line', 'batch', 'lane', etc.)
         counts : pd.DataFrame
             Counts DataFrame (genes as rows, cell barcodes as columns)
         gene_meta : pd.DataFrame, optional
@@ -289,6 +290,10 @@ class _BayesDREAMCore(PlottingMixin):
         self._saver = ModelSaver(self)
         self._loader = ModelLoader(self)
 
+        # Import here to avoid circular dependency
+        from .io.summary import ModelSummarizer
+        self._summarizer = ModelSummarizer(self)
+
         print(f"[INIT] bayesDREAM core: label={self.label}, device={self.device}")
 
     def cis_init_loc_fn(
@@ -359,7 +364,7 @@ class _BayesDREAMCore(PlottingMixin):
         self,
         alpha_x: float, # expected to be C x 1 point estimate or S x C x 1 posterior
         is_posterior: bool,
-        covariates: list[str] = None # ["cell_line"] NOT empty. The point is to fit to the covariates. Lane is typically not included as this tends to be corrected by sum factor adjustment alone
+        covariates: list[str] = None # Technical group covariates (e.g., ["cell_line"]). NOT empty. The point is to fit to the covariates. Lane is typically not included as this tends to be corrected by sum factor adjustment alone
     ):
         """
         Sets alpha_x either as a point estimate (float/tensor) or as a Pyro posterior.
@@ -394,7 +399,7 @@ class _BayesDREAMCore(PlottingMixin):
         self,
         alpha_y,
         is_posterior: bool,
-        covariates: list[str] = None # ["cell_line"] NOT empty. The point is to fit to the covariates. Lane is typically not included as this tends to be corrected by sum factor adjustment alone
+        covariates: list[str] = None # Technical group covariates (e.g., ["cell_line"]). NOT empty. The point is to fit to the covariates. Lane is typically not included as this tends to be corrected by sum factor adjustment alone
     ):
         if covariates:
             if "technical_group_code" in self.meta.columns:
@@ -434,7 +439,7 @@ class _BayesDREAMCore(PlottingMixin):
         self,
         o_x,  # Expected to be C x 1 point estimate or S x C x 1 posterior
         is_posterior: bool,
-        covariates: list[str] = None,  # ["cell_line"] NOT empty if using
+        covariates: list[str] = None,  # Technical group covariates (e.g., ["cell_line"]) NOT empty if using
     ):
         """
         Sets o_x either as a point estimate (float/tensor) or as a Pyro posterior.
@@ -537,14 +542,14 @@ class _BayesDREAMCore(PlottingMixin):
         self,
         sum_factor_col_old: str = "sum_factor",
         sum_factor_col_adj: str = "sum_factor_adj",
-        covariates: list[str] = None # ["lane", "cell_line"] or could be empty
+        covariates: list[str] = None # Technical group covariates (e.g., ["lane", "cell_line"]) or could be empty
     ):
         """
         Step 1 of sum factor adjustment: Normalize guides to NTC controls.
 
         Use BEFORE fit_cis() to account for guide-level technical variation.
         Computes adjustment factor = mean_ntc_sum_factor / mean_guide_sum_factor
-        within covariate groups (e.g., cell_line, lane).
+        within covariate groups (e.g., technical groups like cell_line, lane).
 
         Typical workflow:
             1. adjust_ntc_sum_factor() -> creates 'sum_factor_adj'
@@ -559,7 +564,7 @@ class _BayesDREAMCore(PlottingMixin):
         sum_factor_col_adj : str
             Name for adjusted sum factor column to create (default: 'sum_factor_adj')
         covariates : list of str, optional
-            Columns to group by for adjustment (e.g., ['cell_line', 'lane']).
+            Technical group covariates to group by for adjustment (e.g., ['cell_line', 'lane']).
             If None or empty, uses global mean across all cells.
 
         Returns
@@ -654,7 +659,7 @@ class _BayesDREAMCore(PlottingMixin):
         self,
         sum_factor_col_old: str = "sum_factor",
         sum_factor_col_refit: str = "sum_factor_new",
-        covariates: list[str] = None, # ["lane", "cell_line"] or could be empty
+        covariates: list[str] = None, # Technical group covariates (e.g., ["lane", "cell_line"]) or could be empty
         n_knots: int = 5,
         degree: int = 3,
         alpha: float = 0.1
@@ -681,7 +686,7 @@ class _BayesDREAMCore(PlottingMixin):
         sum_factor_col_refit : str
             Name for refitted sum factor column to create (default: 'sum_factor_new')
         covariates : list of str, optional
-            Columns to group by for baseline NTC calculation (e.g., ['cell_line', 'lane'])
+            Technical group covariates to group by for baseline NTC calculation (e.g., ['cell_line', 'lane'])
         n_knots : int
             Number of spline knots for regression (default: 5)
         degree : int
@@ -792,7 +797,7 @@ class _BayesDREAMCore(PlottingMixin):
         genes2permute : list of str
             List of gene names to permute. If 'All', all genes except the cis gene are permuted.
         covariates : list of str
-            Covariates used to group cells for permutation (e.g., ['cell_line', 'lane']).
+            Technical group covariates used to group cells for permutation (e.g., ['cell_line', 'lane']).
         """
 
         if sum_factor_col not in self.meta.columns:
@@ -920,3 +925,16 @@ class _BayesDREAMCore(PlottingMixin):
     def load_trans_fit(self, *args, **kwargs):
         """Delegate to ModelLoader."""
         return self._loader.load_trans_fit(*args, **kwargs)
+
+    # Summary export methods
+    def save_technical_summary(self, *args, **kwargs):
+        """Delegate to ModelSummarizer."""
+        return self._summarizer.save_technical_summary(*args, **kwargs)
+
+    def save_cis_summary(self, *args, **kwargs):
+        """Delegate to ModelSummarizer."""
+        return self._summarizer.save_cis_summary(*args, **kwargs)
+
+    def save_trans_summary(self, *args, **kwargs):
+        """Delegate to ModelSummarizer."""
+        return self._summarizer.save_trans_summary(*args, **kwargs)

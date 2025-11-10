@@ -34,7 +34,6 @@ try:
     assert 'multinomial' in DISTRIBUTION_REGISTRY
     assert 'binomial' in DISTRIBUTION_REGISTRY
     assert 'normal' in DISTRIBUTION_REGISTRY
-    assert 'mvnormal' in DISTRIBUTION_REGISTRY
     print("✓ All distributions registered")
 
     # Test helper functions

@@ -62,8 +62,7 @@ class TechnicalFitter:
         """
         Technical model used for NTC-only prefit of cell-line effects.
         - negbinom: multiplicative effects on mu (alpha_full_mul), NB dispersion phi_y
-        - normal/binomial: additive or logit-scale effects (alpha_full_add)
-        - mvnormal: additive effects per (feature, dim), diagonal covariance
+        - normal/binomial/studentt: additive or logit-scale effects (alpha_full_add)
         - multinomial: Dirichlet probabilities per (feature, category); additive or logit-scale effects (alpha_full_add)
         """
     
@@ -159,7 +158,7 @@ class TechnicalFitter:
             # ----------------------------
             # Shared cell-line effects for non-multinomial dists
             # ----------------------------
-            if distribution == "normal":
+            if distribution in ("normal", "studentt"):
                 # For Normal we want additive shifts on the ORIGINAL scale,
                 # with a width that reflects the data:
                 #   alpha ~ StudentT(ν=3, loc=0, scale ~ SD_across_guides)
@@ -195,7 +194,7 @@ class TechnicalFitter:
 
 
             else:
-                # Original behaviour for negbinom / binomial / mvnormal, etc.
+                # Original behaviour for negbinom / binomial, etc.
                 with f_plate:
                     with c_plate:  # [C-1, T]
                         log2_alpha_y = pyro.sample(
@@ -250,7 +249,7 @@ class TechnicalFitter:
                 o_y = pyro.sample("o_y", dist.Exponential(beta_o))     # [T]
             phi_y = 1.0 / (o_y ** 2)                                   # [T]
     
-        elif distribution == 'normal':
+        elif distribution in ('normal', 'studentt'):
             with f_plate:
                 if sigma_hat_tensor is not None:
                     # Data-driven scale (per-feature)
@@ -265,25 +264,16 @@ class TechnicalFitter:
                         dist.HalfCauchy(self._t(10.0))
                     )
         
-        elif distribution == 'mvnormal':
-            assert D is not None, "mvnormal requires D"
-            with f_plate:
-                with pyro.plate("dim_plate", D, dim=-2):
-                    sigma_y_mv = pyro.sample(
-                        "sigma_y_mv",
-                        dist.HalfCauchy(self._t(10.0))  # <- ensure device
-                    )  # [T, D]
-        
         # --------------------------------
         # Baseline means per distribution
         # --------------------------------
         # NOTE: we DO NOT pre-apply cell-line effects here; samplers will.
         mu_y = None
     
-        if distribution in ('negbinom', 'normal'):
+        if distribution in ('negbinom', 'normal', 'studentt'):
             # mu_ntc shape: [T]
             with f_plate:
-                if distribution == 'normal':
+                if distribution in ('normal', 'studentt'):
                     mu_ntc = pyro.sample("mu_ntc", dist.Normal(mu_x_mean_tensor, mu_x_sd_tensor))
                 else:  # negbinom
                     mu_ntc = pyro.sample(
@@ -294,13 +284,6 @@ class TechnicalFitter:
                         )
                     )
             mu_y = mu_ntc  # [T]
-    
-        elif distribution == 'mvnormal':
-            # per-dimension means: mu_ntc_mv shape [T, D]
-            with f_plate:
-                # mu_x_mean_tensor and mu_x_sd_tensor are [T, D]
-                mu_ntc_mv = pyro.sample("mu_ntc_mv", dist.Normal(mu_x_mean_tensor, mu_x_sd_tensor))
-            mu_y = mu_ntc_mv  # [T, D]
     
         elif distribution == 'binomial':
             # Empirical-Bayes Beta with bounded concentration (stable when denom >> counts)
@@ -358,7 +341,7 @@ class TechnicalFitter:
         # --------------------------------
         # Call distribution-specific sampler
         # --------------------------------
-        from ..distributions import get_observation_sampler
+        from .distributions import get_observation_sampler
         observation_sampler = get_observation_sampler(distribution, 'trans')
     
         if distribution == 'negbinom':
@@ -377,6 +360,19 @@ class TechnicalFitter:
                 y_obs_tensor=y_obs_ntc_tensor,           # [N, T]
                 mu_y=mu_y,                               # [T]
                 sigma_y=sigma_y,                         # [T]
+                alpha_y_full=alpha_full_add,             # [C, T]
+                groups_tensor=groups_ntc_tensor,
+                N=N, T=T, C=C
+            )
+
+        elif distribution == 'studentt':
+            # Fix df (nu) for now; you can expose this as a hyperparameter if you like
+            nu_y = self._t(3.0)
+            observation_sampler(
+                y_obs_tensor=y_obs_ntc_tensor,           # [N, T]
+                mu_y=mu_y,                               # [T]
+                sigma_y=sigma_y,                         # [T]
+                nu_y=nu_y,                               # scalar or [T]
                 alpha_y_full=alpha_full_add,             # [C, T]
                 groups_tensor=groups_ntc_tensor,
                 N=N, T=T, C=C
@@ -402,19 +398,6 @@ class TechnicalFitter:
                 alpha_y_full=alpha_full_add,     # <— ADD THIS
                 groups_tensor=groups_ntc_tensor, # <— ADD THIS
                 N=N, T=T, K=K, C=C
-            )
-    
-        elif distribution == 'mvnormal':
-            # diagonal covariance per (T, D)
-            cov_y = torch.diag_embed((sigma_y_mv ** 2))          # [T, D, D]
-            mu_y_mv = mu_y.unsqueeze(0).expand(N, T, D)          # [N, T, D]
-            observation_sampler(
-                y_obs_tensor=y_obs_ntc_tensor,
-                mu_y=mu_y_mv,
-                cov_y=cov_y,
-                alpha_y_full=alpha_full_add,   # [C, T] (sampler broadcasts to [C, T, D])
-                groups_tensor=groups_ntc_tensor,
-                N=N, T=T, D=D, C=C
             )
     
         else:
@@ -487,8 +470,8 @@ class TechnicalFitter:
         # Set conditional default for niters
         # ---------------------------
         if niters is None:
-            # Default: 50,000 unless multivariate (multinomial or mvnormal), then 100,000
-            if distribution in ('multinomial', 'mvnormal'):
+            # Default: 50,000 unless multivariate (multinomial), then 100,000
+            if distribution in ('multinomial'):
                 niters = 100_000
                 print(f"[INFO] Using default niters=100,000 for multivariate distribution '{distribution}'")
             else:
@@ -540,7 +523,7 @@ class TechnicalFitter:
         # ---------------------------
         # Validate requirements
         # ---------------------------
-        from ..distributions import requires_sum_factor, requires_denominator, is_3d_distribution
+        from .distributions import requires_sum_factor, requires_denominator, is_3d_distribution
     
         if requires_sum_factor(distribution) and sum_factor_col is None:
             raise ValueError(f"Distribution '{distribution}' requires sum_factor_col parameter")
@@ -660,14 +643,8 @@ class TechnicalFitter:
 
                 if exclude_feature:
                     zero_std_mask[f_idx] = True
-    
-        elif distribution == 'mvnormal':
-            for f_idx in range(counts_ntc_array.shape[0]):
-                feature_data = counts_ntc_array[f_idx, :, :]  # (cells, D)
-                if np.all(feature_data.std(axis=0) == 0):
-                    zero_std_mask[f_idx] = True
         
-        elif distribution == 'normal':
+        elif distribution in ("normal", "studentt"):
             # ---------------------------------------------
             # NORMAL: exclude features that
             #  - have zero variance globally (ignoring NaNs), OR
@@ -675,7 +652,7 @@ class TechnicalFitter:
             # ---------------------------------------------
             if counts_ntc_array.ndim != 2:
                 raise ValueError(
-                    f"Unexpected dims for distribution 'normal': {counts_ntc_array.ndim}"
+                    f"Unexpected dims for distribution '{distribution}': {counts_ntc_array.ndim}"
                 )
 
             y_np = counts_ntc_array.astype(float)
@@ -840,18 +817,13 @@ class TechnicalFitter:
         if is_3d_distribution(distribution):
             if distribution == 'multinomial':
                 K = y_obs_ntc.shape[2]
-            elif distribution == 'mvnormal':
-                D = y_obs_ntc.shape[2]
     
         # ---------------------------
         # Build data for priors per distribution
         # ---------------------------
-        # y_obs_ntc_for_priors: [N, T] (or mean over last axis when 3D for mvnormal)
         if y_obs_ntc.ndim == 3:
             if distribution == 'multinomial':
                 y_obs_ntc_for_priors = y_obs_ntc.sum(axis=2)   # [N, T]
-            elif distribution == 'mvnormal':
-                y_obs_ntc_for_priors = y_obs_ntc.mean(axis=2)  # [N, T]
             else:
                 y_obs_ntc_for_priors = y_obs_ntc.sum(axis=2)
         else:
@@ -864,7 +836,7 @@ class TechnicalFitter:
         else:
             y_obs_ntc_factored = y_obs_ntc_for_priors
 
-        if distribution == "normal":
+        if distribution in ('normal', 'studentt'):
             baseline_mask = (groups_ntc == 0)
             y_baseline = y_obs_ntc_factored[baseline_mask, :]
             sigma_hat = np.nanstd(y_baseline, axis=0) + epsilon
@@ -881,7 +853,7 @@ class TechnicalFitter:
             mu_x_sd = np.std(guide_means, axis=0) + epsilon
             mu_x_mean = mu_x_mean + epsilon  # strictly positive for Gamma
     
-        elif distribution == 'normal':
+        elif distribution in ('normal', 'studentt'):
             baseline_mask = (groups_ntc == 0)
 
             # NaN-aware baseline mean
@@ -912,13 +884,6 @@ class TechnicalFitter:
             mu_x_mean = np.where(np.isfinite(mu_x_mean), mu_x_mean, 0.0)
             mu_x_sd   = np.where(np.isfinite(mu_x_sd),   mu_x_sd,   1.0)
     
-        elif distribution == 'mvnormal':
-            # compute per-dimension means/sds: shapes [T_fit, D]
-            mu_x_mean = np.mean(y_obs_ntc, axis=0)                                            # [T_fit, D]
-            gids = np.unique(guides)
-            guide_means = np.stack([np.mean(y_obs_ntc[guides == g], axis=0) for g in gids], axis=0)  # [G, T_fit, D]
-            mu_x_sd = np.std(guide_means, axis=0) + epsilon                                   # [T_fit, D]
-    
         else:
             # binomial & multinomial: handled with Beta/Dirichlet in the model
             mu_x_mean = np.zeros((T_fit,), dtype=float)
@@ -928,12 +893,8 @@ class TechnicalFitter:
         beta_o_beta_tensor  = torch.tensor(beta_o_beta,  dtype=torch.float32, device=self.model.device)
         beta_o_alpha_tensor = torch.tensor(beta_o_alpha, dtype=torch.float32, device=self.model.device)
     
-        if distribution == 'mvnormal':
-            mu_x_mean_tensor = torch.tensor(mu_x_mean, dtype=torch.float32, device=self.model.device)  # [T_fit, D]
-            mu_x_sd_tensor   = torch.tensor(mu_x_sd,   dtype=torch.float32, device=self.model.device)  # [T_fit, D]
-        else:
-            mu_x_mean_tensor = torch.tensor(mu_x_mean, dtype=torch.float32, device=self.model.device)  # [T_fit]
-            mu_x_sd_tensor   = torch.tensor(mu_x_sd,   dtype=torch.float32, device=self.model.device)  # [T_fit]
+        mu_x_mean_tensor = torch.tensor(mu_x_mean, dtype=torch.float32, device=self.model.device)  # [T_fit]
+        mu_x_sd_tensor   = torch.tensor(mu_x_sd,   dtype=torch.float32, device=self.model.device)  # [T_fit]
     
         if sum_factor_col is not None and distribution == 'negbinom':
             sum_factor_ntc_tensor = torch.tensor(meta_ntc[sum_factor_col].values, dtype=torch.float32, device=self.model.device)
@@ -943,6 +904,12 @@ class TechnicalFitter:
         groups_ntc_tensor   = torch.tensor(groups_ntc, dtype=torch.long, device=self.model.device)
         y_obs_ntc_tensor    = torch.tensor(y_obs_ntc, dtype=torch.float32, device=self.model.device)
         epsilon_tensor      = torch.tensor(epsilon, dtype=torch.float32, device=self.model.device)
+
+        # TODO: PERFORMANCE OPTIMIZATION
+        # Pre-compute sums that are currently recomputed in every _model_technical call:
+        # - For multinomial: total_counts_per_feature, per_group_counts, ref_counts
+        # - For binomial: ref_y_sum, ref_denom_sum
+        # These should be computed once here and passed as parameters to _model_technical
     
         denominator_ntc_tensor = None
         if denominator_ntc_for_fit is not None:
@@ -1144,7 +1111,7 @@ class TechnicalFitter:
             )
             guide_cellline.add(guide_rest)
         
-        elif distribution in ['binomial', 'normal']:
+        elif distribution in ['binomial', 'normal', 'studentt']:
             # Calmer guide for binomial
             guide_cellline = AutoNormal(self._model_technical, init_loc_fn=init_loc_fn)
         

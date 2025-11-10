@@ -22,7 +22,9 @@ class CustomModalityMixin:
         counts: Union[np.ndarray, pd.DataFrame],
         feature_meta: pd.DataFrame,
         distribution: str,
-        denominator: Optional[np.ndarray] = None
+        denominator: Optional[np.ndarray] = None,
+        cell_names: Optional[List[str]] = None,
+        overwrite: bool = False
     ):
         """
         Add a custom user-defined modality with distribution-specific filtering.
@@ -32,28 +34,38 @@ class CustomModalityMixin:
         name : str
             Modality name
         counts : array or DataFrame
-            Measurement data
+            Measurement data. If DataFrame, cell names come from columns.
+            If ndarray, use cell_names parameter to specify cell identifiers.
         feature_meta : pd.DataFrame
             Feature metadata
         distribution : str
-            'negbinom', 'multinomial', 'binomial', 'normal', or 'mvnormal'
+            'negbinom', 'multinomial', 'binomial', 'normal', or 'studentt'
         denominator : array, optional
             For binomial: denominator counts
+        cell_names : list of str, optional
+            Cell names/identifiers (only used when counts is ndarray, not DataFrame).
+            Should match number of cells (axis 1 for 2D data, axis 1 for 3D data).
+        overwrite : bool, default=False
+            Whether to overwrite existing modality with the same name
         """
         # Convert counts to ndarray for consistent filtering
         if isinstance(counts, pd.DataFrame):
             counts_array = counts.values
             is_dataframe = True
             counts_index = counts.columns  # Get column names (cells), not row index
+            # Get cell_names from DataFrame columns (will be used later)
+            extracted_cell_names = counts.columns.tolist()
         else:
             counts_array = np.asarray(counts)
             is_dataframe = False
             counts_index = None
+            # Use provided cell_names (can be None)
+            extracted_cell_names = cell_names
 
         # Apply distribution-specific filtering
         valid_features = None
 
-        if distribution in ['negbinom', 'normal']:
+        if distribution in ['negbinom', 'normal', 'studentt']:
             # Filter features with zero standard deviation
             if counts_array.ndim == 2:
                 feature_stds = counts_array.std(axis=1)
@@ -121,24 +133,6 @@ class CustomModalityMixin:
             if num_filtered > 0:
                 print(f"[INFO] Filtering {num_filtered} feature(s) with zero variance in ALL category ratios in '{name}' modality (multinomial)")
 
-        elif distribution == 'mvnormal':
-            # Filter features where ALL dimensions have zero variance
-            if counts_array.ndim != 3:
-                raise ValueError(f"mvnormal requires 3D counts (features, cells, dimensions) in '{name}' modality")
-
-            n_features = counts_array.shape[0]
-            valid_features = np.ones(n_features, dtype=bool)
-
-            for i in range(n_features):
-                feature_data = counts_array[i, :, :]  # (cells, dimensions)
-                dim_stds = feature_data.std(axis=0)  # std for each dimension
-                if np.all(dim_stds == 0):
-                    valid_features[i] = False
-
-            num_filtered = (~valid_features).sum()
-            if num_filtered > 0:
-                print(f"[INFO] Filtering {num_filtered} feature(s) with zero variance in ALL dimensions in '{name}' modality (mvnormal)")
-
         # Apply filtering if necessary
         if valid_features is not None:
             if not np.any(valid_features):
@@ -174,7 +168,8 @@ class CustomModalityMixin:
             feature_meta=feature_meta,
             distribution=distribution,
             denominator=denominator,
-            cells_axis=1
+            cells_axis=1,
+            cell_names=extracted_cell_names
         )
-        self.add_modality(name, modality)
+        self.add_modality(name, modality, overwrite=overwrite)
 

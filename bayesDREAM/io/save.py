@@ -102,7 +102,7 @@ class ModelSaver:
                         alpha_to_save = mod.alpha_y_prefit
                         alpha_type = 'mult (default)'
                 else:
-                    # Save additive for normal, binomial, mvnormal, multinomial
+                    # Save additive for normal, binomial, multinomial
                     if hasattr(mod, 'alpha_y_prefit_add') and mod.alpha_y_prefit_add is not None:
                         alpha_to_save = mod.alpha_y_prefit_add
                         alpha_type = 'add'

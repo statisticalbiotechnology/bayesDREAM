@@ -22,7 +22,9 @@ class ATACModalityMixin:
         atac_counts: Union[np.ndarray, pd.DataFrame],
         region_meta: pd.DataFrame,
         name: str = 'atac',
-        cis_region: Optional[str] = None
+        cis_region: Optional[str] = None,
+        cell_names: Optional[List[str]] = None,
+        overwrite: bool = False
     ):
         """
         Add ATAC-seq modality with genomic region annotations.
@@ -39,6 +41,8 @@ class ATACModalityMixin:
         ----------
         atac_counts : array or DataFrame
             Fragment counts per region per cell. Shape: (n_regions, n_cells)
+            If DataFrame, cell names come from columns.
+            If ndarray, use cell_names parameter to specify cell identifiers.
         region_meta : pd.DataFrame
             Region metadata with required columns:
             - region_id : str, unique region identifier
@@ -54,6 +58,11 @@ class ATACModalityMixin:
             Region ID to use as cis proxy (e.g., 'chr9:132283881-132284881').
             If provided AND no 'cis' modality exists, will create 'cis' modality from this region.
             If 'cis' modality already exists, this parameter is ignored with a warning.
+        cell_names : list of str, optional
+            Cell names/identifiers (only used when atac_counts is ndarray, not DataFrame).
+            Should match number of cells (axis 1 for 2D data).
+        overwrite : bool, default=False
+            Whether to overwrite existing modality with the same name
 
         Examples
         --------
@@ -127,10 +136,14 @@ class ATACModalityMixin:
             counts_array = atac_counts.values
             counts_index = atac_counts.index
             is_dataframe = True
+            # Extract cell names from DataFrame columns
+            extracted_cell_names = atac_counts.columns.tolist()
         else:
             counts_array = np.asarray(atac_counts)
             counts_index = None
             is_dataframe = False
+            # Use provided cell_names (can be None)
+            extracted_cell_names = cell_names
 
         # Apply negbinom filtering (zero std)
         feature_stds = counts_array.std(axis=1)
@@ -161,10 +174,11 @@ class ATACModalityMixin:
             counts=counts_final,
             feature_meta=region_meta,
             distribution='negbinom',  # ATAC uses negbinom like gene expression
-            cells_axis=1
+            cells_axis=1,
+            cell_names=extracted_cell_names
         )
 
-        self.add_modality(name, modality)
+        self.add_modality(name, modality, overwrite=overwrite)
         print(f"[INFO] Added ATAC modality '{name}' with {modality.dims['n_features']} regions")
 
         # Print region type summary
@@ -193,7 +207,8 @@ class ATACModalityMixin:
                 counts=cis_counts_df,
                 feature_meta=cis_region_meta,
                 distribution='negbinom',
-                cells_axis=1
+                cells_axis=1,
+                cell_names=extracted_cell_names
             )
             self.add_modality('cis', cis_modality, overwrite=False)
             print(f"[INFO] Created 'cis' modality with ATAC region '{cis_region}'")

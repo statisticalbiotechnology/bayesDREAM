@@ -138,23 +138,6 @@ model.add_custom_modality(
     feature_meta=gene_meta,
     distribution='normal'
 )
-
-# SpliZVD (multivariate normal - 3D)
-import numpy as np
-z0 = pd.read_csv('splizvd_z0.csv', index_col=0)
-z1 = pd.read_csv('splizvd_z1.csv', index_col=0)
-z2 = pd.read_csv('splizvd_z2.csv', index_col=0)
-
-# Stack into 3D array: (genes, cells, 3)
-splizvd_array = np.stack([z0.values, z1.values, z2.values], axis=2)
-gene_meta = pd.DataFrame({'gene': z0.index})
-
-model.add_custom_modality(
-    name='splizvd',
-    counts=splizvd_array,
-    feature_meta=gene_meta,
-    distribution='mvnormal'
-)
 ```
 
 ### 5. Distribution-Flexible Fitting
@@ -284,7 +267,7 @@ subset = mod.get_cell_subset(['cell1', 'cell2', 'cell3'])
 | `multinomial` | Proportional usage | 3D: (features, cells, categories) | Donor usage, isoform usage |
 | `binomial` | Binary outcomes | 2D: (features, cells) + denominator | SJ counts (with gene denominator), Exon skipping PSI |
 | `normal` | Continuous scores | 2D: (features, cells) | SpliZ scores |
-| `mvnormal` | Multivariate continuous | 3D: (features, cells, dims) | SpliZVD (z0, z1, z2) |
+| `studentt` | Heavy-tailed continuous | 2D: (features, cells) | Robust SpliZ scores |
 
 ### Splicing Modality Types
 
@@ -392,15 +375,15 @@ See `tests/` directory for complete working examples covering:
 1. Gene expression modeling
 2. Genes + transcripts
 3. Genes + splicing
-4. Custom modalities (SpliZ, SpliZVD)
+4. Custom modalities (SpliZ)
 5. Pre-constructed modalities
 6. Subsetting operations
 
 ## Key Features
 
-✅ **Distribution-Flexible Fitting**: `fit_technical()` and `fit_trans()` support all 5 distributions (negbinom, normal, binomial, multinomial, mvnormal)
+✅ **Distribution-Flexible Fitting**: `fit_technical()` and `fit_trans()` support all 5 distributions (negbinom, normal, studentt, binomial, multinomial)
 
-✅ **Cell-Line Covariate Effects**: Distribution-specific handling (multiplicative for negbinom, additive for normal, logit-scale for binomial)
+✅ **Cell-Line Covariate Effects**: Distribution-specific handling (multiplicative for negbinom, additive for normal/studentt, logit-scale for binomial)
 
 ✅ **Optional Sum Factors**: `sum_factor_col` parameter defaults to `None` (only required for negbinom)
 

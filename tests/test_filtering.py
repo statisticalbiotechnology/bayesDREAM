@@ -150,35 +150,5 @@ print("✓ Custom binomial filtering works!")
 
 print()
 print("=" * 80)
-print("Test 4: MVNormal filtering (all dimensions)")
-print("=" * 80)
-
-# Feature 1: dimension 0 varies, dimension 1 constant
-# Feature 2: all dimensions constant - FILTER
-
-mvn_counts = np.array([
-    [[1, 1], [2, 1], [3, 1], [4, 1], [5, 1]],  # Feature 1: dim 0 varies, dim 1 constant
-    [[1, 2], [1, 2], [1, 2], [1, 2], [1, 2]]   # Feature 2: ALL dims constant - FILTER
-])  # Shape: (2 features, 5 cells, 2 dimensions)
-
-mvn_meta = pd.DataFrame({
-    'feature': ['feat1', 'feat2']
-})
-
-print("Adding custom mvnormal modality with 2 features...")
-model.add_custom_modality(
-    name='custom_mvn',
-    counts=mvn_counts,
-    feature_meta=mvn_meta,
-    distribution='mvnormal'
-)
-
-mvn_mod = model.get_modality('custom_mvn')
-print(f"Features after filtering: {mvn_mod.dims['n_features']}")
-assert mvn_mod.dims['n_features'] == 1, f"Expected 1 feature, got {mvn_mod.dims['n_features']}"
-print("✓ MVNormal filtering works (filters only when ALL dims have zero variance)!")
-
-print()
-print("=" * 80)
 print("ALL FILTERING TESTS PASSED!")
 print("=" * 80)

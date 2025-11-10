@@ -1636,7 +1636,7 @@ def plot_normal_xy(
     **kwargs
 ) -> plt.Axes:
     """
-    Plot normal distribution (continuous scores like SpliZ).
+    Plot normal or studentT distribution (continuous scores like SpliZ).
 
     Y-axis: Raw value
 
@@ -1820,173 +1820,6 @@ def plot_normal_xy(
         _plot_one(axes[0], corrected=False)
 
     return axes[0] if len(axes) == 1 else axes
-
-
-def plot_mvnormal_xy(
-    model,
-    feature: str,
-    modality,
-    x_true: np.ndarray,
-    window: int,
-    show_correction: str,
-    color_palette: Dict[str, str],
-    show_trans_function: bool,
-    show_ntc_gradient: bool = False,
-    xlabel: str = "log2(x_true)",
-    figsize: Optional[Tuple[int, int]] = None,
-    subset_mask: Optional[np.ndarray] = None,
-    **kwargs
-) -> Union[plt.Figure, List[plt.Axes]]:
-    """
-    Plot multivariate normal (e.g., SpliZVD) - one subplot per dimension.
-
-    Y-axis: Value for each dimension
-    Layout: One row with D subplots (one per dimension)
-    If show_correction='both': Two rows × D subplots
-
-    Parameters
-    ----------
-    show_ntc_gradient : bool
-        If True, color lines by NTC proportion in k-NN window (default: False)
-        **Note**: Not yet fully implemented for mvnormal - will issue warning
-    """
-    if show_ntc_gradient:
-        warnings.warn("NTC gradient coloring not yet implemented for mvnormal distributions - using standard colors")
-    # Get data
-    feature_idx = _get_feature_index(feature, modality)
-    if feature_idx is None:
-        raise ValueError(f"Feature '{feature}' not found in modality")
-
-    # Get values: shape (cells, D) for this feature
-    if modality.counts.ndim == 3:
-        values_3d = modality.counts[feature_idx, :, :]  # (cells, D)
-    else:
-        raise ValueError(f"Expected 3D counts for mvnormal, got {modality.counts.ndim}D")
-
-    D = values_3d.shape[1]
-
-    # Align cells between model.meta and modality
-    # For mvnormal, we need to align the first dimension (cells) of the 3D array
-    # We'll use the first dimension for alignment
-    first_dim = values_3d[:, 0]
-    x_true_aligned, first_dim_aligned, meta_aligned = _align_cells_to_modality(
-        model, modality, x_true, first_dim, subset_mask
-    )
-
-    # Now we need to align the full 3D array using the same cell mapping
-    if 'cell' in model.meta.columns:
-        model_cells = model.meta['cell'].values
-    else:
-        model_cells = model.meta.index.values
-    modality_cells = modality.cell_names
-    modality_mask = np.isin(model_cells, modality_cells)
-    if subset_mask is not None:
-        final_mask = modality_mask & subset_mask
-    else:
-        final_mask = modality_mask
-    final_cells = model_cells[final_mask]
-    modality_cell_to_idx = {cell: idx for idx, cell in enumerate(modality_cells)}
-    y_indices = np.array([modality_cell_to_idx[cell] for cell in final_cells])
-    values_3d = values_3d[y_indices, :]  # Align 3D array
-
-    # Check technical correction
-    has_technical_fit = modality.alpha_y_prefit is not None
-    if show_correction == 'corrected' and not has_technical_fit:
-        warnings.warn(f"Technical fit not available for modality '{modality.name}' - showing uncorrected only")
-        show_correction = 'uncorrected'
-
-    # Create figure
-    if figsize is None:
-        figsize = (4 * D, 5) if show_correction != 'both' else (4 * D, 10)
-
-    if show_correction == 'both':
-        fig, axes = plt.subplots(2, D, figsize=figsize, squeeze=False,
-                                 constrained_layout=True)
-    else:
-        fig, axes = plt.subplots(1, D, figsize=figsize, squeeze=False,
-                                 constrained_layout=True)
-
-    # Build dataframe
-    df = pd.DataFrame({
-        'x_true': x_true_aligned,
-        'technical_group_code': meta_aligned['technical_group_code'].values,
-        'target': meta_aligned['target'].values
-    })
-
-    for d in range(D):
-        df[f'dim_{d}'] = values_3d[:, d]
-
-    # Filter valid
-    valid = df['x_true'] > 0
-    for d in range(D):
-        valid &= np.isfinite(df[f'dim_{d}'])
-    df = df[valid].copy()
-
-    # Get technical group labels
-    code_to_label = _labels_by_code_for_df(model, df)
-    group_codes   = np.sort(df['technical_group_code'].unique())
-
-    # Plot each dimension
-    for d in range(D):
-        row_idx = 0 if show_correction != 'both' else (0, 1)
-        rows = [row_idx] if isinstance(row_idx, int) else row_idx
-
-        for row, corrected in zip(rows, [False, True] if len(rows) == 2 else [show_correction == 'corrected']):
-            ax = axes[row, d]
-
-            for idx, group_code in enumerate(group_codes):
-                group_code = int(group_code)
-                group_label = code_to_label[group_code]
-                color = _color_for_label(group_label, fallback_idx=idx, palette=color_palette)
-                df_group = df[df['technical_group_code'] == group_code].copy()
-
-                if len(df_group) == 0:
-                    continue
-
-                y_plot = df_group[f'dim_{d}'].values
-
-                if corrected and has_technical_fit:
-                    # Apply additive correction
-                    if hasattr(modality, 'alpha_y_prefit_add'):
-                        alpha_y_add = modality.alpha_y_prefit_add
-                        # alpha_y_add shape: [S or 1, C, T, D] or [C, T, D]
-                        # Need to extract [group_code, feature_idx, d]
-                        if alpha_y_add.ndim == 4:
-                            correction = _to_scalar(alpha_y_add[:, group_code, feature_idx, d].mean())
-                        elif alpha_y_add.ndim == 3:
-                            correction = _to_scalar(alpha_y_add[group_code, feature_idx, d])
-                        else:
-                            correction = 0  # Fallback
-                        y_plot = y_plot - correction
-
-                # k-NN smoothing
-                k = _knn_k(len(df_group), window)
-                x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, y_plot, k)
-
-                # Plot
-                ax.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2, label=group_label if d == 0 else None)
-
-            # Trans function overlay (if trans model fitted)
-            # Note: mvnormal has multiple dimensions, so we overlay on first dimension only
-            if show_trans_function and not corrected and d == 0:
-                x_range = np.linspace(x_true.min(), x_true.max(), 100)
-                y_pred = predict_trans_function(model, feature, x_range, modality_name=modality.name)
-
-                if y_pred is not None:
-                    ax.plot(np.log2(x_range), y_pred,
-                           color='blue', linestyle='--', linewidth=2,
-                           label='Fitted Trans Function')
-                    warnings.warn("Trans function overlay on mvnormal shows prediction on first dimension only")
-
-            ax.set_xlabel(xlabel)
-            ax.set_ylabel(f'Dimension {d}')
-            title_suffix = ' (corrected)' if corrected else ' (uncorrected)'
-            ax.set_title(f"Dim {d}{title_suffix}")
-            if d == 0 and row == 0:
-                ax.legend(frameon=False, loc='upper right')
-
-    plt.suptitle(f"{model.cis_gene} → {feature}")
-    return fig
 
 
 # ============================================================================
@@ -2398,8 +2231,8 @@ def plot_xy_data(
         Color lines by NTC proportion in k-NN window (default: False)
         Lighter colors = more NTC cells, Darker colors = fewer NTC cells
         Only applies to uncorrected plots
-        Fully implemented for: negbinom, binomial, normal
-        Not yet implemented for: multinomial, mvnormal (will issue warning)
+        Fully implemented for: negbinom, binomial, normal, studentt
+        Not yet implemented for: multinomial (will issue warning)
     sum_factor_col : str
         Column name in model.meta for sum factors (default: 'sum_factor')
         Can be 'sum_factor', 'sum_factor_adj', or any other sum factor column
@@ -2574,7 +2407,7 @@ def plot_xy_data(
                     show_ntc_gradient=show_ntc_gradient, xlabel=xlabel, ax=axes[i, 0],
                     subset_mask=subset_mask, **kwargs
                 )
-            elif distribution == 'normal':
+            elif distribution in ('normal', 'studentt'):
                 plot_normal_xy(
                     model=model, feature=feat_name, modality=modality,
                     x_true=x_true, window=window, show_correction='uncorrected',
@@ -2583,7 +2416,6 @@ def plot_xy_data(
                     subset_mask=subset_mask, **kwargs
                 )
             else:
-                # mvnormal returns its own figure
                 axes[i, 0].text(0.5, 0.5, f"Multi-panel not supported for {distribution}",
                                ha='center', va='center', transform=axes[i, 0].transAxes)
 
@@ -2605,7 +2437,7 @@ def plot_xy_data(
                     show_ntc_gradient=show_ntc_gradient, xlabel=xlabel, ax=axes[i, 1],
                     subset_mask=subset_mask, **kwargs
                 )
-            elif distribution == 'normal':
+            elif distribution in ('normal', 'studentt'):
                 plot_normal_xy(
                     model=model, feature=feat_name, modality=modality,
                     x_true=x_true, window=window, show_correction='corrected',
@@ -2614,7 +2446,6 @@ def plot_xy_data(
                     subset_mask=subset_mask, **kwargs
                 )
             else:
-                # mvnormal returns its own figure
                 axes[i, 1].text(0.5, 0.5, f"Multi-panel not supported for {distribution}",
                                ha='center', va='center', transform=axes[i, 1].transAxes)
 
@@ -2678,7 +2509,7 @@ def plot_xy_data(
             **kwargs
         )
 
-    elif distribution == 'normal':
+    elif distribution in ('normal', 'studentt'):
         return plot_normal_xy(
             model=model,
             feature=feature,
@@ -2690,23 +2521,6 @@ def plot_xy_data(
             show_trans_function=show_hill_function,
             show_ntc_gradient=show_ntc_gradient,
             xlabel=xlabel,
-            subset_mask=subset_mask,
-            **kwargs
-        )
-
-    elif distribution == 'mvnormal':
-        return plot_mvnormal_xy(
-            model=model,
-            feature=feature,
-            modality=modality,
-            x_true=x_true,
-            window=window,
-            show_correction=show_correction,
-            color_palette=color_palette,
-            show_trans_function=show_hill_function,
-            show_ntc_gradient=show_ntc_gradient,
-            xlabel=xlabel,
-            figsize=figsize,
             subset_mask=subset_mask,
             **kwargs
         )

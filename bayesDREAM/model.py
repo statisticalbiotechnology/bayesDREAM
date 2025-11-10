@@ -445,6 +445,19 @@ class bayesDREAM(
         else:
             counts_trans = counts
 
+        # Check for and remove duplicate indices in counts_trans
+        if counts_trans.index.duplicated().any():
+            n_dups = counts_trans.index.duplicated().sum()
+            dup_features = counts_trans.index[counts_trans.index.duplicated()].unique().tolist()
+            warnings.warn(
+                f"[WARNING] counts has {n_dups} duplicate feature(s). "
+                f"Keeping first occurrence for each duplicate. "
+                f"Duplicates: {dup_features[:10]}",
+                UserWarning
+            )
+            # Remove duplicates, keeping first occurrence
+            counts_trans = counts_trans[~counts_trans.index.duplicated(keep='first')]
+
         # Filter features with zero standard deviation across ALL cells
         feature_stds = counts_trans.std(axis=1)
         zero_std_mask = feature_stds == 0
@@ -463,8 +476,34 @@ class bayesDREAM(
                 'feature': counts_trans.index.tolist()
             }, index=counts_trans.index)
         else:
+            # Check for duplicate indices in feature_meta
+            if feature_meta.index.duplicated().any():
+                n_dups = feature_meta.index.duplicated().sum()
+                dup_features = feature_meta.index[feature_meta.index.duplicated()].unique().tolist()
+                warnings.warn(
+                    f"[WARNING] feature_meta has {n_dups} duplicate feature(s). "
+                    f"Keeping first occurrence for each duplicate. "
+                    f"Duplicates: {dup_features[:10]}",
+                    UserWarning
+                )
+                # Remove duplicates, keeping first occurrence
+                feature_meta = feature_meta[~feature_meta.index.duplicated(keep='first')]
+
             # Use provided metadata, but subset to remaining features
-            mod_feature_meta = feature_meta.loc[counts_trans.index].copy()
+            # Use reindex instead of loc to guarantee exact match (no duplicates after deduplication)
+            mod_feature_meta = feature_meta.reindex(counts_trans.index).copy()
+
+            # Check for any missing features in feature_meta
+            if mod_feature_meta.isnull().any().any():
+                missing_features = counts_trans.index[mod_feature_meta.isnull().any(axis=1)]
+                warnings.warn(
+                    f"[WARNING] {len(missing_features)} feature(s) in counts not found in feature_meta. "
+                    f"Creating minimal metadata for these features. First few: {missing_features[:5].tolist()}",
+                    UserWarning
+                )
+                # Fill missing features with minimal metadata
+                for feature in missing_features:
+                    mod_feature_meta.loc[feature, 'feature'] = feature
 
         self.modalities[modality_name] = Modality(
             name=modality_name,
@@ -502,6 +541,19 @@ class bayesDREAM(
         else:
             counts_trans = counts
 
+        # Check for and remove duplicate indices in counts_trans
+        if counts_trans.index.duplicated().any():
+            n_dups = counts_trans.index.duplicated().sum()
+            dup_genes = counts_trans.index[counts_trans.index.duplicated()].unique().tolist()
+            warnings.warn(
+                f"[WARNING] counts has {n_dups} duplicate gene(s). "
+                f"Keeping first occurrence for each duplicate. "
+                f"Duplicates: {dup_genes[:10]}",
+                UserWarning
+            )
+            # Remove duplicates, keeping first occurrence
+            counts_trans = counts_trans[~counts_trans.index.duplicated(keep='first')]
+
         # Filter genes with zero standard deviation across ALL cells
         gene_stds = counts_trans.std(axis=1)
         zero_std_mask = gene_stds == 0
@@ -520,8 +572,34 @@ class bayesDREAM(
                 'gene': counts_trans.index.tolist()
             }, index=counts_trans.index)
         else:
+            # Check for duplicate indices in gene_meta
+            if gene_meta.index.duplicated().any():
+                n_dups = gene_meta.index.duplicated().sum()
+                dup_genes = gene_meta.index[gene_meta.index.duplicated()].unique().tolist()
+                warnings.warn(
+                    f"[WARNING] gene_meta has {n_dups} duplicate gene(s). "
+                    f"Keeping first occurrence for each duplicate. "
+                    f"Duplicates: {dup_genes[:10]}",
+                    UserWarning
+                )
+                # Remove duplicates, keeping first occurrence
+                gene_meta = gene_meta[~gene_meta.index.duplicated(keep='first')]
+
             # Use provided gene_meta, but subset to remaining genes
-            gene_feature_meta = gene_meta.loc[counts_trans.index].copy()
+            # Use reindex instead of loc to guarantee exact match (no duplicates after deduplication)
+            gene_feature_meta = gene_meta.reindex(counts_trans.index).copy()
+
+            # Check for any missing genes in gene_meta
+            if gene_feature_meta.isnull().any().any():
+                missing_genes = counts_trans.index[gene_feature_meta.isnull().any(axis=1)]
+                warnings.warn(
+                    f"[WARNING] {len(missing_genes)} gene(s) in counts not found in gene_meta. "
+                    f"Creating minimal metadata for these genes. First few: {missing_genes[:5].tolist()}",
+                    UserWarning
+                )
+                # Fill missing genes with minimal metadata
+                for gene in missing_genes:
+                    gene_feature_meta.loc[gene, 'gene'] = gene
 
         self.modalities['gene'] = Modality(
             name='gene',

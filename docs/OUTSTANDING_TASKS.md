@@ -206,7 +206,7 @@ model = bayesDREAM(
 - Comprehensive multi-modal workflow example
 - ATAC modality example
 - Splicing modality example with all types (sj, donor, acceptor, exon_skip)
-- Custom modality example (SpliZ, SpliZVD)
+- Custom modality example (SpliZ)
 - Example showing save/load workflow
 - Example showing guide-prior usage (after #1 is implemented)
 
@@ -228,7 +228,7 @@ model = bayesDREAM(
 
 **Status**: Core distributions implemented
 
-**Implemented**: negbinom, multinomial, binomial, normal, mvnormal
+**Implemented**: negbinom, multinomial, binomial, normal, studentt
 
 **Potential Additions**:
 - Zero-inflated negative binomial

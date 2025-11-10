@@ -21,26 +21,25 @@ class Modality:
         Name of the modality (e.g., 'gene', 'transcript', 'splicing')
     counts : np.ndarray or pd.DataFrame
         The count/measurement data. Shape depends on distribution:
-        - negbinom/normal: (features, cells) or (cells, features)
+        - negbinom/normal/studentt: (features, cells) or (cells, features)
         - multinomial: (features, cells, categories)
         - binomial: (features, cells) with separate denominator
-        - mvnormal: (features, cells, dimensions)
     feature_meta : pd.DataFrame
         Feature-level metadata (genes, junctions, etc.)
     distribution : str
-        Distribution family: 'negbinom', 'multinomial', 'binomial', 'normal', 'mvnormal'
+        Distribution family: 'negbinom', 'multinomial', 'binomial', 'normal', 'studentt'
     denominator : np.ndarray, optional
         For binomial distribution: (features, cells) array of trial counts
     """
 
-    VALID_DISTRIBUTIONS = {'negbinom', 'multinomial', 'binomial', 'normal', 'mvnormal'}
+    VALID_DISTRIBUTIONS = {'negbinom', 'multinomial', 'binomial', 'normal', 'studentt'}
 
     def __init__(
         self,
         name: str,
         counts: Union[np.ndarray, pd.DataFrame],
         feature_meta: pd.DataFrame,
-        distribution: Literal['negbinom', 'multinomial', 'binomial', 'normal', 'mvnormal'],
+        distribution: Literal['negbinom', 'multinomial', 'binomial', 'normal', 'studentt'],
         feature_names: Optional[list] = None,
         denominator: Optional[np.ndarray] = None,
         cells_axis: int = 1,  # 0 if cells are rows, 1 if cells are columns
@@ -123,8 +122,7 @@ class Modality:
 
         # Per-modality fitting results storage
         self.alpha_y_prefit = None          # Technical fit: overdispersion parameters
-        self.sigma_y_prefit = None          # Technical fit: variance (normal distribution)
-        self.cov_y_prefit = None            # Technical fit: covariance (mvnormal distribution)
+        self.sigma_y_prefit = None          # Technical fit: variance (normal & studentt distribution)
         self.posterior_samples_technical = None  # Technical fit: full posterior samples
         self.posterior_samples_trans = None      # Trans fit: full posterior samples
 
@@ -136,7 +134,7 @@ class Modality:
 
     def _validate(self):
         """Validate data shapes and requirements."""
-        if self.distribution in ['negbinom', 'normal', 'binomial']:
+        if self.distribution in ['negbinom', 'normal', 'binomial', 'studentt']:
             if self.counts.ndim != 2:
                 raise ValueError(f"{self.distribution} modality requires 2D counts, got shape {self.counts.shape}")
             n_features = self.counts.shape[1 - self.cells_axis]
@@ -144,11 +142,6 @@ class Modality:
         elif self.distribution == 'multinomial':
             if self.counts.ndim != 3:
                 raise ValueError(f"multinomial modality requires 3D counts (features, cells, categories), got shape {self.counts.shape}")
-            n_features = self.counts.shape[0]
-
-        elif self.distribution == 'mvnormal':
-            if self.counts.ndim != 3:
-                raise ValueError(f"mvnormal modality requires 3D counts (features, cells, dimensions), got shape {self.counts.shape}")
             n_features = self.counts.shape[0]
         
         if self.feature_names is not None:
@@ -183,7 +176,7 @@ class Modality:
         """Compute dimensionality information."""
         dims = {}
 
-        if self.distribution in ['negbinom', 'normal', 'binomial']:
+        if self.distribution in ['negbinom', 'normal', 'binomial', 'studentt']:
             dims['n_features'] = self.counts.shape[1 - self.cells_axis]
             dims['n_cells'] = self.counts.shape[self.cells_axis]
 
@@ -191,11 +184,6 @@ class Modality:
             dims['n_features'] = self.counts.shape[0]
             dims['n_cells'] = self.counts.shape[1]
             dims['n_categories'] = self.counts.shape[2]
-
-        elif self.distribution == 'mvnormal':
-            dims['n_features'] = self.counts.shape[0]
-            dims['n_cells'] = self.counts.shape[1]
-            dims['n_dimensions'] = self.counts.shape[2]
 
         return dims
 
@@ -225,7 +213,7 @@ class Modality:
                 feature_indices = [self.feature_names.index(n) for n in feature_indices]
 
         # Subset counts
-        if self.distribution in ['negbinom', 'normal', 'binomial']:
+        if self.distribution in ['negbinom', 'normal', 'binomial', 'studentt']:
             if self.cells_axis == 1:
                 new_counts = self.counts[feature_indices, :]
                 new_denom = self.denominator[feature_indices, :] if self.denominator is not None else None
@@ -239,7 +227,7 @@ class Modality:
                 new_inc2 = self.inc2[:, feature_indices] if self.inc2 is not None else None
                 new_skip = self.skip[:, feature_indices] if self.skip is not None else None
         else:
-            # multinomial or mvnormal: features on axis 0
+            # multinomial: features on axis 0
             new_counts = self.counts[feature_indices, :, :]
             new_denom = None
             new_inc1 = None
@@ -288,7 +276,7 @@ class Modality:
                 cell_indices = [self.cell_names.index(n) for n in cell_indices]
 
         # Subset counts
-        if self.distribution in ['negbinom', 'normal', 'binomial']:
+        if self.distribution in ['negbinom', 'normal', 'binomial', 'studentt']:
             if self.cells_axis == 1:
                 new_counts = self.counts[:, cell_indices]
                 new_denom = self.denominator[:, cell_indices] if self.denominator is not None else None
@@ -302,7 +290,7 @@ class Modality:
                 new_inc2 = self.inc2[cell_indices, :] if self.inc2 is not None else None
                 new_skip = self.skip[cell_indices, :] if self.skip is not None else None
         else:
-            # multinomial or mvnormal: cells on axis 1
+            # multinomial: cells on axis 1
             new_counts = self.counts[:, cell_indices, :]
             new_denom = None
             new_inc1 = None

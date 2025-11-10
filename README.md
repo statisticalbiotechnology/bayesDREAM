@@ -48,7 +48,7 @@ Supports multiple molecular modalities including genes, transcripts, splicing, A
 - 🔬 **ATAC-seq integration** for chromatin accessibility and regulatory element analysis
 - 📊 **Transcript-level analysis** (isoform usage or independent counts)
 - ✂️ **Splicing analysis** (donor usage, acceptor usage, exon skipping, raw junction counts)
-- 📈 **Custom modalities** (SpliZ, SpliZVD, user-defined measurements)
+- 📈 **Custom modalities** (SpliZ, user-defined measurements)
 - 🎨 **Rich visualization suite** with interactive plots, prior-posterior comparisons, and model diagnostics
 - 🔄 **Multiple dose-response functions** (Hill equations, polynomials)
 - 🎯 **Guide-level inference** with technical variation modeling
@@ -279,6 +279,32 @@ model.load_technical_fit(modalities=['gene'])
 
 See **[docs/SAVE_LOAD_GUIDE.md](docs/SAVE_LOAD_GUIDE.md)** for complete save/load documentation.
 
+### Export Summaries for Plotting
+
+```python
+# After running the pipeline, export R-friendly CSV files
+model.save_technical_summary()  # Feature-wise overdispersion parameters
+model.save_cis_summary()        # Guide-wise and cell-wise x_true with CI
+model.save_trans_summary()      # Feature-wise parameters, log2FC, inflection points
+
+# Files created:
+# - technical_feature_summary_gene.csv
+# - cis_guide_summary.csv
+# - cis_cell_summary.csv
+# - trans_feature_summary_gene.csv
+```
+
+**Summary files include:**
+- **Mean and 95% credible intervals** for all parameters
+- **Observed log2FC** (perturbed vs NTC)
+- **Full log2FC** (total dynamic range)
+- **Inflection points** (for Hill functions)
+- **Compatible with R** for downstream plotting
+
+**See:**
+- **[docs/SUMMARY_EXPORT_GUIDE.md](docs/SUMMARY_EXPORT_GUIDE.md)** - Complete export guide with R examples
+- **[docs/example_summary_plots.R](docs/example_summary_plots.R)** - Comprehensive R plotting script
+
 
 ## Documentation
 
@@ -324,7 +350,7 @@ See [docs/QUICKSTART_MULTIMODAL.md](docs/QUICKSTART_MULTIMODAL.md) for detailed 
 | `multinomial` | Isoform/donor/acceptor usage | 3D: (features, cells, categories) |
 | `binomial` | Exon skipping PSI, raw SJ counts | 2D + denominator |
 | `normal` | Continuous scores (SpliZ) | 2D: (features, cells) |
-| `mvnormal` | Multivariate scores (SpliZVD) | 3D: (features, cells, dims) |
+| `studentt` | Heavy-tailed continuous (robust SpliZ) | 2D: (features, cells) |
 
 ## Technical Notes
 
