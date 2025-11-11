@@ -1,0 +1,35 @@
+# bayesDREAM Requirements
+# Python 3.12+ required
+
+# Core dependencies
+numpy>=1.26.0
+scipy>=1.16.0
+pandas>=2.3.0
+
+# PyTorch (adjust based on your system)
+# For CPU-only:
+torch>=2.2.0
+# For GPU with CUDA 11.8:
+# torch>=2.2.0+cu118 --index-url https://download.pytorch.org/whl/cu118
+# For GPU with CUDA 12.1:
+# torch>=2.2.0+cu121 --index-url https://download.pytorch.org/whl/cu121
+
+# Probabilistic programming
+pyro-ppl>=1.9.0
+
+# Visualization
+matplotlib>=3.10.0
+seaborn>=0.13.0
+
+# Data I/O
+h5py>=3.14.0
+
+# Optional but recommended
+# pytest>=7.0.0  # For running tests
+# jupyter>=1.0.0  # For notebooks
+
+# Installation:
+# pip install -r requirements.txt
+#
+# For GPU support, edit this file to uncomment the appropriate torch line
+# and comment out the CPU torch line

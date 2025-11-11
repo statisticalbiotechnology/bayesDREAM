@@ -366,8 +366,13 @@ class TechnicalFitter:
             )
 
         elif distribution == 'studentt':
-            # Fix df (nu) for now; you can expose this as a hyperparameter if you like
+            # Degrees of freedom (nu) - two options:
+            # Option 1: Fixed value (simpler, faster)
             nu_y = self._t(3.0)
+            # Option 2: Sample per-feature (more flexible, slower)
+            # with f_plate:
+            #     nu_y = pyro.sample("nu_y", dist.Gamma(self._t(10.0), self._t(2.0)))  # mean~5, ensures df>2
+
             observation_sampler(
                 y_obs_tensor=y_obs_ntc_tensor,           # [N, T]
                 mu_y=mu_y,                               # [T]

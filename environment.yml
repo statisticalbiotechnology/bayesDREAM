@@ -1,0 +1,77 @@
+name: bayesdream
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+
+dependencies:
+  # Python version
+  - python=3.12
+
+  # Core scientific computing
+  - numpy>=1.26.0
+  - scipy>=1.16.0
+  - pandas>=2.3.0
+
+  # PyTorch (adjust for CPU vs GPU as needed)
+  # For CPU-only clusters, use:
+  - pytorch>=2.2.0
+  - pytorch::cpuonly  # Remove this line if you need GPU support
+
+  # For GPU clusters with CUDA 11.8, replace the above two lines with:
+  # - pytorch>=2.2.0
+  # - pytorch::pytorch-cuda=11.8
+
+  # For GPU clusters with CUDA 12.1, use:
+  # - pytorch>=2.2.0
+  # - pytorch::pytorch-cuda=12.1
+
+  # Pyro probabilistic programming
+  - pip
+  - pip:
+    - pyro-ppl>=1.9.0
+
+  # Visualization
+  - matplotlib>=3.10.0
+  - seaborn>=0.13.0
+
+  # Data I/O
+  - h5py>=3.14.0
+
+  # Optional but recommended for performance
+  - openblas  # For optimized linear algebra operations
+
+  # Jupyter (if you want to run notebooks)
+  # Uncomment if needed:
+  # - jupyter
+  # - ipykernel
+  # - notebook
+
+  # Development tools (optional)
+  # Uncomment if needed:
+  # - pytest
+  # - pytest-cov
+  # - black
+  # - flake8
+
+# Installation instructions:
+# 1. Save this file as environment.yml
+# 2. Create the environment:
+#    conda env create -f environment.yml
+# 3. Activate the environment:
+#    conda activate bayesdream
+# 4. Install bayesDREAM in development mode:
+#    cd /path/to/bayesDREAM_forClaude
+#    pip install -e .
+#
+# For GPU support:
+# - Edit this file to uncomment the appropriate pytorch-cuda line
+# - Remove or comment out the cpuonly line
+# - Match the CUDA version to what's available on your cluster
+#   (check with: nvcc --version or nvidia-smi)
+#
+# Notes:
+# - This environment was tested with Python 3.12.11
+# - PyTorch 2.2.2+ is recommended for best performance
+# - Pyro 1.9.1+ is required for the probabilistic models
+# - If installation fails, try using more relaxed version constraints (e.g., >=1.26 instead of >=1.26.4)

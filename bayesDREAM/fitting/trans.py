@@ -111,6 +111,17 @@ class TransFitter:
             o_y = pyro.sample("o_y", dist.Exponential(beta_o))
             phi_y = 1 / (o_y**2)
         phi_y_used = phi_y.unsqueeze(-2)
+
+        # Degrees of freedom for Student-t distribution (nu_y)
+        # Only needed if using studentt distribution
+        nu_y = None
+        if distribution == 'studentt':
+            # Two options (must match fit_technical choice):
+            # Option 1: Fixed value (simpler, faster) - COMMENTED OUT FOR NOW
+            # nu_y = self._t(3.0)
+            # Option 2: Sample per-feature (more flexible, slower) - ACTIVE
+            with trans_plate:
+                nu_y = pyro.sample("nu_y", dist.Gamma(self._t(10.0), self._t(2.0)))  # mean~5, ensures df>2
     
         #################
         ## Hill-based: ##
@@ -128,10 +139,40 @@ class TransFitter:
         
         # Now enter the trans_plate (T dimension)
         with trans_plate:
-            
+
             weight = o_y / (o_y + (beta_o_beta_tensor / beta_o_alpha_tensor)).clamp_min(epsilon_tensor)
-            Amean_adjusted = ((1 - weight) * Amean_tensor) + (weight * Vmax_mean_tensor) + epsilon_tensor
-            A = pyro.sample("A", dist.Exponential(1 / Amean_adjusted))
+
+            # For multinomial, reduce category dimension to get per-feature baseline
+            if distribution == 'multinomial' and Amean_tensor.ndim > 1:
+                Amean_for_A = Amean_tensor.mean(dim=-1)  # [T, K] -> [T]
+                Vmax_for_A = Vmax_mean_tensor.mean(dim=-1)  # [T, K] -> [T]
+            else:
+                Amean_for_A = Amean_tensor
+                Vmax_for_A = Vmax_mean_tensor
+
+            Amean_adjusted = ((1 - weight) * Amean_for_A) + (weight * Vmax_for_A) + epsilon_tensor
+
+            # Baseline parameter A depends on distribution:
+            # - normal/studentt: can be negative (natural value space)
+            # - negbinom: positive count
+            # - binomial/multinomial: probability in [0,1]
+            if distribution in ['normal', 'studentt']:
+                # Use Normal distribution to allow negative baseline values
+                A = pyro.sample("A", dist.Normal(Amean_adjusted, Amean_adjusted.abs()))
+            elif distribution in ['binomial', 'multinomial']:
+                # For probability distributions, A should be in [0, 1]
+                # Use Beta distribution to constrain to [0,1]
+                # Transform Amean to Beta parameters
+                Amean_clamped = Amean_adjusted.clamp(min=0.01, max=0.99)
+                # Use concentration parameters that give mean = Amean_clamped with moderate variance
+                # alpha = mean * concentration, beta = (1-mean) * concentration
+                concentration = self._t(10.0)  # Higher = tighter around mean
+                alpha_beta = Amean_clamped * concentration
+                beta_beta = (1 - Amean_clamped) * concentration
+                A = pyro.sample("A", dist.Beta(alpha_beta, beta_beta))
+            else:
+                # For negbinom: A must be positive count
+                A = pyro.sample("A", dist.Exponential(1 / Amean_adjusted))
 
             if use_alpha:
                 # Relaxed Bernoulli: alpha ~ (0,1), becomes more discrete as temperature -> 0
@@ -140,194 +181,421 @@ class TransFitter:
                 alpha = torch.ones((T,), device=self.model.device)
             
             if function_type in ['single_hill', 'additive_hill', 'nested_hill']:
-                
+
                 #####################################
                 ## function priors (depend on o_y) ##
                 #####################################
                 # Gamma and delta depend on T dimension
                 # Reduce over group dimension if necessary
                 K_sigma = (K_max_tensor / (self._t(2) * torch.sqrt(K_alpha_tensor))) + epsilon_tensor
-                Vmax_sigma = (Vmax_mean_tensor / torch.sqrt(Vmax_alpha_tensor)) + epsilon_tensor
-                # Replace Laplace with SoftLaplace
-                # Instead of directly n_a, we do n_a_raw
-                n_a_raw = pyro.sample("n_a_raw", dist.Normal(n_mu_tensor, sigma_n_a))
-                #n_a = pyro.sample("n_a", dist.Normal(n_mu_tensor, sigma_n))
-                # Make sure nmin/nmax are scalar tensors; then get python floats for clamp
-                BOX_LOW  = self._t(-20.0)
-                BOX_HIGH = self._t( 20.0)
-                low  = torch.maximum(nmin, BOX_LOW)
-                high = torch.minimum(nmax, BOX_HIGH)
-                
-                n_a = pyro.deterministic(
-                    "n_a",
-                    (alpha * n_a_raw).clamp(min=low.item(), max=high.item())
-                )
+
+                # For multinomial, use reduced Vmax_for_A (without category dimension) for priors
+                # For other distributions, use Vmax_mean_tensor directly
+                if distribution == 'multinomial' and Vmax_mean_tensor.ndim > 1:
+                    Vmax_prior_mean = Vmax_for_A  # [T] - already reduced
+                else:
+                    Vmax_prior_mean = Vmax_mean_tensor  # [T]
+
+                Vmax_sigma = (Vmax_prior_mean / torch.sqrt(Vmax_alpha_tensor)) + epsilon_tensor
+
+                # For multinomial, we need per-category parameters (K-1 categories, Kth is residual)
+                if distribution == 'multinomial' and K is not None:
+                    K_minus_1 = K - 1
+                    # Sample parameters for K-1 categories
+                    # Each category gets its own Hill function parameters
+                    with pyro.plate("category_plate", K_minus_1, dim=-2):
+                        n_a_raw = pyro.sample("n_a_raw", dist.Normal(n_mu_tensor, sigma_n_a))  # [K-1, T]
+                        BOX_LOW  = self._t(-20.0)
+                        BOX_HIGH = self._t( 20.0)
+                        low  = torch.maximum(nmin, BOX_LOW)
+                        high = torch.minimum(nmax, BOX_HIGH)
+                        n_a = pyro.deterministic(
+                            "n_a",
+                            (alpha.unsqueeze(-2) * n_a_raw).clamp(min=low.item(), max=high.item())
+                        )  # [K-1, T] * [1, T] -> [K-1, T]
+                else:
+                    # For non-multinomial: single set of parameters per feature
+                    n_a_raw = pyro.sample("n_a_raw", dist.Normal(n_mu_tensor, sigma_n_a))
+                    BOX_LOW  = self._t(-20.0)
+                    BOX_HIGH = self._t( 20.0)
+                    low  = torch.maximum(nmin, BOX_LOW)
+                    high = torch.minimum(nmax, BOX_HIGH)
+                    n_a = pyro.deterministic(
+                        "n_a",
+                        (alpha * n_a_raw).clamp(min=low.item(), max=high.item())
+                    )
                 
                 # Scale for Vmax, K is multiplied by alpha
                 #eff_Vmax_sigma = alpha * Vmaxa_sigma + epsilon_tensor
                 #eff_Ka_sigma   = alpha * Ka_sigma    + epsilon_tensor
-        
-                Vmax_a = pyro.sample("Vmax_a", dist.Gamma((Vmax_mean_tensor ** 2) / (Vmax_sigma ** 2), Vmax_mean_tensor / (Vmax_sigma ** 2)))
-                K_a = pyro.sample("K_a", dist.Gamma(((K_max_tensor/2) ** 2) / (K_sigma ** 2), (K_max_tensor/2) / (K_sigma ** 2)))
-                # Sample all required parameters (same for all hill types)            
+
+                # Vmax_a and K_a: Distribution-specific priors
+                if distribution == 'multinomial' and K is not None:
+                    # For multinomial, each of K-1 categories gets its own Vmax and K
+                    K_minus_1 = K - 1
+                    with pyro.plate("category_plate_vmax", K_minus_1, dim=-2):
+                        # Vmax for probability distributions should be in [0, 1]
+                        # Use Vmax_prior_mean which is [T] (averaged across categories)
+                        Vmax_mean_clamped = Vmax_prior_mean.clamp(min=0.01, max=0.99)
+                        concentration_vmax = self._t(10.0)
+                        alpha_vmax = Vmax_mean_clamped.unsqueeze(-2) * concentration_vmax  # [1, T]
+                        beta_vmax = (1 - Vmax_mean_clamped.unsqueeze(-2)) * concentration_vmax  # [1, T]
+                        Vmax_a = pyro.sample("Vmax_a", dist.Beta(alpha_vmax, beta_vmax))  # [K-1, T]
+
+                        # K_max_tensor and K_sigma are scalars - broadcast automatically
+                        K_a = pyro.sample("K_a", dist.Gamma(
+                            ((K_max_tensor/2) ** 2) / (K_sigma ** 2),
+                            (K_max_tensor/2) / (K_sigma ** 2)
+                        ))  # [K-1, T]
+
+                elif distribution == 'binomial':
+                    # For binomial, Vmax should be in [0, 1]
+                    Vmax_mean_clamped = Vmax_mean_tensor.clamp(min=0.01, max=0.99)
+                    concentration_vmax = self._t(10.0)
+                    alpha_vmax = Vmax_mean_clamped * concentration_vmax
+                    beta_vmax = (1 - Vmax_mean_clamped) * concentration_vmax
+                    Vmax_a = pyro.sample("Vmax_a", dist.Beta(alpha_vmax, beta_vmax))
+                    K_a = pyro.sample("K_a", dist.Gamma(((K_max_tensor/2) ** 2) / (K_sigma ** 2), (K_max_tensor/2) / (K_sigma ** 2)))
+
+                else:
+                    # For count/continuous distributions, use Gamma prior
+                    Vmax_a = pyro.sample("Vmax_a", dist.Gamma((Vmax_mean_tensor ** 2) / (Vmax_sigma ** 2), Vmax_mean_tensor / (Vmax_sigma ** 2)))
+                    K_a = pyro.sample("K_a", dist.Gamma(((K_max_tensor/2) ** 2) / (K_sigma ** 2), (K_max_tensor/2) / (K_sigma ** 2)))
+
+                # Sample all required parameters (additive_hill and nested_hill need second set)
                 if function_type in ['additive_hill', 'nested_hill']:
                     beta = pyro.sample("beta", alpha_dist(temperature=temperature, probs=p_n_tensor))
-                    n_b_raw = pyro.sample("n_b_raw", dist.Normal(n_mu_tensor, sigma_n_b))
-                    n_b = pyro.deterministic("n_b", (beta * n_b_raw).clamp(min=-20, max=20)) # clamp for numerical stability
-                    Vmax_b = pyro.sample("Vmax_b", dist.Gamma((Vmax_mean_tensor ** 2) / (Vmax_sigma ** 2), Vmax_mean_tensor / (Vmax_sigma ** 2)))
-                    K_b = pyro.sample("K_b", dist.Gamma(((K_max_tensor/2) ** 2) / (K_sigma ** 2), (K_max_tensor/2) / (K_sigma ** 2)))
+
+                    # n_b: per-category for multinomial, single for others
+                    if distribution == 'multinomial' and K is not None:
+                        K_minus_1 = K - 1
+                        with pyro.plate("category_plate_b", K_minus_1, dim=-2):
+                            n_b_raw = pyro.sample("n_b_raw", dist.Normal(n_mu_tensor, sigma_n_b))  # [K-1, T]
+                            n_b = pyro.deterministic("n_b", (beta.unsqueeze(-2) * n_b_raw).clamp(min=-20, max=20))  # [K-1, T]
+                    else:
+                        n_b_raw = pyro.sample("n_b_raw", dist.Normal(n_mu_tensor, sigma_n_b))
+                        n_b = pyro.deterministic("n_b", (beta * n_b_raw).clamp(min=-20, max=20))
+
+                    # Vmax_b and K_b: Distribution-specific priors
+                    if distribution == 'multinomial' and K is not None:
+                        K_minus_1 = K - 1
+                        with pyro.plate("category_plate_vmax_b", K_minus_1, dim=-2):
+                            # Reuse alpha_vmax and beta_vmax from Vmax_a (same prior mean)
+                            Vmax_b = pyro.sample("Vmax_b", dist.Beta(alpha_vmax, beta_vmax))  # [K-1, T]
+                            # K_max_tensor and K_sigma are scalars - broadcast automatically
+                            K_b = pyro.sample("K_b", dist.Gamma(
+                                ((K_max_tensor/2) ** 2) / (K_sigma ** 2),
+                                (K_max_tensor/2) / (K_sigma ** 2)
+                            ))  # [K-1, T]
+
+                    elif distribution == 'binomial':
+                        Vmax_b = pyro.sample("Vmax_b", dist.Beta(alpha_vmax, beta_vmax))
+                        K_b = pyro.sample("K_b", dist.Gamma(((K_max_tensor/2) ** 2) / (K_sigma ** 2), (K_max_tensor/2) / (K_sigma ** 2)))
+
+                    else:
+                        Vmax_b = pyro.sample("Vmax_b", dist.Gamma((Vmax_mean_tensor ** 2) / (Vmax_sigma ** 2), Vmax_mean_tensor / (Vmax_sigma ** 2)))
+                        K_b = pyro.sample("K_b", dist.Gamma(((K_max_tensor/2) ** 2) / (K_sigma ** 2), (K_max_tensor/2) / (K_sigma ** 2)))
                 
                 # Compute Hill function(s)
-                if function_type == 'single_hill':
-                    Hilla = Hill_based_positive(x_true.unsqueeze(-1), Vmax=Vmax_a, A=0, K=K_a, n=n_a, epsilon=epsilon_tensor)
-                    y_true_mu = A + (alpha * Hilla)
-                elif function_type == 'additive_hill':
-                    Hilla = Hill_based_positive(x_true.unsqueeze(-1), Vmax=Vmax_a, A=0, K=K_a, n=n_a, epsilon=epsilon_tensor)
-                    Hillb = Hill_based_positive(x_true.unsqueeze(-1), Vmax=Vmax_b, A=0, K=K_b, n=n_b, epsilon=epsilon_tensor)
-                    y_true_mu = A + (alpha * Hilla) + (beta * Hillb)
-                elif function_type == 'nested_hill':
-                    Hilla = Hill_based_positive(x_true.unsqueeze(-1), Vmax=Vmax_a, A=0, K=K_a, n=n_a, epsilon=epsilon_tensor)
-                    Hillb = Hill_based_positive(Hilla, Vmax=Vmax_b, A=0, K=K_b, n=n_b, epsilon=epsilon_tensor)
-                    y_true_mu = A + (alpha * Hillb)
-                log_y_true_mu = torch.log(y_true_mu)
+                # Hill_based_positive returns values in [0, Vmax]
+                # We compute: y = A + alpha * Hill + beta * Hill (for additive)
+
+                if distribution == 'multinomial' and K is not None:
+                    # For multinomial: compute K-1 independent Hill functions
+                    # Each category gets its own function with its own parameters
+                    # Parameters have shape [K-1, T], need output [N, K-1, T] -> transpose to [N, T, K-1]
+                    K_minus_1 = K - 1
+                    x_expanded = x_true.unsqueeze(-1).unsqueeze(-1)  # [N, 1, 1]
+
+                    if function_type == 'single_hill':
+                        # Compute Hill for each category
+                        # Vmax_a, K_a, n_a have shape [K-1, T]
+                        # Add batch dimension: [1, K-1, T]
+                        Hilla = Hill_based_positive(x_expanded, Vmax=Vmax_a.unsqueeze(0), A=0,
+                                                   K=K_a.unsqueeze(0), n=n_a.unsqueeze(0),
+                                                   epsilon=epsilon_tensor)  # [N, K-1, T]
+                        # A is [T], alpha is [T] -> broadcast to [1, 1, T] and [1, 1, T]
+                        y_dose_response_kminus1_transposed = A.unsqueeze(0).unsqueeze(0) + (alpha.unsqueeze(0).unsqueeze(0) * Hilla)
+                        # Transpose to [N, T, K-1]
+                        y_dose_response_kminus1 = y_dose_response_kminus1_transposed.transpose(-1, -2)
+
+                    elif function_type == 'additive_hill':
+                        Hilla = Hill_based_positive(x_expanded, Vmax=Vmax_a.unsqueeze(0), A=0,
+                                                   K=K_a.unsqueeze(0), n=n_a.unsqueeze(0),
+                                                   epsilon=epsilon_tensor)  # [N, K-1, T]
+                        Hillb = Hill_based_positive(x_expanded, Vmax=Vmax_b.unsqueeze(0), A=0,
+                                                   K=K_b.unsqueeze(0), n=n_b.unsqueeze(0),
+                                                   epsilon=epsilon_tensor)  # [N, K-1, T]
+                        y_dose_response_kminus1_transposed = (A.unsqueeze(0).unsqueeze(0) +
+                                                              (alpha.unsqueeze(0).unsqueeze(0) * Hilla) +
+                                                              (beta.unsqueeze(0).unsqueeze(0) * Hillb))
+                        y_dose_response_kminus1 = y_dose_response_kminus1_transposed.transpose(-1, -2)
+
+                    elif function_type == 'nested_hill':
+                        Hilla = Hill_based_positive(x_expanded, Vmax=Vmax_a.unsqueeze(0), A=0,
+                                                   K=K_a.unsqueeze(0), n=n_a.unsqueeze(0),
+                                                   epsilon=epsilon_tensor)  # [N, K-1, T]
+                        Hillb = Hill_based_positive(Hilla, Vmax=Vmax_b.unsqueeze(0), A=0,
+                                                   K=K_b.unsqueeze(0), n=n_b.unsqueeze(0),
+                                                   epsilon=epsilon_tensor)  # [N, K-1, T]
+                        y_dose_response_kminus1_transposed = A.unsqueeze(0).unsqueeze(0) + (alpha.unsqueeze(0).unsqueeze(0) * Hillb)
+                        y_dose_response_kminus1 = y_dose_response_kminus1_transposed.transpose(-1, -2)
+
+                    # Clamp K-1 probabilities to valid range
+                    y_dose_response_kminus1 = torch.clamp(y_dose_response_kminus1,
+                                                          min=epsilon_tensor, max=1.0 - epsilon_tensor)
+
+                    # Ensure sum of K-1 probabilities doesn't exceed 1
+                    sum_kminus1 = y_dose_response_kminus1.sum(dim=-1, keepdim=True)  # [N, T, 1]
+                    # If sum > 1, rescale proportionally
+                    y_dose_response_kminus1 = torch.where(
+                        sum_kminus1 > (1.0 - epsilon_tensor),
+                        y_dose_response_kminus1 * (1.0 - epsilon_tensor) / sum_kminus1,
+                        y_dose_response_kminus1
+                    )
+
+                    # Compute Kth category as residual: p_K = 1 - sum(p_1, ..., p_{K-1})
+                    p_K = 1.0 - y_dose_response_kminus1.sum(dim=-1, keepdim=True)  # [N, T, 1]
+                    p_K = torch.clamp(p_K, min=epsilon_tensor, max=1.0 - epsilon_tensor)
+
+                    # Concatenate to get all K probabilities
+                    y_dose_response = torch.cat([y_dose_response_kminus1, p_K], dim=-1)  # [N, T, K]
+
+                else:
+                    # For non-multinomial: standard Hill computation
+                    if function_type == 'single_hill':
+                        Hilla = Hill_based_positive(x_true.unsqueeze(-1), Vmax=Vmax_a, A=0, K=K_a, n=n_a, epsilon=epsilon_tensor)
+                        y_dose_response = A + (alpha * Hilla)
+                    elif function_type == 'additive_hill':
+                        Hilla = Hill_based_positive(x_true.unsqueeze(-1), Vmax=Vmax_a, A=0, K=K_a, n=n_a, epsilon=epsilon_tensor)
+                        Hillb = Hill_based_positive(x_true.unsqueeze(-1), Vmax=Vmax_b, A=0, K=K_b, n=n_b, epsilon=epsilon_tensor)
+                        y_dose_response = A + (alpha * Hilla) + (beta * Hillb)
+                    elif function_type == 'nested_hill':
+                        Hilla = Hill_based_positive(x_true.unsqueeze(-1), Vmax=Vmax_a, A=0, K=K_a, n=n_a, epsilon=epsilon_tensor)
+                        Hillb = Hill_based_positive(Hilla, Vmax=Vmax_b, A=0, K=K_b, n=n_b, epsilon=epsilon_tensor)
+                        y_dose_response = A + (alpha * Hillb)
+
+                    # For binomial, clamp output to [0, 1] to ensure valid probabilities
+                    if distribution == 'binomial':
+                        y_dose_response = torch.clamp(y_dose_response, min=epsilon_tensor, max=1.0 - epsilon_tensor)
 
             elif function_type == 'polynomial':
                 assert polynomial_degree is not None and polynomial_degree >= 1, \
                     "polynomial_degree must be ≥ 1 (no intercept, A is handled separately)"
-            
-                # 1) take log2 of inputs
-                log2_x_true = torch.log2(x_true_sample)  # shape [N]
-                
-                # Stack polynomial coefficients
-                coeffs = []
-                for d in range(1, polynomial_degree + 1):  # start at degree 1, no intercept
-                    coeff = pyro.sample(f"poly_coeff_{d}", dist.Normal(0., sigma_coeff))
-                    #check_tensor(f"coeff_{d}", coeff)
-                    coeffs.append(coeff)
-                coeffs = torch.stack(coeffs, dim=-2)  # [degree, T]
-                if (coeffs.shape[1] == 1) & (coeffs.ndim == 4):
-                    coeffs = coeffs.squeeze(1)        # [S, D, T]
-                #check_tensor(f"coeffs", coeffs)
-                
-                # 4) compute polynomial value exactly as before
-                poly_val = Polynomial_function(log2_x_true, coeffs)  # [N, T]
-                log2_y_true_mu = torch.log2(A) + alpha * poly_val       # [N, T]
-                #log2_y_true_mu = torch.log2(A) + poly_val       # [N, T]
-                log_y_true_mu  = log2_y_true_mu * torch.log(torch.tensor(2.0, device=self.model.device))  # Convert log2 to ln
+
+                if distribution == 'multinomial' and K is not None:
+                    # For multinomial: fit K independent polynomials (one per category) in logit space
+                    # Then apply softmax to get K probabilities that sum to 1
+                    # This is more standard than K-1 with residual for unbounded logit space
+
+                    # Sample per-category polynomial coefficients
+                    coeffs_per_category = []
+                    for d in range(1, polynomial_degree + 1):
+                        with pyro.plate(f"poly_category_plate_deg{d}", K, dim=-2):
+                            coeff = pyro.sample(f"poly_coeff_{d}", dist.Normal(0., sigma_coeff))  # [K, T]
+                            coeffs_per_category.append(coeff)
+                    coeffs = torch.stack(coeffs_per_category, dim=-3)  # [degree, K, T]
+
+                    # Compute polynomial for each category
+                    # coeffs: [degree, K, T]
+                    # Need to permute to [degree, T, K] for Polynomial_function to work correctly
+                    coeffs_permuted = coeffs.permute(0, 2, 1)  # [degree, T, K]
+                    poly_val = Polynomial_function(x_true_sample, coeffs_permuted)  # [N, T, K]
+
+                    # A is baseline logit for each category (need K logits)
+                    # Sample K baseline logits (unbounded)
+                    with pyro.plate("category_plate_A", K, dim=-2):
+                        A_clamped = torch.clamp(A.unsqueeze(-2), min=epsilon_tensor, max=1.0 - epsilon_tensor)  # [1, T]
+                        logit_A_transpose = torch.log(A_clamped) - torch.log(1 - A_clamped)  # [K, T] logits
+                    logit_A = logit_A_transpose.transpose(-1, -2)  # [T, K]
+
+                    # Compute logits for each category
+                    logits_K = logit_A.unsqueeze(0) + alpha.unsqueeze(0).unsqueeze(-1) * poly_val  # [N, T, K]
+
+                    # Apply softmax to get probabilities that sum to 1
+                    y_dose_response = torch.softmax(logits_K, dim=-1)  # [N, T, K]
+
+                else:
+                    # For non-multinomial: single set of coefficients per feature
+                    # Stack polynomial coefficients
+                    coeffs = []
+                    for d in range(1, polynomial_degree + 1):  # start at degree 1, no intercept
+                        coeff = pyro.sample(f"poly_coeff_{d}", dist.Normal(0., sigma_coeff))
+                        coeffs.append(coeff)
+                    coeffs = torch.stack(coeffs, dim=-2)  # [degree, T]
+                    if (coeffs.shape[1] == 1) & (coeffs.ndim == 4):
+                        coeffs = coeffs.squeeze(1)        # [S, D, T]
+
+                    # Distribution-specific polynomial computation:
+                    if distribution in ['normal', 'studentt']:
+                        # For continuous distributions: work in natural space (no logs!)
+                        # Polynomial is applied to x_true directly: y = A + alpha * poly(x)
+                        poly_val = Polynomial_function(x_true_sample, coeffs)  # [N, T]
+                        y_dose_response = A + alpha * poly_val  # [N, T] - can be negative!
+
+                    elif distribution in ['negbinom']:
+                        # For negbinom: work in log space
+                        # Polynomial is applied to log2(x): log2(y) = log2(A) + alpha * poly(log2(x))
+                        log2_x_true = torch.log2(x_true_sample)  # [N]
+                        poly_val = Polynomial_function(log2_x_true, coeffs)  # [N, T]
+                        log2_y_dose_response = torch.log2(A) + alpha * poly_val  # [N, T]
+                        y_dose_response = 2 ** log2_y_dose_response  # Convert back to count space
+
+                    elif distribution == 'binomial':
+                        # For binomial: work in LOGIT space (unbounded: -inf to +inf)
+                        # A is in [0,1] from Beta prior, convert to logit
+                        # Polynomial is applied to x_true: logit(p) = logit(A) + alpha * poly(x)
+                        A_clamped = torch.clamp(A, min=epsilon_tensor, max=1.0 - epsilon_tensor)
+                        logit_A = torch.log(A_clamped) - torch.log(1 - A_clamped)  # logit(A)
+                        poly_val = Polynomial_function(x_true_sample, coeffs)  # [N, T]
+                        logit_p = logit_A + alpha * poly_val  # [N, T] - logit space (unbounded)
+                        # Convert back to probability space for sampler
+                        y_dose_response = torch.sigmoid(logit_p)  # [N, T] in [0, 1]
+
+                    else:
+                        raise ValueError(f"Unknown distribution for polynomial: {distribution}")
             else:
                 raise ValueError(f"Unknown function_type: {function_type}")
             
-            
-            ##########################
-            ## Cell-level variables ##
-            ##########################
-            if alpha_y is not None:   
-                # If in sampling mode, alpha_y will be [S, C-1, T]
-                if alpha_y.dim() == 3:  # Predictive case: shape is (S, C-1, T)
-                    ones_shape = (alpha_y.shape[0], 1, T)  # Match batch dimension S
-                    # Ensure ones tensor has correct batch shape
-                    alpha_y_full = torch.cat([torch.ones(ones_shape, device=self.model.device), alpha_y], dim=1)
-                elif alpha_y.dim() == 2:  # Training case: shape is (C-1, T)
-                    ones_shape = (1, T)
-                    # Ensure ones tensor has correct batch shape
-                    alpha_y_full = torch.cat([torch.ones(ones_shape, device=self.model.device), alpha_y], dim=0)
-                else:  # Unexpected extra dimension
-                    raise ValueError(f"[ERROR] Unexpected alpha_y shape: {alpha_y.shape}")
-                alpha_y_used = alpha_y_full[groups_tensor, :]  # [N, T]
-                log_y_true = log_y_true_mu + torch.log(alpha_y_used) #+ 1e-10
+
+        ##########################
+        ## Cell-level variables ##
+        ##########################
+        # At this point, y_dose_response contains the dose-response function output.
+        # We need to transform it to the format expected by samplers.
+        #
+        # IMPORTANT: Samplers in distributions.py handle technical group effects themselves!
+        # Do NOT apply alpha_y here - pass it to the sampler via alpha_y_full.
+
+        # Prepare alpha_y_full (full C technical groups, including reference)
+        # This will be passed to samplers, which apply technical groups themselves
+        # Note: Multinomial sampler doesn't currently support technical groups, skip for now
+        if alpha_y is not None and groups_tensor is not None and distribution != 'multinomial':
+            if alpha_y.dim() == 3:  # Predictive: (S, C-1, T)
+                ones_shape = (alpha_y.shape[0], 1, T)
+                alpha_y_full = torch.cat([torch.ones(ones_shape, device=self.model.device), alpha_y], dim=1)
+            elif alpha_y.dim() == 2:  # Training: (C-1, T)
+                ones_shape = (1, T)
+                alpha_y_full = torch.cat([torch.ones(ones_shape, device=self.model.device), alpha_y], dim=0)
             else:
-                log_y_true = log_y_true_mu #+ 1e-10
-    
-            # Now we sample y_obs which is NxT (or NxTxK for multinomial)
-            # Use data_plate for N dimension
+                raise ValueError(f"Unexpected alpha_y shape: {alpha_y.shape}")
+        else:
+            alpha_y_full = None
 
-            # Compute mu_y from log_y_true (this is the dose-response function output)
-            mu_y = torch.exp(log_y_true)  # [N, T]
+        # Transform dose-response to sampler-expected format
+        # (samplers will handle technical groups and normalization)
+        if distribution == 'negbinom':
+            # Sampler expects: mu_y = dose-response in count space (NO technical groups, NO sum factors)
+            # Sampler will apply: mu_final = mu_y * alpha_y * sum_factor
+            mu_y = y_dose_response  # [N, T] - just the dose-response
 
-            # Debug checks (keep for troubleshooting)
-            if torch.isnan(log_y_true).any() or torch.isinf(log_y_true).any():
-                check_tensor("log_y_true", log_y_true)
-                check_tensor("y_true_mu", y_true_mu)
-                check_tensor("sum_factor_tensor", sum_factor_tensor)
-                check_tensor("phi_y_used", phi_y_used)
-                check_tensor("A", A)
-                if function_type in ['single_hill', 'additive_hill', 'nested_hill']:
-                    check_tensor("n_a", n_a)
-                    print(f"used nmin={low}, used nmax={high}")
-                    check_tensor("Vmax_a", Vmax_a)
-                    check_tensor("K_a", K_a)
-                if function_type in ['additive_hill', 'nested_hill']:
-                    check_tensor("n_b", n_b)
-                    check_tensor("Vmax_b", Vmax_b)
-                    check_tensor("K_b", K_b)
-                if function_type == 'polynomial':
-                    check_tensor("coeffs", coeffs)
+        elif distribution == 'binomial':
+            # Sampler expects: mu_y = probability in [0, 1]
+            # y_dose_response should already be a probability from Hill/polynomial
+            # Sampler will apply technical groups on logit scale
+            mu_y = y_dose_response  # [N, T] - already probability
 
-            # Call distribution-specific observation sampler
-            from .distributions import get_observation_sampler
-            observation_sampler = get_observation_sampler(distribution, 'trans')
+        elif distribution == 'multinomial':
+            # Sampler expects: mu_y = baseline probabilities [N, T, K]
+            # y_dose_response is already [N, T, K] probabilities that sum to 1
+            # Sampler will apply technical groups on logit scale per category
+            mu_y = y_dose_response  # [N, T, K] - probabilities per category
 
-            # Prepare alpha_y_full (full C technical groups, including reference)
-            if alpha_y is not None and groups_tensor is not None:
-                if alpha_y.dim() == 3:  # Predictive: (S, C-1, T)
-                    ones_shape = (alpha_y.shape[0], 1, T)
-                    alpha_y_full = torch.cat([torch.ones(ones_shape, device=self.model.device), alpha_y], dim=1)
-                elif alpha_y.dim() == 2:  # Training: (C-1, T)
-                    ones_shape = (1, T)
-                    alpha_y_full = torch.cat([torch.ones(ones_shape, device=self.model.device), alpha_y], dim=0)
-                else:
-                    raise ValueError(f"Unexpected alpha_y shape: {alpha_y.shape}")
-            else:
-                alpha_y_full = None
+        elif distribution in ['normal', 'studentt']:
+            # Sampler expects: mu_y = natural value space
+            # Sampler will apply technical groups additively
+            mu_y = y_dose_response  # [N, T] - can be negative!
 
-            # Call the appropriate sampler based on distribution
-            if distribution == 'negbinom':
-                observation_sampler(
-                    y_obs_tensor=y_obs_tensor,
-                    mu_y=mu_y,
-                    phi_y_used=phi_y_used,
-                    alpha_y_full=alpha_y_full,
-                    groups_tensor=groups_tensor,
-                    sum_factor_tensor=sum_factor_tensor,
-                    N=N,
-                    T=T,
-                    C=C
-                )
-            elif distribution == 'multinomial':
-                # For multinomial, mu_y should be probabilities [N, T, K]
-                observation_sampler(
-                    y_obs_tensor=y_obs_tensor,
-                    mu_y=mu_y,  # Should be [N, T, K] probabilities
-                    N=N,
-                    T=T,
-                    K=K
-                )
-            elif distribution == 'binomial':
-                observation_sampler(
-                    y_obs_tensor=y_obs_tensor,
-                    denominator_tensor=denominator_tensor,
-                    mu_y=mu_y,  # Should be probabilities [N, T]
-                    alpha_y_full=alpha_y_full,
-                    groups_tensor=groups_tensor,
-                    N=N,
-                    T=T,
-                    C=C
-                )
-            elif distribution == 'normal':
-                # For normal, we need sigma_y (standard deviation)
-                sigma_y = 1.0 / torch.sqrt(phi_y)  # Convert from precision to std dev
-                observation_sampler(
-                    y_obs_tensor=y_obs_tensor,
-                    mu_y=mu_y,
-                    sigma_y=sigma_y,
-                    alpha_y_full=alpha_y_full,
-                    groups_tensor=groups_tensor,
-                    N=N,
-                    T=T,
-                    C=C
-                )
-            else:
-                raise ValueError(f"Unknown distribution: {distribution}")
+        else:
+            raise ValueError(f"Unknown distribution: {distribution}")
+
+        # Debug checks (keep for troubleshooting)
+        if torch.isnan(mu_y).any() or torch.isinf(mu_y).any():
+            check_tensor("mu_y", mu_y)
+            check_tensor("y_dose_response", y_dose_response)
+            check_tensor("sum_factor_tensor", sum_factor_tensor)
+            check_tensor("phi_y_used", phi_y_used)
+            check_tensor("A", A)
+            if function_type in ['single_hill', 'additive_hill', 'nested_hill']:
+                check_tensor("n_a", n_a)
+                check_tensor("Vmax_a", Vmax_a)
+                check_tensor("K_a", K_a)
+            if function_type in ['additive_hill', 'nested_hill']:
+                check_tensor("n_b", n_b)
+                check_tensor("Vmax_b", Vmax_b)
+                check_tensor("K_b", K_b)
+            if function_type == 'polynomial':
+                check_tensor("coeffs", coeffs)
+
+        # Call distribution-specific observation sampler
+        from .distributions import get_observation_sampler
+        observation_sampler = get_observation_sampler(distribution, 'trans')
+
+        # Call the appropriate sampler based on distribution
+        if distribution == 'negbinom':
+            observation_sampler(
+                y_obs_tensor=y_obs_tensor,
+                mu_y=mu_y,
+                phi_y_used=phi_y_used,
+                alpha_y_full=alpha_y_full,
+                groups_tensor=groups_tensor,
+                sum_factor_tensor=sum_factor_tensor,
+                N=N,
+                T=T,
+                C=C
+            )
+        elif distribution == 'multinomial':
+            # For multinomial, mu_y should be probabilities [N, T, K]
+            observation_sampler(
+                y_obs_tensor=y_obs_tensor,
+                mu_y=mu_y,  # Should be [N, T, K] probabilities
+                alpha_y_full=alpha_y_full,  # Currently None for multinomial (not yet implemented)
+                groups_tensor=groups_tensor,
+                N=N,
+                T=T,
+                K=K,
+                C=C
+            )
+        elif distribution == 'binomial':
+            observation_sampler(
+                y_obs_tensor=y_obs_tensor,
+                denominator_tensor=denominator_tensor,
+                mu_y=mu_y,  # Should be probabilities [N, T]
+                alpha_y_full=alpha_y_full,
+                groups_tensor=groups_tensor,
+                N=N,
+                T=T,
+                C=C
+            )
+        elif distribution == 'normal':
+            # For normal, we need sigma_y (standard deviation)
+            sigma_y = 1.0 / torch.sqrt(phi_y)  # Convert from precision to std dev
+            observation_sampler(
+                y_obs_tensor=y_obs_tensor,
+                mu_y=mu_y,
+                sigma_y=sigma_y,
+                alpha_y_full=alpha_y_full,
+                groups_tensor=groups_tensor,
+                N=N,
+                T=T,
+                C=C
+            )
+        elif distribution == 'studentt':
+            # For studentt, we need sigma_y (standard deviation) and nu_y (degrees of freedom)
+            sigma_y = 1.0 / torch.sqrt(phi_y)  # Convert from precision to std dev
+            observation_sampler(
+                y_obs_tensor=y_obs_tensor,
+                mu_y=mu_y,
+                sigma_y=sigma_y,
+                nu_y=nu_y,
+                alpha_y_full=alpha_y_full,
+                groups_tensor=groups_tensor,
+                N=N,
+                T=T,
+                C=C
+            )
+        else:
+            raise ValueError(f"Unknown distribution: {distribution}")
 
     ########################################################
     # Step 3: Fit trans effects (model_y)
