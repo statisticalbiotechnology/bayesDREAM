@@ -149,16 +149,28 @@ class CisFitter:
             alpha_x_used = alpha_x_full[..., groups_tensor]     # shape = [N] or [S,N]
         else:
             alpha_x_used = torch.ones_like(sum_factor_tensor)  # shape = [N] or [S,N]
-        
-        x_mean = x_eff_g[..., guides_tensor]  # no alpha_x_used here anymore
-        
+
+        # Aggregate guide effects to cells
+        if self.model.is_high_moi:
+            # High MOI: sum guide effects (additive)
+            # guide_assignment_tensor: [N, G], x_eff_g: [G]
+            x_mean = torch.matmul(self.model.guide_assignment_tensor, x_eff_g)  # [N]
+
+            # For sigma: average across guides in each cell
+            guides_per_cell = self.model.guide_assignment_tensor.sum(dim=1).clamp(min=1)  # [N]
+            sigma_mean = torch.matmul(self.model.guide_assignment_tensor, sigma_eff) / guides_per_cell  # [N]
+        else:
+            # Single guide per cell: use indexing
+            x_mean = x_eff_g[..., guides_tensor]  # [N]
+            sigma_mean = sigma_eff[..., guides_tensor]  # [N]
+
         ######################
         ## Cell-level plate ##
         ######################
         with pyro.plate("data_plate", N):
             log_x_true = pyro.sample( # use log2 of xtrue to allow small values of xtrue
                 "log_x_true",
-                dist.Normal(torch.log2(x_mean), sigma_eff[..., guides_tensor])
+                dist.Normal(torch.log2(x_mean), sigma_mean)  # Use sigma_mean instead of indexing
             )
             x_true = pyro.deterministic("x_true", self._t(2.0) ** log_x_true)
             mu_obs = alpha_x_used * x_true * sum_factor_tensor
@@ -318,11 +330,17 @@ class CisFitter:
             groups_tensor = torch.tensor(self.model.meta['technical_group_code'].values, dtype=torch.long, device=self.model.device)
         
         N = self.model.meta.shape[0]
-        G = self.model.meta['guide_code'].nunique()
+
+        # Handle G (number of guides) differently for high MOI vs single-guide mode
+        if self.model.is_high_moi:
+            G = self.model.guide_assignment.shape[1]  # Number of guides
+            guides_tensor = None  # Not used in high MOI mode
+        else:
+            G = self.model.meta['guide_code'].nunique()
+            guides_tensor = torch.tensor(self.model.meta['guide_code'].values, dtype=torch.long, device=self.model.device)
 
         # Use cis_counts from modality-specific lookup (or traditional self.model.counts)
         x_obs_tensor = torch.tensor(cis_counts, dtype=torch.float32, device=self.model.device)
-        guides_tensor = torch.tensor(self.model.meta['guide_code'].values, dtype=torch.long, device=self.model.device)
 
         # ========================================================================
         # MANUAL GUIDE EFFECTS INFRASTRUCTURE
@@ -396,17 +414,31 @@ class CisFitter:
                 raise ValueError("independent_mu_sigma is True, self.model.meta['target'] column not found.")
             elif self.model.meta['target'].nunique() < 2:
                 raise ValueError("independent_mu_sigma is True, but only 1 target type found in self.model.meta['target'] column.")
-            self.model.meta['target_code'] = pd.factorize(self.model.meta['target'])[0]
-            target_codes_tensor = torch.tensor(self.model.meta['target_code'].values, dtype=torch.long, device=self.model.device)
-        
+
             ### BUILD target_per_guide_tensor [G] based on guide → target
-            target_per_guide_tensor = torch.empty(G, dtype=torch.long, device=self.model.device)
-            for g in range(G):
-                idx = (guides_tensor == g)
-                guide_targets = torch.unique(target_codes_tensor[idx])
-                if guide_targets.shape[0] != 1:
-                    raise ValueError(f"Guide {g} maps to multiple targets: {guide_targets}")
-                target_per_guide_tensor[g] = guide_targets[0]
+            if self.model.is_high_moi:
+                # High MOI: use guide_meta to get target for each guide
+                # guide_meta has 'target' column, and guides are in order by guide_code
+                if 'target' not in self.model.guide_meta.columns:
+                    raise ValueError("independent_mu_sigma is True, but guide_meta missing 'target' column.")
+
+                # Factorize targets to get unique target codes
+                target_factorized, target_unique = pd.factorize(self.model.guide_meta['target'])
+                target_per_guide_tensor = torch.tensor(target_factorized, dtype=torch.long, device=self.model.device)
+
+                print(f"[INFO] independent_mu_sigma (high MOI): {len(target_unique)} unique targets")
+            else:
+                # Single-guide mode: use existing logic
+                self.model.meta['target_code'] = pd.factorize(self.model.meta['target'])[0]
+                target_codes_tensor = torch.tensor(self.model.meta['target_code'].values, dtype=torch.long, device=self.model.device)
+
+                target_per_guide_tensor = torch.empty(G, dtype=torch.long, device=self.model.device)
+                for g in range(G):
+                    idx = (guides_tensor == g)
+                    guide_targets = torch.unique(target_codes_tensor[idx])
+                    if guide_targets.shape[0] != 1:
+                        raise ValueError(f"Guide {g} maps to multiple targets: {guide_targets}")
+                    target_per_guide_tensor[g] = guide_targets[0]
         else:
             target_per_guide_tensor = None
         sum_factor_tensor = torch.tensor(self.model.meta[sum_factor_col].values, dtype=torch.float32, device=self.model.device)
@@ -438,22 +470,51 @@ class CisFitter:
         alpha_dirichlet_tensor = torch.tensor(alpha_dirichlet, dtype=torch.float32, device=self.model.device)
         epsilon_tensor = torch.tensor(epsilon, dtype=torch.float32, device=self.model.device)
 
-        unique_guides = torch.unique(guides_tensor)
-        guide_means = torch.tensor([
-            torch.log2(torch.mean(x_obs_factored[guides_tensor == g]))
-            for g in unique_guides
-            if torch.sum(x_obs_factored[guides_tensor == g]) > 0
-        ], dtype=torch.float32, device=self.model.device)
+        # Compute guide-level means and MADs (different logic for high MOI vs single-guide)
+        if self.model.is_high_moi:
+            # High MOI: for each guide, find cells that have it and compute mean
+            guide_means = []
+            guide_mads = []
+            for g in range(G):
+                cells_with_guide = self.model.guide_assignment[:, g] == 1
+                if cells_with_guide.sum() > 0:
+                    # Compute mean for this guide
+                    guide_mean = torch.log2(torch.mean(x_obs_factored[cells_with_guide]))
+                    guide_means.append(guide_mean)
+
+                    # Compute MAD for this guide
+                    x_obs_guide = x_obs_factored[cells_with_guide]
+                    guide_mad = torch.median(
+                        torch.abs(
+                            torch.log2(x_obs_guide + epsilon) -
+                            torch.median(torch.log2(x_obs_guide + epsilon))
+                        )
+                    )
+                    guide_mads.append(guide_mad)
+
+            guide_means = torch.tensor(guide_means, dtype=torch.float32, device=self.model.device)
+            guide_mads_tensor = torch.tensor(guide_mads, dtype=torch.float32, device=self.model.device)
+        else:
+            # Single-guide mode: existing logic
+            unique_guides = torch.unique(guides_tensor)
+            guide_means = torch.tensor([
+                torch.log2(torch.mean(x_obs_factored[guides_tensor == g]))
+                for g in unique_guides
+                if torch.sum(x_obs_factored[guides_tensor == g]) > 0
+            ], dtype=torch.float32, device=self.model.device)
+
+            # Compute guide-level MAD (robust estimate of log2 spread)
+            guide_mads_tensor = torch.tensor([
+                torch.median(torch.abs(torch.log2((x_obs_factored)[guides_tensor == g] + epsilon) -
+                                       torch.median(torch.log2((x_obs_factored)[guides_tensor == g] + epsilon))))
+                for g in unique_guides
+            ], dtype=torch.float32, device=self.model.device)
+
         print(f"[DEBUG] guide_means min={guide_means.min()} median={guide_means.median()} mean={guide_means.mean()} max=={guide_means.max()}")
         mu_x_mean_tensor = torch.mean(guide_means)#.to(self.model.device)
         print(f"[DEBUG] mu_x_mean_tensor: {mu_x_mean_tensor}")
         mu_x_sd_tensor = torch.std(guide_means)#.to(self.model.device)
-        # Compute guide-level MAD (robust estimate of log2 spread)
-        guide_mads_tensor = torch.tensor([
-            torch.median(torch.abs(torch.log2((x_obs_factored)[guides_tensor == g] + epsilon) - 
-                                   torch.median(torch.log2((x_obs_factored)[guides_tensor == g] + epsilon))))
-            for g in unique_guides
-        ], dtype=torch.float32, device=self.model.device)
+
         guide_mads_tensor = guide_mads_tensor * 1.4826  # Gaussian-equivalent spread
         sigma_eff_mean_tensor = torch.mean(guide_mads_tensor)#.to(self.model.device)
         sigma_eff_sd_tensor = torch.std(guide_mads_tensor)#.to(self.model.device)        

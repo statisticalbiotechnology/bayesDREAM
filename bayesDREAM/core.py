@@ -72,7 +72,9 @@ class _BayesDREAMCore(PlottingMixin):
         label: str = None,
         device: str = None,
         random_seed: int = 2402,
-        cores: int = 1
+        cores: int = 1,
+        guide_assignment: np.ndarray = None,
+        guide_meta: pd.DataFrame = None
     ):
         """
         Initialize the model with the metadata and count matrices.
@@ -80,8 +82,9 @@ class _BayesDREAMCore(PlottingMixin):
         Parameters
         ----------
         meta : pd.DataFrame
-            Cell metadata DataFrame (includes columns: cell, guide, target, sum_factor, etc.
-            May optionally include technical group identifiers like 'cell_line', 'batch', 'lane', etc.)
+            Cell metadata DataFrame. For single-guide mode: includes columns cell, guide, target, sum_factor, etc.
+            For high MOI mode: includes columns cell, sum_factor, etc. (NO guide or target columns)
+            May optionally include technical group identifiers like 'cell_line', 'batch', 'lane', etc.
         counts : pd.DataFrame
             Counts DataFrame (genes as rows, cell barcodes as columns)
         gene_meta : pd.DataFrame, optional
@@ -91,9 +94,9 @@ class _BayesDREAMCore(PlottingMixin):
         cis_gene : str
             The 'X' gene for cis modeling
         guide_covariates : list of str
-            List of columns used to construct guide_used for non-NTC guides.
+            List of columns used to construct guide_used for non-NTC guides (single-guide mode only).
         guide_covariates_ntc : list of str or None
-            List of columns used to construct guide_used for NTC guides.
+            List of columns used to construct guide_used for NTC guides (single-guide mode only).
         output_dir : str
             Where to save results
         label : str
@@ -104,13 +107,21 @@ class _BayesDREAMCore(PlottingMixin):
             Random seed for reproducibility
         cores : int
             Number of CPU cores for Pyro to use
+        guide_assignment : np.ndarray, optional
+            Binary matrix [N, G] for high MOI mode. Each row represents a cell, each column a guide.
+            guide_assignment[i, j] = 1 if cell i has guide j, else 0.
+            If provided, must also provide guide_meta. Activates high MOI mode.
+        guide_meta : pd.DataFrame, optional
+            Guide metadata DataFrame for high MOI mode. Must have columns 'guide' and 'target'.
+            Index must match the column order of guide_assignment matrix.
+            If provided, must also provide guide_assignment.
         """
         
         if label is None and cis_gene is not None:
             label = cis_gene
         elif label is None:
             label = ""
-            
+
         # Basic assignments
         self.meta = meta.copy()
         self.counts = counts.copy()
@@ -118,6 +129,58 @@ class _BayesDREAMCore(PlottingMixin):
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
         self.label = label
+
+        # ==============================================================================
+        # Detect high MOI mode and validate
+        # ==============================================================================
+        if guide_assignment is not None or guide_meta is not None:
+            if guide_assignment is None or guide_meta is None:
+                raise ValueError(
+                    "Both guide_assignment and guide_meta must be provided for high MOI mode. "
+                    "Got guide_assignment={}, guide_meta={}".format(
+                        type(guide_assignment).__name__ if guide_assignment is not None else None,
+                        type(guide_meta).__name__ if guide_meta is not None else None
+                    )
+                )
+            self.is_high_moi = True
+            print("[INFO] High MOI mode detected")
+
+            # Validate guide_assignment shape
+            if guide_assignment.ndim != 2:
+                raise ValueError(
+                    f"guide_assignment must be a 2D matrix (cells × guides), "
+                    f"but got shape {guide_assignment.shape} with {guide_assignment.ndim} dimensions"
+                )
+
+            N_cells_assignment, G_guides = guide_assignment.shape
+
+            # Validate guide_meta
+            if len(guide_meta) != G_guides:
+                raise ValueError(
+                    f"guide_meta has {len(guide_meta)} rows but guide_assignment has {G_guides} guides (columns). "
+                    f"These dimensions must match."
+                )
+
+            required_guide_cols = {'guide', 'target'}
+            missing_guide_cols = required_guide_cols - set(guide_meta.columns)
+            if missing_guide_cols:
+                raise ValueError(
+                    f"guide_meta missing required columns: {missing_guide_cols}. "
+                    f"Available columns: {list(guide_meta.columns)}"
+                )
+
+            # Store guide assignment and metadata
+            self.guide_assignment = guide_assignment.copy()
+            self.guide_meta = guide_meta.copy()
+
+            # Create guide_code mapping for guide_meta
+            self.guide_meta['guide_code'] = range(G_guides)
+
+            print(f"[INFO] High MOI: {N_cells_assignment} cells (from guide_assignment), {G_guides} guides")
+            print(f"[INFO] Average guides per cell: {guide_assignment.sum(axis=1).mean():.2f}")
+
+        else:
+            self.is_high_moi = False
 
         # Handle gene metadata
         if gene_meta is None:
@@ -200,20 +263,75 @@ class _BayesDREAMCore(PlottingMixin):
         if guide_covariates_ntc is None:
             guide_covariates_ntc = []
 
-        # Input checks
-        required_cols = {"target", "cell", sum_factor_col, "guide"} | set(guide_covariates) | set(guide_covariates_ntc)
-        missing_cols = required_cols - set(self.meta.columns)
-        if missing_cols:
-            raise ValueError(f"Missing required columns in meta: {missing_cols}")
+        # Input checks - different requirements for single-guide vs high MOI mode
+        if self.is_high_moi:
+            # High MOI mode: do NOT require 'guide' or 'target' in meta
+            required_cols = {"cell", sum_factor_col} | set(guide_covariates) | set(guide_covariates_ntc)
+            missing_cols = required_cols - set(self.meta.columns)
+            if missing_cols:
+                raise ValueError(f"[High MOI] Missing required columns in meta: {missing_cols}")
 
-        if "ntc" not in self.meta["target"].values:
-            raise ValueError("The 'target' column in meta must contain 'ntc'.")
+            # Validate guide_assignment matches meta length
+            if len(self.meta) != N_cells_assignment:
+                raise ValueError(
+                    f"[High MOI] guide_assignment has {N_cells_assignment} rows but meta has {len(self.meta)} rows. "
+                    f"These dimensions must match."
+                )
+
+        else:
+            # Single-guide mode: require 'guide' and 'target' in meta
+            required_cols = {"target", "cell", sum_factor_col, "guide"} | set(guide_covariates) | set(guide_covariates_ntc)
+            missing_cols = required_cols - set(self.meta.columns)
+            if missing_cols:
+                raise ValueError(f"[Single-guide] Missing required columns in meta: {missing_cols}")
+
+            if "ntc" not in self.meta["target"].values:
+                raise ValueError("The 'target' column in meta must contain 'ntc'.")
 
         if not set(self.meta["cell"]).issubset(set(self.counts.columns)):
             raise ValueError("The 'cell' column in meta must correspond 1:1 with the column names of counts.")
 
         if (self.meta[sum_factor_col] <= 0).any():
             raise ValueError(f"All values in sum_factor_col={sum_factor_col} column must be strictly greater than 0.")
+
+        # For high MOI mode, create 'target' column based on guide assignment
+        if self.is_high_moi:
+            # Determine which guides are NTC
+            ntc_guide_mask = self.guide_meta['target'] == 'ntc'
+            ntc_guide_indices = np.where(ntc_guide_mask)[0]
+
+            # Determine which guides target the cis_gene
+            cis_guide_mask = self.guide_meta['target'] == self.cis_gene
+            cis_guide_indices = np.where(cis_guide_mask)[0]
+
+            # Cell is NTC if it ONLY has NTC guides (and at least one guide)
+            has_any_guide = self.guide_assignment.sum(axis=1) > 0
+            has_only_ntc = self.guide_assignment[:, ntc_guide_indices].sum(axis=1) == self.guide_assignment.sum(axis=1)
+            is_ntc_cell = has_any_guide & has_only_ntc
+
+            # Cell targets cis_gene if it has ANY guides targeting the cis_gene
+            has_cis_guide = self.guide_assignment[:, cis_guide_indices].sum(axis=1) > 0
+
+            # Assign target based on guide composition
+            targets = []
+            for i in range(len(self.guide_assignment)):
+                if is_ntc_cell[i]:
+                    targets.append('ntc')
+                elif has_cis_guide[i]:
+                    targets.append(self.cis_gene)
+                else:
+                    # Cell has guides targeting other genes (not cis_gene, not ntc)
+                    targets.append('other')
+
+            self.meta['target'] = targets
+
+            # Add guide_code column (not meaningful in high MOI, marked as -1)
+            self.meta['guide_code'] = -1
+
+            ntc_count = is_ntc_cell.sum()
+            cis_count = has_cis_guide.sum()
+            other_count = ((~is_ntc_cell) & (~has_cis_guide) & has_any_guide).sum()
+            print(f"[INFO] NTC cells: {ntc_count}, {self.cis_gene}-targeting cells: {cis_count}, other-targeting cells: {other_count}")
 
         # Subset meta and counts to relevant cells
         valid_cells = self.meta[self.meta["target"].isin(["ntc", self.cis_gene])]["cell"].unique()
@@ -253,26 +371,42 @@ class _BayesDREAMCore(PlottingMixin):
         
         # Ensure same order of meta and counts
         self.meta = self.meta.set_index("cell", drop=False).loc[self.counts.columns]
-        
-        # Construct guide_used column
-        self.meta["guide_used"] = self.meta.apply(
-            lambda row: f"{row['guide']}_{'_'.join(str(row[cov]) for cov in (guide_covariates_ntc if row['target'] == 'ntc' else set(guide_covariates_ntc + guide_covariates)))}",
-            axis=1
-        )
-        
+
+        # Construct guide_used column (single-guide mode only)
+        if not self.is_high_moi:
+            self.meta["guide_used"] = self.meta.apply(
+                lambda row: f"{row['guide']}_{'_'.join(str(row[cov]) for cov in (guide_covariates_ntc if row['target'] == 'ntc' else set(guide_covariates_ntc + guide_covariates)))}",
+                axis=1
+            )
+            # one-hot encode guides
+            self.meta['guide_code'] = pd.Categorical(self.meta['guide_used']).codes
+        else:
+            # High MOI: guide_used not needed, guide_code already set to -1
+            self.meta["guide_used"] = "highmoi"  # Placeholder for compatibility
+            # Convert guide_assignment to tensor and store after subsetting
+            # Need to subset guide_assignment to match the subsetted cells
+            cell_indices = [list(self.counts.columns).index(cell) for cell in self.meta['cell']]
+            self.guide_assignment = self.guide_assignment[cell_indices, :]
+            self.guide_assignment_tensor = torch.tensor(
+                self.guide_assignment,
+                dtype=torch.float32,
+                device='cpu'  # Will move to device below
+            )
+
         # Set device
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
+
+        # Move guide_assignment_tensor to device if in high MOI mode
+        if self.is_high_moi:
+            self.guide_assignment_tensor = self.guide_assignment_tensor.to(self.device)
 
         # Set random seeds & threads
         pyro.set_rng_seed(random_seed)
         torch.manual_seed(random_seed)
         np.random.seed(random_seed)
         set_max_threads(cores)
-
-        # one-hot encode things
-        self.meta['guide_code'] = pd.Categorical(self.meta['guide_used']).codes
 
         # Bookkeeping for results
         self.alpha_x_prefit = None    # from step1

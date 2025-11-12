@@ -13,6 +13,7 @@ bayesDREAM has evolved from a **single-modality, gene-specific implementation** 
 **Key Achievements:**
 - ✅ Multi-modal support (genes, transcripts, splicing, ATAC-seq, custom)
 - ✅ Flexible cis-feature specification (genes, ATAC regions, any feature)
+- ✅ High MOI support with additive guide effects (NEW: 2025-01-27)
 - 🚧 Prior-informed cis fitting (infrastructure ~30% complete - see details below)
 - ✅ Comprehensive plotting infrastructure with interactive visualizations
 - ✅ Modular architecture (93% reduction in main file size)
@@ -478,6 +479,160 @@ model.add_splicing_modality(
 
 ---
 
+### 6. **High MOI Support with Additive Guide Effects**
+
+**NEW (2025-01-27):** Support for high MOI (multiplicity of infection) screens where individual cells can contain multiple CRISPR guides.
+
+#### What is High MOI Mode?
+
+In traditional CRISPR screens, each cell receives a single guide RNA. With **high MOI screens**, cells can be infected with multiple viral particles, resulting in:
+
+- **Multiple guides per cell**: A single cell may contain 2, 3, or more distinct guide RNAs
+- **Additive effects**: When a cell has multiple guides, their effects combine additively
+- **Mixed targeting**: Cells can have guides targeting different genes
+
+#### Implementation Architecture
+
+**Data Structures:**
+
+1. **Guide Assignment Matrix**: Binary matrix `(n_cells × n_guides)` indicating which guides are in each cell
+2. **Guide Metadata**: DataFrame with guide-level annotations (`guide`, `target`)
+
+**Key Innovation - Additive Effects:**
+
+```python
+# Single-guide mode (original):
+x_true[cell_i] = x_eff_g[guide_i]  # One guide per cell
+
+# High MOI mode (new):
+x_true[cell_i] = sum(x_eff_g[guides in cell_i])  # Sum all guides in cell
+
+# Efficient implementation via matrix multiplication:
+x_true = guide_assignment @ x_eff_g  # [N,G] @ [G] = [N]
+```
+
+**Automatic Cell Classification:**
+
+- **NTC cells**: Cells with ONLY non-targeting control guides
+- **Cis-targeting cells**: Cells with ANY guides targeting the cis gene (kept for fitting)
+- **Other cells**: Cells with guides targeting other genes only (excluded from fitting)
+
+#### Usage Example
+
+```python
+import numpy as np
+import pandas as pd
+from bayesDREAM import bayesDREAM
+
+# Cell metadata (no 'guide' or 'target' columns in high MOI mode)
+meta = pd.DataFrame({
+    'cell': ['cell_1', 'cell_2', 'cell_3', 'cell_4'],
+    'cell_line': ['K562', 'K562', 'K562', 'K562'],
+    'sum_factor': [1.0, 1.1, 0.9, 1.0]
+})
+
+# Guide assignment matrix (4 cells × 3 guides)
+guide_assignment = np.array([
+    [1, 1, 0],  # Cell 1: has guides 0 and 1 (both target GFI1B)
+    [0, 1, 0],  # Cell 2: has guide 1 only
+    [0, 0, 1],  # Cell 3: has guide 2 (NTC)
+    [1, 0, 0],  # Cell 4: has guide 0 only
+])
+
+# Guide metadata
+guide_meta = pd.DataFrame({
+    'guide': ['sgGFI1B_1', 'sgGFI1B_2', 'sgNTC_1'],
+    'target': ['GFI1B', 'GFI1B', 'ntc']
+})
+
+# Initialize with high MOI
+model = bayesDREAM(
+    meta=meta,
+    counts=gene_counts,
+    guide_assignment=guide_assignment,  # Binary matrix
+    guide_meta=guide_meta,              # Guide annotations
+    cis_gene='GFI1B'
+)
+
+# Verify high MOI mode
+print(f"High MOI: {model.is_high_moi}")  # True
+
+# Standard pipeline works seamlessly
+model.set_technical_groups(['cell_line'])
+model.fit_technical()
+model.fit_cis()  # Automatically uses additive guide effects
+model.fit_trans()
+
+# Access per-guide effects
+x_eff_g = model.posterior_samples_cis['x_eff_g']  # [n_samples, n_guides]
+guide_effects = x_eff_g.mean(dim=0).cpu().numpy()
+
+# Cell 1 (with guides 0 and 1) should have combined effect
+# x_true[cell_1] ≈ x_eff_g[0] + x_eff_g[1]
+```
+
+#### Technical Details
+
+**Modified Components:**
+
+1. **`bayesDREAM/core.py`**:
+   - Mode detection: `is_high_moi = (guide_assignment is not None)`
+   - Validation of guide_assignment shape and guide_meta format
+   - Smart target assignment based on guide composition
+   - Guide assignment tensor creation and device placement
+
+2. **`bayesDREAM/fitting/cis.py`**:
+   - Additive aggregation: `x_mean = torch.matmul(guide_assignment_tensor, x_eff_g)`
+   - Sigma averaging across guides per cell
+   - Updated guide-level statistics computation
+   - Support for `independent_mu_sigma` with high MOI
+
+3. **`bayesDREAM/model.py`**:
+   - Added `guide_assignment` and `guide_meta` parameters
+   - Pass-through to parent class initialization
+
+**Backward Compatibility:**
+
+- High MOI mode is **optional** (activated only when `guide_assignment` and `guide_meta` are provided)
+- Single-guide mode completely unchanged when these parameters are not provided
+- All existing code continues working without modifications
+- Comprehensive test suite validates both modes
+
+**Testing:**
+
+Complete test suite in `tests/test_high_moi.py`:
+- ✅ High MOI initialization and validation
+- ✅ Cis fitting with multiple guides per cell
+- ✅ Additive effect verification (within 50% tolerance)
+- ✅ Backward compatibility with single-guide mode
+- ✅ NTC cell identification
+- ✅ Cell subsetting and categorization
+
+#### When to Use High MOI Mode
+
+**Use high MOI mode when:**
+- Experimental design intentionally delivers multiple guides per cell
+- Single-cell barcode sequencing shows cells with multiple guides
+- Modeling combinatorial perturbation effects
+- Testing synergistic/antagonistic guide combinations
+
+**Use single-guide mode (default) when:**
+- Each cell has at most one guide
+- Low MOI screen design
+- Traditional guide/target metadata structure
+
+#### Benefits
+
+1. **Accurate modeling**: Correctly accounts for cells with multiple guides
+2. **Combinatorial analysis**: Model synergistic/antagonistic effects
+3. **Data efficiency**: Use all cells, including multi-guide cells
+4. **Biological realism**: Reflects actual experimental conditions in high MOI screens
+5. **Flexible design**: Enables complex screen designs with multiple guides
+
+**See:** [docs/HIGH_MOI_GUIDE.md](docs/HIGH_MOI_GUIDE.md) for complete usage guide
+
+---
+
 ## 📈 Use Cases Enabled by New Framework
 
 ### Use Case 1: Multi-Modal Perturbation Profiling
@@ -612,6 +767,8 @@ except ValueError as e:
 
 **New Comprehensive Guides:**
 - [QUICKSTART_MULTIMODAL.md](docs/QUICKSTART_MULTIMODAL.md) - Quick reference
+- [FIT_TRANS_GUIDE.md](docs/FIT_TRANS_GUIDE.md) - Trans fitting and function types (NEW: 2025-01-27)
+- [HIGH_MOI_GUIDE.md](docs/HIGH_MOI_GUIDE.md) - High MOI support with additive guide effects (NEW: 2025-01-27)
 - [PLOTTING_GUIDE.md](docs/PLOTTING_GUIDE.md) - Complete plotting documentation
 - [SAVE_LOAD_GUIDE.md](docs/SAVE_LOAD_GUIDE.md) - Pipeline stage management
 - [API_REFERENCE.md](docs/API_REFERENCE.md) - Full API documentation
@@ -620,6 +777,7 @@ except ValueError as e:
 
 **Updated Developer Docs:**
 - [CLAUDE.md](CLAUDE.md) - Architecture for AI assistance
+- [HIGH_MOI_DESIGN.md](docs/HIGH_MOI_DESIGN.md) - High MOI technical design
 - [tests/README.md](tests/README.md) - Testing infrastructure
 
 ---
@@ -648,11 +806,12 @@ model.fit_trans()
 |--------|--------|-------|
 | **Modalities** | Gene expression only | Genes, transcripts, splicing, ATAC, custom |
 | **Cis Feature** | Must be a gene | Any feature type (genes, peaks, junctions) |
+| **High MOI Support** | Not supported | Additive guide effects with binary assignment matrix |
 | **Prior-Informed Fitting** | Not supported | Infrastructure ~30% complete (guide-level priors) |
 | **Plotting** | Minimal | Comprehensive visualization suite |
 | **Architecture** | 4,537-line monolith | Modular (311-line main file) |
 | **Testing** | Limited | Comprehensive test suite |
-| **Documentation** | Basic | 7 detailed guides + API reference |
+| **Documentation** | Basic | 9 detailed guides + API reference |
 
 ---
 

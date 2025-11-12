@@ -69,6 +69,8 @@ class bayesDREAM(
         feature_meta: pd.DataFrame = None,
         cis_gene: str = None,
         cis_feature: str = None,
+        guide_assignment: np.ndarray = None,
+        guide_meta: pd.DataFrame = None,
         guide_covariates: list = None,
         guide_covariates_ntc: list = None,
         sum_factor_col: str = 'sum_factor',
@@ -127,6 +129,14 @@ class bayesDREAM(
         cis_feature : str, optional
             Alternative to cis_gene for non-gene modalities. Specifies which feature
             to extract as the 'cis' modality.
+        guide_assignment : np.ndarray, optional
+            Binary matrix (cells × guides) for high MOI mode. Each cell can have
+            multiple guides. If provided, meta should NOT have 'guide' or 'target'
+            columns. Must be provided together with guide_meta.
+        guide_meta : pd.DataFrame, optional
+            Guide metadata for high MOI mode. Required columns: 'guide', 'target'.
+            Must be provided together with guide_assignment. Index should match
+            guide order in guide_assignment matrix.
         guide_covariates : list, optional
             Covariates for guide grouping (e.g., ['cell_line', 'batch'])
         guide_covariates_ntc : list, optional
@@ -303,6 +313,8 @@ class bayesDREAM(
             counts=primary_counts,
             gene_meta=gene_meta_for_base,
             cis_gene=cis_feature,  # Pass resolved cis_feature as cis_gene
+            guide_assignment=guide_assignment,
+            guide_meta=guide_meta,
             guide_covariates=guide_covariates,
             guide_covariates_ntc=guide_covariates_ntc,
             sum_factor_col=sum_factor_col,
