@@ -2,6 +2,7 @@ name: bayesdream
 channels:
   - pytorch
   - conda-forge
+  - bioconda
   - defaults
 
 dependencies:
@@ -12,6 +13,10 @@ dependencies:
   - numpy>=1.26.0
   - scipy>=1.16.0
   - pandas>=2.3.0
+
+  # R and Bioconductor packages for preprocessing
+  - r-base>=4.0
+  - bioconductor-scran>=1.20
 
   # PyTorch (adjust for CPU vs GPU as needed)
   # For CPU-only clusters, use:
@@ -55,12 +60,13 @@ dependencies:
   # - flake8
 
 # Installation instructions:
-# 1. Save this file as environment.yml
-# 2. Create the environment:
+# 1. Create the environment:
 #    conda env create -f environment.yml
-# 3. Activate the environment:
+#
+# 2. Activate the environment:
 #    conda activate bayesdream
-# 4. Install bayesDREAM in development mode:
+#
+# 3. Install bayesDREAM in development mode:
 #    cd /path/to/bayesDREAM_forClaude
 #    pip install -e .
 #
@@ -71,7 +77,9 @@ dependencies:
 #   (check with: nvcc --version or nvidia-smi)
 #
 # Notes:
+# - This environment includes R (>=4.0) and scran (>=1.20) from bioconda
 # - This environment was tested with Python 3.12.11
 # - PyTorch 2.2.2+ is recommended for best performance
 # - Pyro 1.9.1+ is required for the probabilistic models
 # - If installation fails, try using more relaxed version constraints (e.g., >=1.26 instead of >=1.26.4)
+# - scran is used for calculating sum factors in preprocessing

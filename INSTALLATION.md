@@ -158,6 +158,12 @@ python test_trans_quick.py
 - seaborn ≥ 0.13.0
 - h5py ≥ 3.14.0
 
+### For Preprocessing (included in conda environment)
+- R ≥ 4.0
+- Bioconductor scran ≥ 1.20 (for calculating sum factors)
+
+**Note**: If using the conda environment (recommended), R and scran are installed automatically from the bioconda channel.
+
 ### Optional
 - pytest ≥ 7.0.0 (for running tests)
 - jupyter ≥ 1.0.0 (for notebooks)
