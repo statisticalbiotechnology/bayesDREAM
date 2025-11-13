@@ -21,6 +21,11 @@ This guide provides instructions for installing bayesDREAM on different computin
    pip install -e .
    ```
 
+4. **Register R kernel with Jupyter (for using R in notebooks):**
+   ```bash
+   R -e "IRkernel::installspec(user = FALSE)"
+   ```
+
 ### Using pip only
 
 1. **Create a virtual environment (optional but recommended):**
@@ -145,6 +150,19 @@ cd tests
 python test_trans_quick.py
 ```
 
+Start JupyterLab for interactive analysis:
+```bash
+jupyter lab
+# Or for classic notebook interface:
+jupyter notebook
+```
+
+Verify R kernel is available in Jupyter:
+```bash
+jupyter kernelspec list
+# Should show both 'python3' and 'ir' kernels
+```
+
 ## Dependencies
 
 ### Required
@@ -162,11 +180,16 @@ python test_trans_quick.py
 - R ≥ 4.0
 - Bioconductor scran ≥ 1.20 (for calculating sum factors)
 
-**Note**: If using the conda environment (recommended), R and scran are installed automatically from the bioconda channel.
+### For Interactive Analysis (included in conda environment)
+- JupyterLab ≥ 4.0
+- ipykernel (Python kernel for Jupyter)
+- IRkernel (R kernel for Jupyter)
+- notebook (classic Jupyter notebook)
+
+**Note**: If using the conda environment (recommended), R, scran, and Jupyter components are installed automatically. After installation, register the R kernel with: `R -e "IRkernel::installspec(user = FALSE)"`
 
 ### Optional
 - pytest ≥ 7.0.0 (for running tests)
-- jupyter ≥ 1.0.0 (for notebooks)
 
 ## Troubleshooting
 

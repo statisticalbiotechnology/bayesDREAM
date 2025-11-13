@@ -17,6 +17,7 @@ dependencies:
   # R and Bioconductor packages for preprocessing
   - r-base>=4.0
   - bioconductor-scran>=1.20
+  - r-irkernel  # R kernel for Jupyter
 
   # PyTorch (adjust for CPU vs GPU as needed)
   # For CPU-only clusters, use:
@@ -46,11 +47,10 @@ dependencies:
   # Optional but recommended for performance
   - openblas  # For optimized linear algebra operations
 
-  # Jupyter (if you want to run notebooks)
-  # Uncomment if needed:
-  # - jupyter
-  # - ipykernel
-  # - notebook
+  # Jupyter for interactive notebooks
+  - jupyterlab>=4.0
+  - ipykernel  # Python kernel for Jupyter
+  - notebook  # Classic Jupyter notebook
 
   # Development tools (optional)
   # Uncomment if needed:
@@ -78,8 +78,13 @@ dependencies:
 #
 # Notes:
 # - This environment includes R (>=4.0) and scran (>=1.20) from bioconda
+# - JupyterLab and R kernel (IRkernel) are included for interactive analysis
 # - This environment was tested with Python 3.12.11
 # - PyTorch 2.2.2+ is recommended for best performance
 # - Pyro 1.9.1+ is required for the probabilistic models
 # - If installation fails, try using more relaxed version constraints (e.g., >=1.26 instead of >=1.26.4)
 # - scran is used for calculating sum factors in preprocessing
+#
+# After installation, register the R kernel with Jupyter:
+#   conda activate bayesdream
+#   R -e "IRkernel::installspec(user = FALSE)"
