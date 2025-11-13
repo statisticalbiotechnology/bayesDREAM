@@ -147,10 +147,17 @@ model = bayesDREAM(
 print(f"High MOI mode: {model.is_high_moi}")  # Should print True
 ```
 
-**Automatic cell subsetting**:
-- Cells with **only NTC guides** → kept as controls
-- Cells with **any guides targeting cis_gene** → kept for cis fitting
-- Cells with **guides targeting other genes only** → excluded
+**Automatic cell classification and subsetting**:
+- Cells with **any cis-targeting guides** → classified as cis-targeting (kept)
+- Cells with **NTC guides but no cis guides** → classified as NTC (kept)
+  - This includes cells with NTC + non-cis guides (e.g., NTC + MYB when cis_gene='GFI1B')
+  - The non-cis guides are **removed** from the guide_assignment matrix
+- Cells with **only non-cis, non-NTC guides** → excluded from analysis
+
+**Example**: When `cis_gene='GFI1B'`:
+- Cell with NTC + GFI1B → classified as 'GFI1B', both guides kept
+- Cell with NTC + MYB → classified as 'ntc', only NTC guide kept (MYB removed)
+- Cell with only MYB → excluded entirely
 
 ### Step 3: Run Standard Pipeline
 
@@ -197,14 +204,23 @@ posterior_cis = model.posterior_samples_cis
 # Per-guide effects (shape: [n_samples, n_guides])
 x_eff_g = posterior_cis['x_eff_g']
 
+# Weighted NTC baseline (shape: [n_samples])
+weighted_mean_NTC = posterior_cis['weighted_mean_NTC']
+ntc_baseline = weighted_mean_NTC.mean().item()
+
+print(f"NTC baseline (weighted mean): {ntc_baseline:.3f}\n")
+
 # Get posterior means for each guide
 guide_effects_mean = x_eff_g.mean(dim=0).cpu().numpy()
 
-# Map to guide names
+# Map to guide names and compute log2FC relative to NTC
 for i, guide_name in enumerate(model.guide_meta['guide']):
     target = model.guide_meta.loc[i, 'target']
     effect = guide_effects_mean[i]
-    print(f"{guide_name} (targets {target}): {effect:.3f}")
+    log2fc = effect - ntc_baseline
+    print(f"{guide_name} (targets {target}):")
+    print(f"  x_eff_g: {effect:.3f}")
+    print(f"  log2FC vs NTC: {log2fc:.3f}")
 ```
 
 ## Key Differences from Single-Guide Mode
@@ -236,6 +252,71 @@ This is implemented efficiently via matrix multiplication:
 ```python
 x_true = guide_assignment @ x_eff_g
 ```
+
+#### Weighted NTC Centering
+
+To ensure proper fold-change behavior, bayesDREAM applies a **weighted NTC centering transformation** in high MOI mode. This addresses a key mathematical issue: guide effects should be additive on the log2 fold-change scale, not multiplicative.
+
+**The Problem:**
+
+Without centering, if you have two NTC guides with effects `x_eff_g[0] = 5` and `x_eff_g[1] = 5`, a cell with both guides would have:
+```python
+x_true = 5 + 5 = 10
+```
+
+On the linear scale, this means: `2^10 = 1024×` baseline expression. This is incorrect — NTC guides should not change expression multiplicatively.
+
+**The Solution:**
+
+bayesDREAM computes a **weighted mean of NTC guide effects** and centers all guide effects around it:
+
+```python
+# Step 1: Compute weights for each guide (by precision)
+weights[g] = n_cells_per_guide[g] / sigma_eff[g]
+
+# Step 2: Compute weighted mean of NTC guide effects
+weighted_mean_NTC = sum(weights[g] * x_eff_g[g] for g in NTC) / sum(weights[g] for g in NTC)
+
+# Step 3: Apply centering transformation
+x_true = weighted_mean_NTC + sum(x_eff_g[g] - weighted_mean_NTC for g in cell_guides)
+```
+
+**Result:**
+- Cells with **only NTC guides**: `x_true ≈ weighted_mean_NTC` (stable baseline)
+- Cells with **targeting guides**: `x_eff_g - weighted_mean_NTC` represents true log2 fold-change
+- Cells with **multiple guides**: effects combine additively on the log2FC scale
+
+**Accessing the weighted mean:**
+
+The weighted NTC baseline is stored as a deterministic parameter in posterior samples:
+
+```python
+# Access posterior samples
+posterior_cis = model.posterior_samples_cis
+
+# Get weighted NTC baseline (shape: [n_samples])
+weighted_mean_NTC = posterior_cis['weighted_mean_NTC']
+
+# Posterior mean
+ntc_baseline_mean = weighted_mean_NTC.mean().item()
+print(f"NTC baseline (weighted mean): {ntc_baseline_mean:.3f}")
+
+# Posterior credible interval
+ntc_baseline_ci = weighted_mean_NTC.quantile(torch.tensor([0.025, 0.975]))
+print(f"95% CI: [{ntc_baseline_ci[0]:.3f}, {ntc_baseline_ci[1]:.3f}]")
+```
+
+**Interpretation:**
+
+For any guide `g`, the **true log2 fold-change** relative to NTC is:
+```python
+log2FC_g = x_eff_g[g] - weighted_mean_NTC
+```
+
+This ensures that:
+- NTC guides have log2FC ≈ 0
+- Targeting guides have interpretable fold-changes
+- Multiple guides combine additively
 
 ### 3. NTC Cell Identification
 
@@ -418,30 +499,42 @@ if pure_ntc_cells.sum() < 100:
 
 ### 3. Validate Additive Effects
 
-After fitting, verify that additive model makes sense:
+After fitting, verify that additive model makes sense (accounting for weighted NTC centering):
 
 ```python
 # Get posterior samples
 x_eff_g_samples = model.posterior_samples_cis['x_eff_g']
 x_true_samples = model.posterior_samples_cis['x_true']
+weighted_mean_NTC = model.posterior_samples_cis['weighted_mean_NTC']
 
-# For cells with multiple guides, check additivity
+# For cells with multiple guides, check centered additivity
 # Example: cells with guides 0 and 1
 has_guide_0 = guide_assignment[:, 0] == 1
 has_guide_1 = guide_assignment[:, 1] == 1
 has_both = has_guide_0 & has_guide_1
 
 if has_both.sum() > 0:
-    # Expected (sum of guide effects)
+    # Expected (with NTC centering transformation)
+    # x_true = weighted_mean_NTC + sum(x_eff_g - weighted_mean_NTC)
+    #        = weighted_mean_NTC + (x_eff_g[0] - weighted_mean_NTC) + (x_eff_g[1] - weighted_mean_NTC)
+    #        = x_eff_g[0] + x_eff_g[1] - weighted_mean_NTC
     expected = (x_eff_g_samples[:, 0].mean() +
-                x_eff_g_samples[:, 1].mean())
+                x_eff_g_samples[:, 1].mean() -
+                weighted_mean_NTC.mean())
 
     # Observed (actual x_true for these cells)
     observed = x_true_samples[:, has_both].mean()
 
-    print(f"Expected (additive): {expected:.3f}")
+    print(f"Expected (with centering): {expected:.3f}")
     print(f"Observed: {observed:.3f}")
     print(f"Difference: {abs(expected - observed):.3f}")
+
+    # Check fold-changes relative to NTC
+    log2fc_0 = x_eff_g_samples[:, 0].mean() - weighted_mean_NTC.mean()
+    log2fc_1 = x_eff_g_samples[:, 1].mean() - weighted_mean_NTC.mean()
+    print(f"\nGuide 0 log2FC vs NTC: {log2fc_0:.3f}")
+    print(f"Guide 1 log2FC vs NTC: {log2fc_1:.3f}")
+    print(f"Combined log2FC (additive): {log2fc_0 + log2fc_1:.3f}")
 ```
 
 ### 4. Handling Missing Guides
@@ -572,19 +665,33 @@ if 'guide' not in guide_meta.columns:
 2. Verify NTC guides are correctly marked in guide_meta
 3. Ensure sum factors are appropriate for your data
 4. Check for batch effects or technical covariates
+5. Verify weighted NTC centering is working correctly
 
 ```python
-# Inspect guide effects
+import torch
+
+# Inspect guide effects and NTC baseline
 x_eff_g_mean = model.posterior_samples_cis['x_eff_g'].mean(dim=0)
+weighted_mean_NTC = model.posterior_samples_cis['weighted_mean_NTC'].mean().item()
+
+print(f"Weighted NTC baseline: {weighted_mean_NTC:.3f}\n")
 
 for i, guide_name in enumerate(model.guide_meta['guide']):
     target = model.guide_meta.loc[i, 'target']
     effect = x_eff_g_mean[i].item()
-    print(f"{guide_name} → {target}: {effect:.3f}")
+    log2fc = effect - weighted_mean_NTC
+    print(f"{guide_name} → {target}:")
+    print(f"  x_eff_g = {effect:.3f}")
+    print(f"  log2FC = {log2fc:.3f}")
 
-# NTC guides should have effects near 0
+# NTC guides should have log2FC near 0 (effects near weighted_mean_NTC)
 ntc_guides = model.guide_meta['target'] == 'ntc'
-print(f"\nNTC guide effects: {x_eff_g_mean[ntc_guides].numpy()}")
+ntc_effects = x_eff_g_mean[ntc_guides].numpy()
+ntc_log2fc = ntc_effects - weighted_mean_NTC
+
+print(f"\nNTC guide effects (x_eff_g): {ntc_effects}")
+print(f"NTC guide log2FC: {ntc_log2fc}")
+print(f"NTC log2FC should be near 0. Std dev: {ntc_log2fc.std():.3f}")
 ```
 
 ## Comparison with Single-Guide Mode
