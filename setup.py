@@ -36,14 +36,15 @@ setup(
     packages=find_packages(),
     python_requires='>=3.10',
     install_requires=[
-        'numpy>=1.26.0',
-        'scipy>=1.16.0',
-        'pandas>=2.3.0',
+        'numpy>=1.24.0',
+        'scipy>=1.10.0',
+        'pandas>=2.0.0',
+        'scikit-learn>=1.3.0',  # Required for SplineTransformer and Ridge
         'torch>=2.2.0',
         'pyro-ppl>=1.9.0',
-        'matplotlib>=3.10.0',
-        'seaborn>=0.13.0',
-        'h5py>=3.14.0',
+        'matplotlib>=3.7',
+        'seaborn>=0.12',
+        'h5py>=3.8.0',
     ],
     extras_require={
         'dev': [
