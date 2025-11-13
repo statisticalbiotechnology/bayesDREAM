@@ -152,15 +152,40 @@ class CisFitter:
 
         # Aggregate guide effects to cells
         if self.model.is_high_moi:
-            # High MOI: sum guide effects (additive)
-            # guide_assignment_tensor: [N, G], x_eff_g: [G]
-            x_mean = torch.matmul(self.model.guide_assignment_tensor, x_eff_g)  # [N]
+            # High MOI: Apply weighted NTC centering to ensure proper fold-change behavior
 
-            # For sigma: average across guides in each cell
+            # Step 1: Identify NTC guides
+            ntc_mask = torch.tensor(
+                [self.model.guide_meta.iloc[g]['target'] == 'ntc' for g in range(x_eff_g.shape[-1])],
+                dtype=torch.bool,
+                device=self.model.device
+            )
+
+            # Step 2: Compute weights for NTC guides (by uncertainty: n_cells / sigma_eff)
+            cells_per_guide = self.model.guide_assignment_tensor.sum(dim=0)  # [G]
+            weights = cells_per_guide / sigma_eff.clamp(min=1e-6)  # [G]
+
+            # Step 3: Compute weighted mean of NTC guide effects
+            ntc_weights = weights[ntc_mask]
+            ntc_effects = x_eff_g[..., ntc_mask] if x_eff_g.ndim > 1 else x_eff_g[ntc_mask]
+
+            weighted_mean_NTC = (ntc_weights * ntc_effects).sum(dim=-1) / ntc_weights.sum()
+
+            # Store as deterministic site for easy access
+            weighted_mean_NTC = pyro.deterministic("weighted_mean_NTC", weighted_mean_NTC)
+
+            # Step 4: Apply centering transformation
+            # x_true = weighted_mean_NTC + sum(x_eff_g - weighted_mean_NTC)
+            #        = weighted_mean_NTC + guide_effects - n_guides * weighted_mean_NTC
+            guide_effects = torch.matmul(self.model.guide_assignment_tensor, x_eff_g)  # [N]
             guides_per_cell = self.model.guide_assignment_tensor.sum(dim=1).clamp(min=1)  # [N]
+
+            x_mean = weighted_mean_NTC + guide_effects - guides_per_cell * weighted_mean_NTC  # [N]
+
+            # For sigma: average across guides in each cell (unchanged)
             sigma_mean = torch.matmul(self.model.guide_assignment_tensor, sigma_eff) / guides_per_cell  # [N]
         else:
-            # Single guide per cell: use indexing
+            # Single guide per cell: use indexing (unchanged)
             x_mean = x_eff_g[..., guides_tensor]  # [N]
             sigma_mean = sigma_eff[..., guides_tensor]  # [N]
 
