@@ -167,14 +167,16 @@ jupyter kernelspec list
 
 ### Required
 - Python ≥ 3.10 (3.12 recommended)
-- NumPy ≥ 1.26.0
-- SciPy ≥ 1.16.0
-- pandas ≥ 2.3.0
+- NumPy ≥ 1.24.0
+- SciPy ≥ 1.10.0
+- pandas ≥ 2.0.0
 - PyTorch ≥ 2.2.0
 - Pyro ≥ 1.9.0
-- matplotlib ≥ 3.10.0
-- seaborn ≥ 0.13.0
-- h5py ≥ 3.14.0
+- matplotlib ≥ 3.8.0
+- seaborn ≥ 0.12.0
+- h5py ≥ 3.8.0
+
+**Note**: Version constraints have been relaxed for better cross-platform compatibility. The conda environment will install compatible versions automatically.
 
 ### For Preprocessing (included in conda environment)
 - R ≥ 4.0
