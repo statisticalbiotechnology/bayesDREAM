@@ -170,6 +170,7 @@ jupyter kernelspec list
 - NumPy ≥ 1.24.0
 - SciPy ≥ 1.10.0
 - pandas ≥ 2.0.0
+- scikit-learn ≥ 1.3.0
 - PyTorch ≥ 2.2.0
 - Pyro ≥ 1.9.0
 - matplotlib ≥ 3.7
@@ -181,6 +182,7 @@ jupyter kernelspec list
 ### For Preprocessing (included in conda environment)
 - R ≥ 4.0
 - Bioconductor scran ≥ 1.20 (for calculating sum factors)
+- r-data.table (for fast data manipulation in R)
 
 ### For Interactive Analysis (included in conda environment)
 - JupyterLab ≥ 4.0
@@ -219,18 +221,25 @@ Then create the environment again.
 **Option 3: Create minimal environment and add packages**
 ```bash
 # Create minimal environment
-conda create -n bayesdream python=3.11 numpy scipy pandas pytorch pyro-ppl -c conda-forge
+conda create -n bayesdream python=3.11 numpy scipy pandas scikit-learn pytorch -c conda-forge
 
 # Activate it
 conda activate bayesdream
 
-# Add R and bioconda packages
-conda install r-base bioconductor-scran r-irkernel -c bioconda -c conda-forge
+# Install Pyro via pip
+pip install pyro-ppl
 
-# Add Jupyter
-conda install jupyterlab ipykernel notebook matplotlib seaborn h5py -c conda-forge
+# Add R and bioconda packages
+conda install r-base bioconductor-scran r-irkernel r-data.table -c bioconda -c conda-forge
+
+# Add Jupyter and visualization
+conda install jupyterlab ipykernel notebook ipywidgets matplotlib seaborn h5py -c conda-forge
+
+# Register R kernel
+R -e "IRkernel::installspec(user = FALSE)"
 
 # Install bayesDREAM
+cd /path/to/bayesDREAM_forClaude
 pip install -e .
 ```
 
