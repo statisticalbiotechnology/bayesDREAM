@@ -304,23 +304,26 @@ class _BayesDREAMCore(PlottingMixin):
             cis_guide_mask = self.guide_meta['target'] == self.cis_gene
             cis_guide_indices = np.where(cis_guide_mask)[0]
 
-            # Cell is NTC if it ONLY has NTC guides (and at least one guide)
+            # Cell classification:
+            # - If cell has ANY cis guides -> target = cis_gene
+            # - Else if cell has ANY NTC guides (but no cis) -> target = 'ntc'
+            # - Else -> target = 'other' (will be removed)
             has_any_guide = self.guide_assignment.sum(axis=1) > 0
-            has_only_ntc = self.guide_assignment[:, ntc_guide_indices].sum(axis=1) == self.guide_assignment.sum(axis=1)
-            is_ntc_cell = has_any_guide & has_only_ntc
-
-            # Cell targets cis_gene if it has ANY guides targeting the cis_gene
+            has_ntc_guide = self.guide_assignment[:, ntc_guide_indices].sum(axis=1) > 0
             has_cis_guide = self.guide_assignment[:, cis_guide_indices].sum(axis=1) > 0
 
             # Assign target based on guide composition
             targets = []
             for i in range(len(self.guide_assignment)):
-                if is_ntc_cell[i]:
-                    targets.append('ntc')
-                elif has_cis_guide[i]:
+                if has_cis_guide[i]:
+                    # Cell has cis guide(s) - regardless of other guides
                     targets.append(self.cis_gene)
+                elif has_ntc_guide[i]:
+                    # Cell has NTC guide(s) but no cis guides
+                    # (may also have "other" guides - these are ignored)
+                    targets.append('ntc')
                 else:
-                    # Cell has guides targeting other genes (not cis_gene, not ntc)
+                    # Cell has ONLY "other" guides (no NTC, no cis)
                     targets.append('other')
 
             self.meta['target'] = targets
@@ -328,10 +331,13 @@ class _BayesDREAMCore(PlottingMixin):
             # Add guide_code column (not meaningful in high MOI, marked as -1)
             self.meta['guide_code'] = -1
 
-            ntc_count = is_ntc_cell.sum()
-            cis_count = has_cis_guide.sum()
-            other_count = ((~is_ntc_cell) & (~has_cis_guide) & has_any_guide).sum()
-            print(f"[INFO] NTC cells: {ntc_count}, {self.cis_gene}-targeting cells: {cis_count}, other-targeting cells: {other_count}")
+            ntc_count = (np.array(targets) == 'ntc').sum()
+            cis_count = (np.array(targets) == self.cis_gene).sum()
+            other_count = (np.array(targets) == 'other').sum()
+            print(f"[INFO] Cell classification before subsetting:")
+            print(f"  NTC cells (NTC guides, no cis): {ntc_count}")
+            print(f"  {self.cis_gene}-targeting cells (any cis guides): {cis_count}")
+            print(f"  Other-only cells (will be removed): {other_count}")
 
         # Subset meta and counts to relevant cells
         valid_cells = self.meta[self.meta["target"].isin(["ntc", self.cis_gene])]["cell"].unique()
@@ -343,6 +349,26 @@ class _BayesDREAMCore(PlottingMixin):
             )
         self.meta = self.meta[self.meta["cell"].isin(valid_cells)].copy()
         self.counts = self.counts[valid_cells].copy()
+
+        # For high MOI: subset guide_assignment to remove "other"-targeting guide columns
+        if self.is_high_moi:
+            # Keep only NTC and cis-gene targeting guides
+            keep_guide_mask = (self.guide_meta['target'] == 'ntc') | (self.guide_meta['target'] == self.cis_gene)
+            keep_guide_indices = np.where(keep_guide_mask)[0]
+
+            n_guides_before = self.guide_assignment.shape[1]
+            n_guides_after = len(keep_guide_indices)
+
+            # Subset guide_assignment columns
+            self.guide_assignment = self.guide_assignment[:, keep_guide_indices]
+
+            # Subset guide_meta rows
+            self.guide_meta = self.guide_meta.iloc[keep_guide_indices].copy()
+
+            # Update guide_code to match new indices
+            self.guide_meta['guide_code'] = range(len(self.guide_meta))
+
+            print(f"[INFO] Subsetted guides from {n_guides_before} to {n_guides_after} (keeping NTC + {self.cis_gene} guides only)")
 
         # Remove genes with zero total counts
         gene_sums = pd.Series(self.counts.values.sum(axis=1), index=self.counts.index)
