@@ -166,17 +166,17 @@ jupyter kernelspec list
 ## Dependencies
 
 ### Required
-- Python ≥ 3.10 (3.12 recommended)
+- Python 3.11 (recommended for best package compatibility)
 - NumPy ≥ 1.24.0
 - SciPy ≥ 1.10.0
 - pandas ≥ 2.0.0
 - PyTorch ≥ 2.2.0
 - Pyro ≥ 1.9.0
-- matplotlib ≥ 3.8.0
-- seaborn ≥ 0.12.0
+- matplotlib ≥ 3.7
+- seaborn ≥ 0.12
 - h5py ≥ 3.8.0
 
-**Note**: Version constraints have been relaxed for better cross-platform compatibility. The conda environment will install compatible versions automatically.
+**Note**: Version constraints have been relaxed for better cross-platform compatibility. The conda environment uses Python 3.11 (better package support than 3.12 on Linux clusters).
 
 ### For Preprocessing (included in conda environment)
 - R ≥ 4.0
@@ -194,6 +194,45 @@ jupyter kernelspec list
 - pytest ≥ 7.0.0 (for running tests)
 
 ## Troubleshooting
+
+### Conda environment creation fails (LibMambaUnsatisfiableError)
+
+If you get dependency conflicts when creating the environment:
+
+**Option 1: Use mamba (faster and better at solving)**
+```bash
+conda install mamba -c conda-forge
+mamba env create -f environment.yml
+```
+
+**Option 2: Try with fewer channels**
+Edit `environment.yml` and comment out the pytorch channel:
+```yaml
+channels:
+  # - pytorch  # Comment this out
+  - conda-forge
+  - bioconda
+  - defaults
+```
+Then create the environment again.
+
+**Option 3: Create minimal environment and add packages**
+```bash
+# Create minimal environment
+conda create -n bayesdream python=3.11 numpy scipy pandas pytorch pyro-ppl -c conda-forge
+
+# Activate it
+conda activate bayesdream
+
+# Add R and bioconda packages
+conda install r-base bioconductor-scran r-irkernel -c bioconda -c conda-forge
+
+# Add Jupyter
+conda install jupyterlab ipykernel notebook matplotlib seaborn h5py -c conda-forge
+
+# Install bayesDREAM
+pip install -e .
+```
 
 ### Import errors
 If you see `ModuleNotFoundError: No module named 'bayesDREAM'`:

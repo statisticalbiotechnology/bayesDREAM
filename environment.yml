@@ -7,7 +7,7 @@ channels:
 
 dependencies:
   # Python version
-  - python=3.12
+  - python=3.11
 
   # Core scientific computing
   - numpy>=1.24.0
@@ -32,14 +32,14 @@ dependencies:
   # - pytorch>=2.2.0
   # - pytorch::pytorch-cuda=12.1
 
-  # Pyro probabilistic programming
+  # Visualization (conda will select compatible versions)
+  - matplotlib>=3.7
+  - seaborn>=0.12
+
+  # Pyro probabilistic programming (installed via pip to avoid conflicts)
   - pip
   - pip:
     - pyro-ppl>=1.9.0
-
-  # Visualization
-  - matplotlib>=3.8.0
-  - seaborn>=0.12.0
 
   # Data I/O
   - h5py>=3.8.0
@@ -80,7 +80,7 @@ dependencies:
 # - This environment includes R (>=4.0) and scran (>=1.20) from bioconda
 # - JupyterLab and R kernel (IRkernel) are included for interactive analysis
 # - Version constraints have been relaxed for better cross-platform compatibility
-# - Tested with Python 3.12 on macOS and Linux
+# - Uses Python 3.11 (better package compatibility than 3.12 on Linux)
 # - PyTorch 2.2+ is recommended for best performance
 # - Pyro 1.9+ is required for the probabilistic models
 # - scran is used for calculating sum factors in preprocessing
@@ -88,3 +88,9 @@ dependencies:
 # After installation, register the R kernel with Jupyter:
 #   conda activate bayesdream
 #   R -e "IRkernel::installspec(user = FALSE)"
+#
+# Troubleshooting:
+# - If environment creation fails, try using mamba: conda install mamba -c conda-forge
+#   Then: mamba env create -f environment.yml
+# - For persistent conflicts, try creating with fewer channels:
+#   Comment out the pytorch channel line and let conda-forge handle PyTorch
