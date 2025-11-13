@@ -78,7 +78,8 @@ class bayesDREAM(
         label: str = None,
         device: str = None,
         random_seed: int = 2402,
-        cores: int = 1
+        cores: int = 1,
+        exclude_targets: list = None
     ):
         """
         Initialize bayesDREAM.
@@ -336,7 +337,8 @@ class bayesDREAM(
             label=label,
             device=device,
             random_seed=random_seed,
-            cores=cores
+            cores=cores,
+            exclude_targets=exclude_targets
         )
 
         # Subset all modalities to match filtered cells from base class

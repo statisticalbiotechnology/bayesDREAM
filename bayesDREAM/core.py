@@ -74,7 +74,8 @@ class _BayesDREAMCore(PlottingMixin):
         random_seed: int = 2402,
         cores: int = 1,
         guide_assignment: np.ndarray = None,
-        guide_meta: pd.DataFrame = None
+        guide_meta: pd.DataFrame = None,
+        exclude_targets: list[str] = None
     ):
         """
         Initialize the model with the metadata and count matrices.
@@ -111,10 +112,16 @@ class _BayesDREAMCore(PlottingMixin):
             Binary matrix [N, G] for high MOI mode. Each row represents a cell, each column a guide.
             guide_assignment[i, j] = 1 if cell i has guide j, else 0.
             If provided, must also provide guide_meta. Activates high MOI mode.
+            Note: If dimensions are [G, N], will auto-transpose with a warning.
         guide_meta : pd.DataFrame, optional
             Guide metadata DataFrame for high MOI mode. Must have columns 'guide' and 'target'.
             Index must match the column order of guide_assignment matrix.
             If provided, must also provide guide_assignment.
+        exclude_targets : list[str], optional
+            High MOI only: List of target gene names to exclude. Cells with ANY guide targeting
+            a gene in this list will be removed from analysis, regardless of other guides present.
+            Example: exclude_targets=['MYB'] will remove cells with guides targeting MYB,
+            even if they also have NTC or cis-targeting guides.
         """
         
         if label is None and cis_gene is not None:
@@ -152,9 +159,38 @@ class _BayesDREAMCore(PlottingMixin):
                     f"but got shape {guide_assignment.shape} with {guide_assignment.ndim} dimensions"
                 )
 
-            N_cells_assignment, G_guides = guide_assignment.shape
+            # Auto-detect and transpose if dimensions are swapped
+            # Expected: (n_cells, n_guides)
+            # If user provides (n_guides, n_cells), transpose it
+            dim0, dim1 = guide_assignment.shape
+            n_guides_meta = len(guide_meta)
+            n_cells_meta = len(meta)
 
-            # Validate guide_meta
+            # Check if dimensions match expected orientation
+            if dim1 == n_guides_meta and dim0 == n_cells_meta:
+                # Correct orientation: (cells, guides)
+                N_cells_assignment, G_guides = dim0, dim1
+            elif dim0 == n_guides_meta and dim1 == n_cells_meta:
+                # Transposed: (guides, cells) - auto-fix
+                warnings.warn(
+                    f"[HIGH MOI] guide_assignment appears to be transposed (shape {guide_assignment.shape} = guides × cells). "
+                    f"Expected (cells × guides). Auto-transposing to ({dim1}, {dim0}).",
+                    UserWarning
+                )
+                guide_assignment = guide_assignment.T
+                N_cells_assignment, G_guides = guide_assignment.shape
+            else:
+                # Cannot determine orientation - provide helpful error
+                raise ValueError(
+                    f"guide_assignment shape {guide_assignment.shape} does not match expected dimensions:\n"
+                    f"  - guide_meta has {n_guides_meta} guides\n"
+                    f"  - meta has {n_cells_meta} cells\n"
+                    f"Expected guide_assignment shape: ({n_cells_meta}, {n_guides_meta}) [cells × guides]\n"
+                    f"Got: {guide_assignment.shape}\n"
+                    f"Please check your guide_assignment matrix orientation."
+                )
+
+            # Validate guide_meta matches resolved dimensions
             if len(guide_meta) != G_guides:
                 raise ValueError(
                     f"guide_meta has {len(guide_meta)} rows but guide_assignment has {G_guides} guides (columns). "
@@ -304,8 +340,17 @@ class _BayesDREAMCore(PlottingMixin):
             cis_guide_mask = self.guide_meta['target'] == self.cis_gene
             cis_guide_indices = np.where(cis_guide_mask)[0]
 
+            # Determine which guides target excluded genes (if specified)
+            if exclude_targets is not None:
+                exclude_guide_mask = self.guide_meta['target'].isin(exclude_targets)
+                exclude_guide_indices = np.where(exclude_guide_mask)[0]
+                has_excluded_guide = self.guide_assignment[:, exclude_guide_indices].sum(axis=1) > 0
+            else:
+                has_excluded_guide = np.zeros(len(self.guide_assignment), dtype=bool)
+
             # Cell classification:
-            # - If cell has ANY cis guides -> target = cis_gene
+            # - If cell has ANY excluded guides -> target = 'excluded' (will be removed)
+            # - Else if cell has ANY cis guides -> target = cis_gene
             # - Else if cell has ANY NTC guides (but no cis) -> target = 'ntc'
             # - Else -> target = 'other' (will be removed)
             has_any_guide = self.guide_assignment.sum(axis=1) > 0
@@ -315,7 +360,10 @@ class _BayesDREAMCore(PlottingMixin):
             # Assign target based on guide composition
             targets = []
             for i in range(len(self.guide_assignment)):
-                if has_cis_guide[i]:
+                if has_excluded_guide[i]:
+                    # Cell has guide(s) targeting excluded gene(s) - remove
+                    targets.append('excluded')
+                elif has_cis_guide[i]:
                     # Cell has cis guide(s) - regardless of other guides
                     targets.append(self.cis_gene)
                 elif has_ntc_guide[i]:
@@ -323,7 +371,7 @@ class _BayesDREAMCore(PlottingMixin):
                     # (may also have "other" guides - these are ignored)
                     targets.append('ntc')
                 else:
-                    # Cell has ONLY "other" guides (no NTC, no cis)
+                    # Cell has ONLY "other" guides (no NTC, no cis, no excluded)
                     targets.append('other')
 
             self.meta['target'] = targets
@@ -334,10 +382,13 @@ class _BayesDREAMCore(PlottingMixin):
             ntc_count = (np.array(targets) == 'ntc').sum()
             cis_count = (np.array(targets) == self.cis_gene).sum()
             other_count = (np.array(targets) == 'other').sum()
+            excluded_count = (np.array(targets) == 'excluded').sum()
             print(f"[INFO] Cell classification before subsetting:")
             print(f"  NTC cells (NTC guides, no cis): {ntc_count}")
             print(f"  {self.cis_gene}-targeting cells (any cis guides): {cis_count}")
             print(f"  Other-only cells (will be removed): {other_count}")
+            if exclude_targets is not None:
+                print(f"  Excluded cells (guides targeting {exclude_targets}): {excluded_count}")
 
         # Subset meta and counts to relevant cells
         valid_cells = self.meta[self.meta["target"].isin(["ntc", self.cis_gene])]["cell"].unique()
