@@ -486,6 +486,11 @@ class TechnicalFitter:
         if denominator is None and modality.denominator is not None:
             denominator = modality.denominator
 
+        # CRITICAL: Convert denominator numpy.matrix to numpy.ndarray if needed
+        if denominator is not None and isinstance(denominator, np.matrix):
+            print(f"[INFO] Converting deprecated numpy.matrix denominator to numpy.ndarray")
+            denominator = np.asarray(denominator)
+
         # ========================================================================
         # CRITICAL VALIDATION: Cis extraction requires negative binomial distribution
         # ========================================================================
@@ -522,7 +527,16 @@ class TechnicalFitter:
                 modality_cells = modality.cell_names
             else:
                 modality_cells = self.model.meta['cell'].values[:counts_to_fit.shape[modality.cells_axis]]
-    
+
+        # CRITICAL: Convert numpy.matrix to numpy.ndarray if needed
+        # numpy.matrix is deprecated and has problematic indexing behavior with boolean arrays
+        if isinstance(counts_to_fit, np.matrix):
+            print(f"[INFO] Converting deprecated numpy.matrix to numpy.ndarray")
+            counts_to_fit = np.asarray(counts_to_fit)
+        elif not isinstance(counts_to_fit, (np.ndarray, type(None))) and hasattr(counts_to_fit, '__array__'):
+            # Handle any other array-like objects that aren't standard numpy arrays
+            counts_to_fit = np.asarray(counts_to_fit)
+
         print(f"[INFO] Fitting technical model for modality '{modality_name}' (distribution: {distribution})")
     
         # ---------------------------
@@ -715,8 +729,18 @@ class TechnicalFitter:
     
         else:
             if counts_ntc_array.ndim == 2:
-                feature_std_ntc = counts_ntc_array.std(axis=1 if modality.cells_axis == 1 else 0)
-                zero_std_mask = feature_std_ntc == 0
+                # Handle sparse matrices which don't have .std() method
+                from scipy import sparse
+                if sparse.issparse(counts_ntc_array):
+                    # Sparse matrix: convert to dense for std calculation per feature
+                    axis = 1 if modality.cells_axis == 1 else 0
+                    feature_std_ntc = np.array([np.std(counts_ntc_array[i, :].toarray() if modality.cells_axis == 1 else counts_ntc_array[:, i].toarray())
+                                                for i in range(counts_ntc_array.shape[0 if modality.cells_axis == 1 else 1])])
+                    zero_std_mask = feature_std_ntc == 0
+                else:
+                    # Dense array: use standard method
+                    feature_std_ntc = counts_ntc_array.std(axis=1 if modality.cells_axis == 1 else 0)
+                    zero_std_mask = feature_std_ntc == 0
             else:
                 raise ValueError(f"Unexpected dims for distribution '{distribution}': {counts_ntc_array.ndim}")
     
@@ -781,17 +805,33 @@ class TechnicalFitter:
         fit_mask = ~needs_exclusion_mask
         if fit_mask.sum() == 0:
             raise ValueError("No features left to fit after filtering!")
-    
+
+        # CRITICAL: Convert boolean mask to integer indices for sparse matrix compatibility
+        # Scipy sparse matrices don't support boolean indexing like dense arrays
+        from scipy import sparse
+        fit_indices = np.where(fit_mask)[0]
+
         if counts_ntc_array.ndim == 2:
-            counts_ntc_for_fit = counts_ntc_array[fit_mask, :] if modality.cells_axis == 1 else counts_ntc_array[:, fit_mask]
+            if sparse.issparse(counts_ntc_array):
+                # Sparse matrix: use integer indices
+                counts_ntc_for_fit = counts_ntc_array[fit_indices, :] if modality.cells_axis == 1 else counts_ntc_array[:, fit_indices]
+            else:
+                # Dense array: boolean indexing works fine
+                counts_ntc_for_fit = counts_ntc_array[fit_mask, :] if modality.cells_axis == 1 else counts_ntc_array[:, fit_mask]
         else:
+            # 3D arrays (multinomial) - use boolean indexing
             counts_ntc_for_fit = counts_ntc_array[fit_mask, :, :]
-    
+
         denominator_ntc_for_fit = None
         if denominator is not None:
             if denominator.ndim == 2:
                 denom_ntc = denominator[:, ntc_indices] if modality.cells_axis == 1 else denominator[ntc_indices, :]
-                denominator_ntc_for_fit = denom_ntc[fit_mask, :] if modality.cells_axis == 1 else denom_ntc[:, fit_mask]
+                if sparse.issparse(denom_ntc):
+                    # Sparse matrix: use integer indices
+                    denominator_ntc_for_fit = denom_ntc[fit_indices, :] if modality.cells_axis == 1 else denom_ntc[:, fit_indices]
+                else:
+                    # Dense array: boolean indexing works fine
+                    denominator_ntc_for_fit = denom_ntc[fit_mask, :] if modality.cells_axis == 1 else denom_ntc[:, fit_mask]
             elif denominator.ndim == 3:
                 denom_ntc = denominator[:, ntc_indices, :]
                 denominator_ntc_for_fit = denom_ntc[fit_mask, :, :]

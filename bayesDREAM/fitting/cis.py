@@ -298,8 +298,19 @@ class CisFitter:
         # Determine which feature to use as cis proxy
         if cis_feature is None:
             # Default: use the first (and typically only) feature in cis modality
-            cis_feature = cis_modality.feature_meta.index[0]
-            print(f"[INFO] Using cis feature '{cis_feature}' from 'cis' modality")
+            cis_feature_idx = cis_modality.feature_meta.index[0]
+            # Get actual feature name from metadata (not just numeric index)
+            if 'gene_name' in cis_modality.feature_meta.columns:
+                cis_feature_name = cis_modality.feature_meta.loc[cis_feature_idx, 'gene_name']
+            elif 'gene' in cis_modality.feature_meta.columns:
+                cis_feature_name = cis_modality.feature_meta.loc[cis_feature_idx, 'gene']
+            elif 'feature' in cis_modality.feature_meta.columns:
+                cis_feature_name = cis_modality.feature_meta.loc[cis_feature_idx, 'feature']
+            else:
+                # Fallback to index if no name column found
+                cis_feature_name = cis_feature_idx
+            cis_feature = cis_feature_idx  # Use numeric index for actual data retrieval
+            print(f"[INFO] Using cis feature '{cis_feature_name}' from 'cis' modality")
         else:
             # User specified explicit cis_feature
             if cis_feature not in cis_modality.feature_meta.index:

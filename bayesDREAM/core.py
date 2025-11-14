@@ -24,6 +24,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import SplineTransformer
 from sklearn.linear_model import Ridge
 import gc
+from scipy import sparse
 
 # Import utility functions and modules
 from .utils import (
@@ -75,6 +76,7 @@ class _BayesDREAMCore(PlottingMixin):
         cores: int = 1,
         guide_assignment: np.ndarray = None,
         guide_meta: pd.DataFrame = None,
+        guide_target: pd.DataFrame = None,
         exclude_targets: list[str] = None
     ):
         """
@@ -114,9 +116,16 @@ class _BayesDREAMCore(PlottingMixin):
             If provided, must also provide guide_meta. Activates high MOI mode.
             Note: If dimensions are [G, N], will auto-transpose with a warning.
         guide_meta : pd.DataFrame, optional
-            Guide metadata DataFrame for high MOI mode. Must have columns 'guide' and 'target'.
+            Guide metadata DataFrame for high MOI mode. Must have column 'guide'.
+            Can optionally have 'target' column for simple one-to-one guide-target mapping.
             Index must match the column order of guide_assignment matrix.
             If provided, must also provide guide_assignment.
+        guide_target : pd.DataFrame, optional
+            High MOI only: Many-to-many guide-target relationship DataFrame.
+            Must have columns 'guide' and 'target'. Multiple rows can have the same guide
+            (one guide can target multiple genes). If provided, overrides guide_meta['target'].
+            This allows flexible specification of guides with multiple possible targets.
+            NTC guides can be specified with 'ntc', 'NTC', 'non-targeting', or 'non-targeting-control'.
         exclude_targets : list[str], optional
             High MOI only: List of target gene names to exclude. Cells with ANY guide targeting
             a gene in this list will be removed from analysis, regardless of other guides present.
@@ -131,7 +140,33 @@ class _BayesDREAMCore(PlottingMixin):
 
         # Basic assignments
         self.meta = meta.copy()
-        self.counts = counts.copy()
+
+        # Handle counts - can be DataFrame or sparse matrix
+        self.is_sparse_counts = sparse.issparse(counts)
+        if self.is_sparse_counts:
+            # Keep sparse matrix as-is
+            self.counts = counts.copy() if hasattr(counts, 'copy') else counts.tocsr()
+            # Extract gene and cell names from DataFrame metadata
+            if isinstance(counts, pd.DataFrame):
+                self._gene_names = counts.index.tolist()
+                self._cell_names = counts.columns.tolist()
+            else:
+                # counts is sparse array - will extract names from gene_meta and meta later
+                self._gene_names = None
+                self._cell_names = None
+            print(f"[SPARSE] Keeping counts as sparse matrix (shape: {counts.shape}, sparsity: {1 - counts.nnz / (counts.shape[0] * counts.shape[1]):.2%} zeros)")
+        else:
+            # DataFrame or dense array
+            if isinstance(counts, pd.DataFrame):
+                self.counts = counts.copy()
+                self._gene_names = counts.index.tolist()
+                self._cell_names = counts.columns.tolist()
+            else:
+                # Dense numpy array - store as-is, extract names later
+                self.counts = counts.copy() if hasattr(counts, 'copy') else counts
+                self._gene_names = None
+                self._cell_names = None
+
         self.cis_gene = cis_gene
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
@@ -197,11 +232,10 @@ class _BayesDREAMCore(PlottingMixin):
                     f"These dimensions must match."
                 )
 
-            required_guide_cols = {'guide', 'target'}
-            missing_guide_cols = required_guide_cols - set(guide_meta.columns)
-            if missing_guide_cols:
+            # Validate guide_meta has 'guide' column
+            if 'guide' not in guide_meta.columns:
                 raise ValueError(
-                    f"guide_meta missing required columns: {missing_guide_cols}. "
+                    f"guide_meta missing required column 'guide'. "
                     f"Available columns: {list(guide_meta.columns)}"
                 )
 
@@ -212,85 +246,164 @@ class _BayesDREAMCore(PlottingMixin):
             # Create guide_code mapping for guide_meta
             self.guide_meta['guide_code'] = range(G_guides)
 
+            # Process guide-target relationships
+            # Priority: guide_target > guide_meta['target']
+            if guide_target is not None:
+                # Validate guide_target DataFrame
+                required_gt_cols = {'guide', 'target'}
+                missing_gt_cols = required_gt_cols - set(guide_target.columns)
+                if missing_gt_cols:
+                    raise ValueError(
+                        f"guide_target missing required columns: {missing_gt_cols}. "
+                        f"Available columns: {list(guide_target.columns)}"
+                    )
+
+                # Create guide -> list of targets mapping
+                guide_targets_dict = {}
+                for _, row in guide_target.iterrows():
+                    guide_name = row['guide']
+                    target = row['target']
+                    if guide_name not in guide_targets_dict:
+                        guide_targets_dict[guide_name] = []
+                    guide_targets_dict[guide_name].append(target)
+
+                # Store for later use
+                self.guide_targets_dict = guide_targets_dict
+                print(f"[INFO] Using guide_target DataFrame: {len(guide_target)} guide-target relationships")
+
+            elif 'target' in guide_meta.columns:
+                # Use simple one-to-one mapping from guide_meta
+                guide_targets_dict = {
+                    row['guide']: [row['target']]
+                    for _, row in guide_meta.iterrows()
+                }
+                self.guide_targets_dict = guide_targets_dict
+                print(f"[INFO] Using guide_meta['target'] for one-to-one guide-target mapping")
+            else:
+                raise ValueError(
+                    "Either guide_target DataFrame or guide_meta['target'] column must be provided "
+                    "to specify guide-target relationships in high MOI mode."
+                )
+
             print(f"[INFO] High MOI: {N_cells_assignment} cells (from guide_assignment), {G_guides} guides")
             print(f"[INFO] Average guides per cell: {guide_assignment.sum(axis=1).mean():.2f}")
 
         else:
             self.is_high_moi = False
 
-        # Handle gene metadata
+        # Handle gene metadata and extract gene names
         if gene_meta is None:
-            # Create minimal gene metadata from counts index
-            print("[INFO] No gene_meta provided - creating minimal metadata from counts.index")
-            self.gene_meta = pd.DataFrame({
-                'gene': counts.index.tolist()
-            }, index=counts.index)
+            # Create minimal gene metadata from counts
+            print("[INFO] No gene_meta provided - creating minimal metadata")
+            if isinstance(counts, pd.DataFrame):
+                # DataFrame: use string index from DataFrame
+                gene_names = counts.index.tolist()
+                self.gene_meta = pd.DataFrame({
+                    'gene': gene_names
+                }, index=gene_names)
+                self._gene_names = gene_names
+            else:
+                # Matrix/array: use NUMERIC index [0, 1, 2, ...]
+                n_features = counts.shape[0]
+                self.gene_meta = pd.DataFrame({
+                    'feature_id': range(n_features)
+                }, index=range(n_features))
+                self._gene_names = None  # No string names for matrices
+                print(f"[INFO] Using numeric feature indices [0..{n_features-1}] for matrix/array")
         else:
             # Validate and process provided gene_meta
             gene_meta = gene_meta.copy()
 
-            # Check that gene_meta index or has a gene identifier column
+            # Check that gene_meta has at least one identifier column
             has_gene_col = 'gene' in gene_meta.columns
             has_gene_name = 'gene_name' in gene_meta.columns
             has_gene_id = 'gene_id' in gene_meta.columns
+            has_feature_id = 'feature_id' in gene_meta.columns
 
-            if not has_gene_col and gene_meta.index.name is None and not has_gene_name and not has_gene_id:
+            if not has_gene_col and not has_gene_name and not has_gene_id and not has_feature_id:
                 raise ValueError(
-                    "gene_meta must have at least one gene identifier: "
-                    "'gene' column, named index, 'gene_name' column, or 'gene_id' column"
+                    "gene_meta must have at least one identifier column: "
+                    "'gene', 'gene_name', 'gene_id', or 'feature_id'"
                 )
 
-            # Ensure we have a 'gene' column for internal use
-            if not has_gene_col:
-                if gene_meta.index.name is not None:
-                    gene_meta['gene'] = gene_meta.index
-                    print(f"[INFO] Using gene_meta index ('{gene_meta.index.name}') as 'gene' column")
-                elif has_gene_name:
-                    gene_meta['gene'] = gene_meta['gene_name']
-                    print("[INFO] Using 'gene_name' column as 'gene' identifier")
-                elif has_gene_id:
-                    gene_meta['gene'] = gene_meta['gene_id']
-                    print("[INFO] Using 'gene_id' column as 'gene' identifier")
+            # Handle based on counts type
+            if isinstance(counts, pd.DataFrame):
+                # DataFrame: gene_meta should use same string index as counts
+                # Ensure we have a 'gene' column for internal use
+                if not has_gene_col:
+                    if gene_meta.index.name is not None:
+                        gene_meta['gene'] = gene_meta.index
+                        print(f"[INFO] Using gene_meta index ('{gene_meta.index.name}') as 'gene' column")
+                    elif has_gene_name:
+                        gene_meta['gene'] = gene_meta['gene_name']
+                        print("[INFO] Using 'gene_name' column as 'gene' identifier")
+                    elif has_gene_id:
+                        gene_meta['gene'] = gene_meta['gene_id']
+                        print("[INFO] Using 'gene_id' column as 'gene' identifier")
 
-            # Set index to match counts if needed
-            if not gene_meta.index.equals(counts.index):
-                # Try to match by gene identifiers
-                matched_genes = []
-                unmatched_counts = []
+                counts_gene_names = counts.index.tolist()
 
-                for gene in counts.index:
-                    # Try to find this gene in gene_meta by any identifier
-                    found = False
-                    for col in ['gene', 'gene_name', 'gene_id']:
-                        if col in gene_meta.columns:
-                            if gene in gene_meta[col].values:
-                                matched_genes.append(gene_meta[gene_meta[col] == gene].index[0])
-                                found = True
-                                break
+                # Ensure gene_meta index matches counts index
+                if not gene_meta.index.equals(pd.Index(counts_gene_names)):
+                    # Try to reindex by matching identifiers
+                    if set(counts_gene_names).issubset(set(gene_meta.index)):
+                        gene_meta = gene_meta.loc[counts_gene_names]
+                    else:
+                        warnings.warn(
+                            f"[WARNING] gene_meta index does not match counts index. "
+                            f"Attempting to match by identifier columns.",
+                            UserWarning
+                        )
+                        # Try matching by columns
+                        matched_indices = []
+                        for gene in counts_gene_names:
+                            found = False
+                            for col in ['gene', 'gene_name', 'gene_id']:
+                                if col in gene_meta.columns and gene in gene_meta[col].values:
+                                    matched_indices.append(gene_meta[gene_meta[col] == gene].index[0])
+                                    found = True
+                                    break
+                            if not found:
+                                # Add minimal metadata for missing gene
+                                matched_indices.append(gene)
 
-                    if not found:
-                        unmatched_counts.append(gene)
+                        # Add any missing genes
+                        missing = set(counts_gene_names) - set(gene_meta.index)
+                        if missing:
+                            missing_df = pd.DataFrame({'gene': list(missing)}, index=list(missing))
+                            gene_meta = pd.concat([gene_meta, missing_df])
 
-                if unmatched_counts:
-                    warnings.warn(
-                        f"[WARNING] {len(unmatched_counts)} gene(s) in counts not found in gene_meta. "
-                        f"These genes will have minimal metadata. First few: {unmatched_counts[:5]}",
-                        UserWarning
-                    )
-                    # Add missing genes with minimal metadata
-                    missing_meta = pd.DataFrame({
-                        'gene': unmatched_counts
-                    }, index=unmatched_counts)
-                    gene_meta = pd.concat([gene_meta, missing_meta])
+                        gene_meta = gene_meta.loc[counts_gene_names]
 
-                # Reindex to match counts
-                gene_meta = gene_meta.loc[counts.index] if set(counts.index).issubset(gene_meta.index) else gene_meta
+                self._gene_names = counts_gene_names
+            else:
+                # Matrix/array: ensure gene_meta has NUMERIC index [0, 1, 2, ...]
+                n_features = counts.shape[0]
+
+                # Check if gene_meta already has numeric index of correct length
+                if isinstance(gene_meta.index, pd.RangeIndex) and len(gene_meta) == n_features:
+                    # Already has correct numeric index
+                    pass
+                elif all(isinstance(idx, (int, np.integer)) for idx in gene_meta.index) and len(gene_meta) == n_features:
+                    # Has integer index - ensure it's a proper range
+                    gene_meta.index = range(n_features)
+                else:
+                    # Reset to numeric index
+                    if len(gene_meta) != n_features:
+                        raise ValueError(
+                            f"gene_meta has {len(gene_meta)} rows but counts has {n_features} features. "
+                            f"For matrix/array counts, gene_meta must have exactly {n_features} rows."
+                        )
+                    gene_meta.index = range(n_features)
+                    print(f"[INFO] Reset gene_meta to numeric index [0..{n_features-1}] to match matrix/array")
+
+                self._gene_names = None  # No string names for matrices
 
             self.gene_meta = gene_meta
 
             # Print summary
-            meta_cols = [c for c in ['gene', 'gene_name', 'gene_id'] if c in self.gene_meta.columns]
-            print(f"[INFO] Gene metadata loaded with {len(self.gene_meta)} genes and columns: {meta_cols}")
+            meta_cols = [c for c in ['gene', 'gene_name', 'gene_id', 'feature_id'] if c in self.gene_meta.columns]
+            print(f"[INFO] Feature metadata loaded with {len(self.gene_meta)} features and columns: {meta_cols}")
 
         # Ensure guide_covariates and guide_covariates_ntc are always lists
         if guide_covariates is None:
@@ -324,40 +437,75 @@ class _BayesDREAMCore(PlottingMixin):
             if "ntc" not in self.meta["target"].values:
                 raise ValueError("The 'target' column in meta must contain 'ntc'.")
 
-        if not set(self.meta["cell"]).issubset(set(self.counts.columns)):
-            raise ValueError("The 'cell' column in meta must correspond 1:1 with the column names of counts.")
+        # Populate cell names if not already set
+        if self._cell_names is None:
+            if isinstance(counts, pd.DataFrame):
+                self._cell_names = counts.columns.tolist()
+            else:
+                # Use meta['cell'] as cell names
+                self._cell_names = self.meta['cell'].tolist()
+
+        if not set(self.meta["cell"]).issubset(set(self._cell_names)):
+            raise ValueError("The 'cell' column in meta must correspond 1:1 with the cell names in counts.")
 
         if (self.meta[sum_factor_col] <= 0).any():
             raise ValueError(f"All values in sum_factor_col={sum_factor_col} column must be strictly greater than 0.")
 
         # For high MOI mode, create 'target' column based on guide assignment
         if self.is_high_moi:
-            # Determine which guides are NTC
-            ntc_guide_mask = self.guide_meta['target'] == 'ntc'
-            ntc_guide_indices = np.where(ntc_guide_mask)[0]
+            # Helper function to normalize NTC target names (case-insensitive)
+            def is_ntc_target(target_name):
+                """Check if target name is NTC (flexible matching)."""
+                ntc_variants = {'ntc', 'NTC', 'non-targeting', 'non-targeting-control', 'Non-Targeting'}
+                return target_name in ntc_variants
 
-            # Determine which guides target the cis_gene
-            cis_guide_mask = self.guide_meta['target'] == self.cis_gene
-            cis_guide_indices = np.where(cis_guide_mask)[0]
+            # Classify each guide based on its targets (from guide_targets_dict)
+            # A guide can have multiple targets, so we check if any match NTC, cis, or excluded
+            ntc_guide_indices = []
+            cis_guide_indices = []
+            exclude_guide_indices = []
 
-            # Determine which guides target excluded genes (if specified)
-            if exclude_targets is not None:
-                exclude_guide_mask = self.guide_meta['target'].isin(exclude_targets)
-                exclude_guide_indices = np.where(exclude_guide_mask)[0]
+            for guide_idx, guide_row in self.guide_meta.iterrows():
+                guide_name = guide_row['guide']
+                targets = self.guide_targets_dict.get(guide_name, [])
+
+                # Check if this guide has ANY NTC target
+                if any(is_ntc_target(t) for t in targets):
+                    ntc_guide_indices.append(guide_idx)
+
+                # Check if this guide has ANY cis_gene target
+                if self.cis_gene in targets:
+                    cis_guide_indices.append(guide_idx)
+
+                # Check if this guide has ANY excluded target
+                if exclude_targets is not None and any(t in exclude_targets for t in targets):
+                    exclude_guide_indices.append(guide_idx)
+
+            ntc_guide_indices = np.array(ntc_guide_indices)
+            cis_guide_indices = np.array(cis_guide_indices)
+            exclude_guide_indices = np.array(exclude_guide_indices)
+
+            # Determine which cells have these guide types
+            if len(exclude_guide_indices) > 0:
                 has_excluded_guide = self.guide_assignment[:, exclude_guide_indices].sum(axis=1) > 0
             else:
                 has_excluded_guide = np.zeros(len(self.guide_assignment), dtype=bool)
+
+            if len(ntc_guide_indices) > 0:
+                has_ntc_guide = self.guide_assignment[:, ntc_guide_indices].sum(axis=1) > 0
+            else:
+                has_ntc_guide = np.zeros(len(self.guide_assignment), dtype=bool)
+
+            if len(cis_guide_indices) > 0:
+                has_cis_guide = self.guide_assignment[:, cis_guide_indices].sum(axis=1) > 0
+            else:
+                has_cis_guide = np.zeros(len(self.guide_assignment), dtype=bool)
 
             # Cell classification:
             # - If cell has ANY excluded guides -> target = 'excluded' (will be removed)
             # - Else if cell has ANY cis guides -> target = cis_gene
             # - Else if cell has ANY NTC guides (but no cis) -> target = 'ntc'
             # - Else -> target = 'other' (will be removed)
-            has_any_guide = self.guide_assignment.sum(axis=1) > 0
-            has_ntc_guide = self.guide_assignment[:, ntc_guide_indices].sum(axis=1) > 0
-            has_cis_guide = self.guide_assignment[:, cis_guide_indices].sum(axis=1) > 0
-
-            # Assign target based on guide composition
             targets = []
             for i in range(len(self.guide_assignment)):
                 if has_excluded_guide[i]:
@@ -399,13 +547,40 @@ class _BayesDREAMCore(PlottingMixin):
                 UserWarning
             )
         self.meta = self.meta[self.meta["cell"].isin(valid_cells)].copy()
-        self.counts = self.counts[valid_cells].copy()
+
+        # Subset counts by cells - works for both DataFrame and sparse
+        if isinstance(self.counts, pd.DataFrame):
+            self.counts = self.counts[valid_cells].copy()
+        else:
+            # Sparse or dense array - subset by column indices
+            cell_indices = [i for i, cell in enumerate(self._cell_names) if cell in valid_cells]
+            if self.is_sparse_counts:
+                self.counts = self.counts[:, cell_indices]
+            else:
+                self.counts = self.counts[:, cell_indices]
+            # Update cell names
+            self._cell_names = [self._cell_names[i] for i in cell_indices]
 
         # For high MOI: subset guide_assignment to remove "other"-targeting guide columns
         if self.is_high_moi:
             # Keep only NTC and cis-gene targeting guides
-            keep_guide_mask = (self.guide_meta['target'] == 'ntc') | (self.guide_meta['target'] == self.cis_gene)
-            keep_guide_indices = np.where(keep_guide_mask)[0]
+            # A guide is kept if it has ANY NTC or cis target among its possible targets
+            keep_guide_indices = []
+
+            def is_ntc_target(target_name):
+                """Check if target name is NTC (flexible matching)."""
+                ntc_variants = {'ntc', 'NTC', 'non-targeting', 'non-targeting-control', 'Non-Targeting'}
+                return target_name in ntc_variants
+
+            for guide_idx, guide_row in self.guide_meta.iterrows():
+                guide_name = guide_row['guide']
+                targets = self.guide_targets_dict.get(guide_name, [])
+
+                # Keep if ANY target is NTC or cis_gene
+                if any(is_ntc_target(t) for t in targets) or self.cis_gene in targets:
+                    keep_guide_indices.append(guide_idx)
+
+            keep_guide_indices = np.array(keep_guide_indices)
 
             n_guides_before = self.guide_assignment.shape[1]
             n_guides_after = len(keep_guide_indices)
@@ -419,26 +594,105 @@ class _BayesDREAMCore(PlottingMixin):
             # Update guide_code to match new indices
             self.guide_meta['guide_code'] = range(len(self.guide_meta))
 
+            # Also update guide_targets_dict to only include kept guides
+            kept_guide_names = set(self.guide_meta['guide'].values)
+            self.guide_targets_dict = {
+                guide: targets
+                for guide, targets in self.guide_targets_dict.items()
+                if guide in kept_guide_names
+            }
+
             print(f"[INFO] Subsetted guides from {n_guides_before} to {n_guides_after} (keeping NTC + {self.cis_gene} guides only)")
 
-        # Remove genes with zero total counts
-        gene_sums = pd.Series(self.counts.values.sum(axis=1), index=self.counts.index)
+        # Remove genes with zero total counts - works for DataFrame, dense, and sparse
+        if isinstance(self.counts, pd.DataFrame):
+            gene_sums = self.counts.sum(axis=1).values
+        elif self.is_sparse_counts:
+            # Sparse matrix - sum along axis 1 (cells)
+            gene_sums = np.array(self.counts.sum(axis=1)).flatten()
+        else:
+            # Dense array
+            gene_sums = self.counts.sum(axis=1)
+
         detected_mask = gene_sums > 0
         num_removed = (~detected_mask).sum()
 
         # Raise error if cis gene is undetected
         if self.cis_gene is not None:
-            if not detected_mask.get(self.cis_gene, False):
+            if isinstance(self.counts, pd.DataFrame):
+                # DataFrame: check if cis_gene is in index
+                if self.cis_gene not in self.counts.index:
+                    raise ValueError(f"[ERROR] The cis gene '{self.cis_gene}' not found in counts index!")
+                cis_idx = self.counts.index.get_loc(self.cis_gene)
+            else:
+                # Matrix/array: search gene_meta columns for cis_gene
+                # Try columns in order: gene_name, gene, gene_id, feature_id
+                cis_idx = None
+                for col in ['gene_name', 'gene', 'gene_id', 'feature_id']:
+                    if col in self.gene_meta.columns:
+                        matches = self.gene_meta[self.gene_meta[col] == self.cis_gene]
+                        if len(matches) > 0:
+                            # Found cis gene - use its numeric index
+                            cis_idx = matches.index[0]
+                            print(f"[INFO] Found cis gene '{self.cis_gene}' in gene_meta['{col}'] at row index {cis_idx}")
+                            break
+
+                if cis_idx is None:
+                    available_cols = [c for c in ['gene_name', 'gene', 'gene_id', 'feature_id'] if c in self.gene_meta.columns]
+                    raise ValueError(
+                        f"[ERROR] The cis gene '{self.cis_gene}' not found in gene_meta columns {available_cols}!"
+                    )
+
+            # Check if cis gene has zero counts
+            if not detected_mask[cis_idx]:
                 raise ValueError(f"[ERROR] The cis gene '{self.cis_gene}' has zero counts after subsetting!")
 
-        # Subset counts to detected genes only
-        self.counts = self.counts.loc[detected_mask]
+        # Subset counts to detected genes only - works for DataFrame, dense, and sparse
+        if isinstance(self.counts, pd.DataFrame):
+            self.counts = self.counts.loc[detected_mask]
+            self._gene_names = self.counts.index.tolist()
+            self.gene_meta = self.gene_meta.loc[self._gene_names]
+        else:
+            # Sparse or dense array - subset by row indices
+            gene_indices = np.where(detected_mask)[0]
+            if self.is_sparse_counts:
+                self.counts = self.counts[gene_indices, :]
+            else:
+                self.counts = self.counts[gene_indices, :]
 
-        # Subset gene_meta to match counts (keep only detected genes)
-        self.gene_meta = self.gene_meta.loc[self.counts.index]
+            # Subset gene_meta by numeric indices
+            self.gene_meta = self.gene_meta.iloc[gene_indices].copy()
 
-        # Set trans genes to all detected genes except cis
-        self.trans_genes = [g for g in self.counts.index if g != self.cis_gene]
+            # CRITICAL: Reset index to [0, 1, 2, ..., n_remaining-1]
+            # This ensures row i in counts corresponds to row i in gene_meta
+            self.gene_meta.index = range(len(self.gene_meta))
+            print(f"[INFO] After filtering: reset gene_meta index to [0..{len(self.gene_meta)-1}]")
+
+            # _gene_names remains None for matrices
+            self._gene_names = None
+
+        # Set trans genes
+        if isinstance(self.counts, pd.DataFrame):
+            # DataFrame: use string names
+            self.trans_genes = [g for g in self._gene_names if g != self.cis_gene]
+        else:
+            # Matrix/array: trans_genes is list of numeric indices excluding cis
+            # Find which row has the cis gene after filtering
+            cis_row_after_filter = None
+            if self.cis_gene is not None:
+                for col in ['gene_name', 'gene', 'gene_id', 'feature_id']:
+                    if col in self.gene_meta.columns:
+                        matches = self.gene_meta[self.gene_meta[col] == self.cis_gene]
+                        if len(matches) > 0:
+                            cis_row_after_filter = matches.index[0]
+                            break
+
+            if cis_row_after_filter is not None:
+                # trans_genes = all indices except cis row
+                self.trans_genes = [i for i in range(len(self.gene_meta)) if i != cis_row_after_filter]
+            else:
+                # No cis gene - all rows are trans
+                self.trans_genes = list(range(len(self.gene_meta)))
 
         if num_removed > 0:
             warnings.warn(
@@ -447,7 +701,12 @@ class _BayesDREAMCore(PlottingMixin):
             )
         
         # Ensure same order of meta and counts
-        self.meta = self.meta.set_index("cell", drop=False).loc[self.counts.columns]
+        # Use _cell_names for sparse/dense array compatibility
+        if isinstance(self.counts, pd.DataFrame):
+            self.meta = self.meta.set_index("cell", drop=False).loc[self.counts.columns]
+        else:
+            # For sparse/dense arrays, reorder meta to match _cell_names
+            self.meta = self.meta.set_index("cell", drop=False).loc[self._cell_names]
 
         # Construct guide_used column (single-guide mode only)
         if not self.is_high_moi:
@@ -462,7 +721,11 @@ class _BayesDREAMCore(PlottingMixin):
             self.meta["guide_used"] = "highmoi"  # Placeholder for compatibility
             # Convert guide_assignment to tensor and store after subsetting
             # Need to subset guide_assignment to match the subsetted cells
-            cell_indices = [list(self.counts.columns).index(cell) for cell in self.meta['cell']]
+            if isinstance(self.counts, pd.DataFrame):
+                cell_indices = [list(self.counts.columns).index(cell) for cell in self.meta['cell']]
+            else:
+                # Use _cell_names for sparse/dense array compatibility
+                cell_indices = [self._cell_names.index(cell) for cell in self.meta['cell']]
             self.guide_assignment = self.guide_assignment[cell_indices, :]
             self.guide_assignment_tensor = torch.tensor(
                 self.guide_assignment,
@@ -623,7 +886,12 @@ class _BayesDREAMCore(PlottingMixin):
 
         # Determine T (number of response variables)
         if self.cis_gene is not None:
-            T = self.counts.drop([self.cis_gene]).shape[0]
+            # Count trans genes (all genes except cis) - works for DataFrame and arrays
+            if isinstance(self.counts, pd.DataFrame):
+                T = self.counts.drop([self.cis_gene]).shape[0]
+            else:
+                # For matrices/arrays: use self.trans_genes (already computed as numeric indices)
+                T = len(self.trans_genes)
         else:
             T = self.counts.shape[0]
         C = self.meta["technical_group_code"].nunique() - 1
@@ -1018,44 +1286,140 @@ class _BayesDREAMCore(PlottingMixin):
 
         # If genes2permute is 'All', include all genes except the cis_gene
         if genes2permute == 'All' or genes2permute == ['All']:
-            genes2permute = list(self.counts.index.values[self.counts.index.values != self.cis_gene])
+            if isinstance(self.counts, pd.DataFrame):
+                genes2permute = list(self.counts.index.values[self.counts.index.values != self.cis_gene])
+            else:
+                # For matrices/arrays: use self.trans_genes (already computed as numeric indices)
+                genes2permute = self.trans_genes.copy()
 
         if isinstance(genes2permute, str):
             genes2permute = [genes2permute]
 
         meta_sub = self.meta.copy()
-        counts_sub = self.counts.copy()
+
+        # Handle counts copying based on type
+        if isinstance(self.counts, pd.DataFrame):
+            counts_sub = self.counts.copy()
+        elif self.is_sparse_counts:
+            counts_sub = self.counts.copy()
+        else:
+            counts_sub = self.counts.copy()
+
+        # Create cell name to column index mapping for matrices/arrays
+        if isinstance(self.counts, pd.DataFrame):
+            cell_to_col_idx = {cell: idx for idx, cell in enumerate(counts_sub.columns)}
+        else:
+            cell_to_col_idx = {cell: idx for idx, cell in enumerate(self._cell_names)}
 
         for gene in genes2permute:
-            if gene in counts_sub.index:  # Ensure gene exists in the count matrix
-                for cov_values, group in meta_sub.groupby(covariates):
-                    mycells = group.loc[group["target"] != "ntc", "cell"]
-                    my_ntc_cells = group.loc[group["target"] == "ntc", "cell"]
-                    
-                    if len(mycells) > 0 and len(my_ntc_cells) > 0:
-                        sampled_values = np.random.choice(
-                            counts_sub.loc[gene, my_ntc_cells] /
-                            meta_sub.set_index("cell").loc[my_ntc_cells, sum_factor_col],
-                            size=len(mycells),
-                            replace=True
-                        ) * meta_sub.set_index("cell").loc[mycells, sum_factor_col]
-                        counts_sub.loc[gene, mycells] = np.round(sampled_values)
+            # Check if gene exists - works for both DataFrame and arrays
+            if isinstance(self.counts, pd.DataFrame):
+                if gene not in counts_sub.index:
+                    continue
+                gene_idx = gene  # Use gene name directly for DataFrame
+            else:
+                # For matrices/arrays: gene is a numeric index
+                if gene >= counts_sub.shape[0]:
+                    continue
+                gene_idx = gene  # Use numeric index directly
+
+            for cov_values, group in meta_sub.groupby(covariates):
+                mycells = group.loc[group["target"] != "ntc", "cell"]
+                my_ntc_cells = group.loc[group["target"] == "ntc", "cell"]
+
+                if len(mycells) > 0 and len(my_ntc_cells) > 0:
+                    # Get column indices for cells
+                    mycell_indices = [cell_to_col_idx[cell] for cell in mycells]
+                    my_ntc_indices = [cell_to_col_idx[cell] for cell in my_ntc_cells]
+
+                    # Get count data - works for DataFrame, dense, and sparse
+                    if isinstance(self.counts, pd.DataFrame):
+                        gene_counts_ntc = counts_sub.loc[gene_idx, my_ntc_cells].values
+                    elif self.is_sparse_counts:
+                        # Sparse: extract row, convert to dense array
+                        gene_counts_ntc = np.array(counts_sub[gene_idx, my_ntc_indices].todense()).flatten()
+                    else:
+                        # Dense array
+                        gene_counts_ntc = counts_sub[gene_idx, my_ntc_indices]
+
+                    # Get sum factors
+                    meta_indexed = meta_sub.set_index("cell")
+                    ntc_sum_factors = meta_indexed.loc[my_ntc_cells, sum_factor_col].values
+                    mycell_sum_factors = meta_indexed.loc[mycells, sum_factor_col].values
+
+                    # Sample values from NTC distribution
+                    sampled_values = np.random.choice(
+                        gene_counts_ntc / ntc_sum_factors,
+                        size=len(mycells),
+                        replace=True
+                    ) * mycell_sum_factors
+
+                    # Assign back to counts - works for DataFrame, dense, and sparse
+                    if isinstance(self.counts, pd.DataFrame):
+                        counts_sub.loc[gene_idx, mycells] = np.round(sampled_values)
+                    elif self.is_sparse_counts:
+                        # For sparse: convert to LIL format for efficient assignment
+                        counts_sub = counts_sub.tolil()
+                        for i, cell_idx in enumerate(mycell_indices):
+                            counts_sub[gene_idx, cell_idx] = np.round(sampled_values[i])
+                        counts_sub = counts_sub.tocsr()
+                    else:
+                        # Dense array
+                        counts_sub[gene_idx, mycell_indices] = np.round(sampled_values)
+
         if permute_ntc_x:
+            # Find cis gene index
+            if isinstance(self.counts, pd.DataFrame):
+                cis_gene_idx = self.cis_gene
+            else:
+                # For matrices/arrays: find cis gene row
+                cis_gene_idx = None
+                for col in ['gene_name', 'gene', 'gene_id', 'feature_id']:
+                    if col in self.gene_meta.columns:
+                        matches = self.gene_meta[self.gene_meta[col] == self.cis_gene]
+                        if len(matches) > 0:
+                            cis_gene_idx = matches.index[0]
+                            break
+                if cis_gene_idx is None:
+                    raise ValueError(f"Cannot find cis gene '{self.cis_gene}' for permutation")
+
             for cov_values, group in meta_sub.groupby(covariates):
                 my_ntc_cells = group.loc[group["target"] == "ntc", "cell"]
-                
+
                 if len(my_ntc_cells) > 0:
-                    # Set up normalized cis-gene counts for these NTC cells
-                    ntc_sum_factor = meta_sub.set_index("cell").loc[my_ntc_cells, sum_factor_col].values
-                    ntc_expr = counts_sub.loc[self.cis_gene, my_ntc_cells].values
+                    # Get column indices for NTC cells
+                    my_ntc_indices = [cell_to_col_idx[cell] for cell in my_ntc_cells]
+
+                    # Get sum factors
+                    meta_indexed = meta_sub.set_index("cell")
+                    ntc_sum_factor = meta_indexed.loc[my_ntc_cells, sum_factor_col].values
+
+                    # Get cis gene expression for NTC cells
+                    if isinstance(self.counts, pd.DataFrame):
+                        ntc_expr = counts_sub.loc[cis_gene_idx, my_ntc_cells].values
+                    elif self.is_sparse_counts:
+                        ntc_expr = np.array(counts_sub[cis_gene_idx, my_ntc_indices].todense()).flatten()
+                    else:
+                        ntc_expr = counts_sub[cis_gene_idx, my_ntc_indices]
+
                     ntc_expr_norm = ntc_expr / ntc_sum_factor
-        
+
                     # Sample indices with replacement
                     permuted_indices = np.random.choice(len(my_ntc_cells), size=len(my_ntc_cells), replace=True)
-        
+
                     # Permute counts
                     new_counts = ntc_expr_norm[permuted_indices] * ntc_sum_factor
-                    counts_sub.loc[self.cis_gene, my_ntc_cells] = np.round(new_counts)
+
+                    # Assign back
+                    if isinstance(self.counts, pd.DataFrame):
+                        counts_sub.loc[cis_gene_idx, my_ntc_cells] = np.round(new_counts)
+                    elif self.is_sparse_counts:
+                        counts_sub = counts_sub.tolil()
+                        for i, cell_idx in enumerate(my_ntc_indices):
+                            counts_sub[cis_gene_idx, cell_idx] = np.round(new_counts[i])
+                        counts_sub = counts_sub.tocsr()
+                    else:
+                        counts_sub[cis_gene_idx, my_ntc_indices] = np.round(new_counts)
         
                     # Permute x_true in the same order
                     ntc_idx = meta_sub.index[meta_sub["cell"].isin(my_ntc_cells)].tolist()

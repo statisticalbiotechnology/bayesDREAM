@@ -21,18 +21,18 @@ dependencies:
   - r-irkernel  # R kernel for Jupyter
   - r-data.table  # Fast data manipulation in R
 
-  # PyTorch (adjust for CPU vs GPU as needed)
-  # For CPU-only clusters, use:
+  # PyTorch with GPU support (default)
+  # Works with CUDA 12.x (compatible with most modern GPU clusters)
   - pytorch>=2.2.0
-  - pytorch::cpuonly  # Remove this line if you need GPU support
+  - pytorch::pytorch-cuda=12.1
 
-  # For GPU clusters with CUDA 11.8, replace the above two lines with:
-  # - pytorch>=2.2.0
+  # For CPU-only installation (e.g., local development without GPU):
+  # Comment out the pytorch-cuda line above and uncomment this:
+  # - pytorch::cpuonly
+
+  # For older GPU clusters with CUDA 11.8:
+  # Replace pytorch-cuda=12.1 with:
   # - pytorch::pytorch-cuda=11.8
-
-  # For GPU clusters with CUDA 12.1, use:
-  # - pytorch>=2.2.0
-  # - pytorch::pytorch-cuda=12.1
 
   # Visualization (conda will select compatible versions)
   - matplotlib>=3.7
@@ -73,11 +73,11 @@ dependencies:
 #    cd /path/to/bayesDREAM_forClaude
 #    pip install -e .
 #
-# For GPU support:
-# - Edit this file to uncomment the appropriate pytorch-cuda line
-# - Remove or comment out the cpuonly line
-# - Match the CUDA version to what's available on your cluster
-#   (check with: nvcc --version or nvidia-smi)
+# GPU support (default):
+# - The environment installs PyTorch with CUDA 12.1 support by default
+# - This works with CUDA 12.x on most modern GPU clusters
+# - For CPU-only installation, see the PyTorch section above
+# - To check your cluster's CUDA version: nvcc --version or nvidia-smi
 #
 # Notes:
 # - This environment includes R (>=4.0) and scran (>=1.20) from bioconda

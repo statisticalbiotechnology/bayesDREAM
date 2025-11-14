@@ -6,6 +6,8 @@ This guide provides instructions for installing bayesDREAM on different computin
 
 ### Using Conda (Recommended for most users)
 
+**Note**: The default conda environment includes **GPU support with CUDA 12.1**, which works on most modern GPU clusters. If you need CPU-only installation, see the GPU Support section below.
+
 1. **Create the conda environment:**
    ```bash
    conda env create -f environment.yml
@@ -24,6 +26,11 @@ This guide provides instructions for installing bayesDREAM on different computin
 4. **Register R kernel with Jupyter (for using R in notebooks):**
    ```bash
    R -e "IRkernel::installspec(user = FALSE)"
+   ```
+
+5. **Verify GPU support (if using GPU cluster):**
+   ```bash
+   python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
    ```
 
 ### Using pip only
@@ -46,49 +53,77 @@ This guide provides instructions for installing bayesDREAM on different computin
 
 ## GPU Support
 
-### For CUDA 11.8
+**Default**: The conda environment (`environment.yml`) installs PyTorch with **CUDA 12.1 support** by default. This works with CUDA 12.x on most modern GPU clusters (including CUDA 12.2+).
 
-Edit `environment.yml` and replace the PyTorch lines with:
+### Verify GPU is Working
+
+After installation, verify CUDA is available:
+```bash
+conda activate bayesdream
+python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('CUDA version:', torch.version.cuda)"
+```
+
+You should see:
+```
+CUDA available: True
+CUDA version: 12.1
+```
+
+### Check Your Cluster's CUDA Version
+
+```bash
+nvidia-smi  # Shows CUDA driver version (e.g., 12.2)
+nvcc --version  # Shows CUDA toolkit version (if installed)
+```
+
+**Note**: PyTorch CUDA 12.1 is compatible with CUDA 12.2+ drivers.
+
+### For Older GPU Clusters (CUDA 11.8)
+
+If your cluster only has CUDA 11.x, edit `environment.yml` and change:
 ```yaml
-- pytorch>=2.2.0
+- pytorch::pytorch-cuda=12.1
+```
+to:
+```yaml
 - pytorch::pytorch-cuda=11.8
 ```
 
-Or for pip installation:
+Or reinstall with pip:
 ```bash
-pip install torch>=2.2.0+cu118 --index-url https://download.pytorch.org/whl/cu118
+pip uninstall torch -y
+pip install torch>=2.2.0 --index-url https://download.pytorch.org/whl/cu118
 ```
 
-### For CUDA 12.1
+### For CPU-Only Installation
 
-Edit `environment.yml` and replace the PyTorch lines with:
+If you don't have a GPU or want CPU-only for local development:
+
+**Option 1: Edit environment.yml before creating environment**
 ```yaml
-- pytorch>=2.2.0
-- pytorch::pytorch-cuda=12.1
+# Comment out:
+# - pytorch::pytorch-cuda=12.1
+
+# Uncomment:
+- pytorch::cpuonly
 ```
 
-Or for pip installation:
+**Option 2: Reinstall PyTorch as CPU-only after creating environment**
 ```bash
-pip install torch>=2.2.0+cu121 --index-url https://download.pytorch.org/whl/cu121
-```
-
-### Check your CUDA version
-
-```bash
-nvcc --version
-# or
-nvidia-smi
+conda activate bayesdream
+pip uninstall torch -y
+conda install pytorch cpuonly -c pytorch
 ```
 
 ## HPC Cluster Installation
 
-### SLURM Clusters
+### SLURM Clusters (with GPU)
 
 1. **Load required modules (if applicable):**
    ```bash
    module load anaconda3
    # or
-   module load python/3.12
+   module load python/3.11
    ```
 
 2. **Create environment:**
@@ -102,7 +137,12 @@ nvidia-smi
    pip install -e .
    ```
 
-4. **In your SLURM job script:**
+4. **Verify GPU support:**
+   ```bash
+   python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+   ```
+
+5. **In your SLURM job script (GPU job):**
    ```bash
    #!/bin/bash
    #SBATCH --job-name=bayesdream
@@ -110,6 +150,7 @@ nvidia-smi
    #SBATCH --ntasks=1
    #SBATCH --cpus-per-task=8
    #SBATCH --mem=32G
+   #SBATCH --gres=gpu:1          # Request 1 GPU
    #SBATCH --time=24:00:00
 
    # Load modules if needed
@@ -117,6 +158,10 @@ nvidia-smi
 
    # Activate environment
    conda activate bayesdream
+
+   # Verify GPU is visible
+   nvidia-smi
+   echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
 
    # Run your script
    python your_script.py

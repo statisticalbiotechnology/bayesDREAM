@@ -71,6 +71,7 @@ class bayesDREAM(
         cis_feature: str = None,
         guide_assignment: np.ndarray = None,
         guide_meta: pd.DataFrame = None,
+        guide_target: pd.DataFrame = None,
         guide_covariates: list = None,
         guide_covariates_ntc: list = None,
         sum_factor_col: str = 'sum_factor',
@@ -233,21 +234,24 @@ class bayesDREAM(
             raise ValueError("Cannot specify cis_feature without providing counts")
 
         # Extract 'cis' modality from primary modality (if both counts and cis_feature provided)
+        # Keep the original gene name and track numeric position
+        cis_numeric_idx = None
         if counts is not None and cis_feature is not None:
             if modality_name == 'gene':
-                self._extract_cis_from_gene(counts, cis_feature, feature_meta)
+                cis_feature, cis_numeric_idx = self._extract_cis_from_gene(counts, cis_feature, feature_meta, meta)
             else:
                 # Generic cis extraction for any negbinom modality
-                self._extract_cis_generic(counts, cis_feature, modality_name, feature_meta)
+                cis_feature, cis_numeric_idx = self._extract_cis_generic(counts, cis_feature, modality_name, feature_meta, meta)
 
         # Create primary modality
         if counts is not None:
             if modality_name == 'gene':
                 # Use gene-specific creation (with gene_meta handling)
-                self._create_gene_modality(counts, cis_feature, gene_meta=feature_meta)
+                # Pass both the name and numeric index for exclusion
+                self._create_gene_modality(counts, cis_feature, cis_numeric_idx, gene_meta=feature_meta, meta=meta)
             else:
                 # Generic negbinom modality creation
-                self._create_negbinom_modality(counts, modality_name, cis_feature, feature_meta)
+                self._create_negbinom_modality(counts, modality_name, cis_feature, cis_numeric_idx, feature_meta, meta)
 
         # Store primary modality name
         self.primary_modality = modality_name
@@ -274,49 +278,21 @@ class bayesDREAM(
             )
 
         # Get counts for base class initialization
-        # Use original counts (with cis feature) if provided, otherwise get from primary modality
+        # IMPORTANT: Pass counts matrix as-is to avoid densification
+        # core.py will handle matrix/array/DataFrame uniformly
         if counts_for_base is None:
             if modality_name in self.modalities:
-                primary_counts = self.modalities[modality_name].count_df
-                if primary_counts is None:
-                    # Convert array to DataFrame
-                    mod = self.modalities[modality_name]
-                    if mod.cells_axis == 1:
-                        primary_counts = pd.DataFrame(
-                            mod.counts,
-                            index=mod.feature_meta.index,
-                            columns=mod.cell_names if mod.cell_names else range(mod.dims['n_cells'])
-                        )
-                    else:
-                        primary_counts = pd.DataFrame(
-                            mod.counts.T,
-                            index=mod.feature_meta.index,
-                            columns=mod.cell_names if mod.cell_names else range(mod.dims['n_cells'])
-                        )
+                # Get from modality - prefer original counts over count_df
+                mod = self.modalities[modality_name]
+                primary_counts = mod.counts  # This is the matrix/array, not densified
             else:
                 # No counts and no primary modality - create placeholder
-                # Will be replaced when modality is added
                 print("[INFO] Creating placeholder counts - will be replaced when modality is added")
-                # Use meta['cell'] as columns to pass validation
-                # Use cis_feature as index if provided, otherwise use placeholder
-                placeholder_index = [cis_feature] if cis_feature is not None else ['_placeholder_']
-                primary_counts = pd.DataFrame(
-                    np.ones((1, len(meta))),  # Use 1s instead of 0s to avoid zero-count error
-                    index=placeholder_index,
-                    columns=meta['cell'].values
-                )
+                # Create minimal placeholder (will be replaced)
+                primary_counts = np.ones((1, len(meta)))
         else:
-            # Use original counts (includes cis feature for cis modeling)
-            # Convert to DataFrame if needed (base class expects DataFrame)
-            if not isinstance(counts_for_base, pd.DataFrame):
-                print("[INFO] Converting counts matrix to DataFrame for base class initialization")
-                primary_counts = self._counts_to_dataframe(
-                    counts_for_base,
-                    feature_meta=feature_meta,
-                    cell_names=meta['cell'].tolist() if 'cell' in meta.columns else None
-                )
-            else:
-                primary_counts = counts_for_base
+            # Use original counts as-is (matrix, array, or DataFrame)
+            primary_counts = counts_for_base
 
         # Prepare gene_meta for base class
         # Only pass feature_meta as gene_meta if modality_name is 'gene', otherwise None
@@ -330,6 +306,7 @@ class bayesDREAM(
             cis_gene=cis_feature,  # Pass resolved cis_feature as cis_gene
             guide_assignment=guide_assignment,
             guide_meta=guide_meta,
+            guide_target=guide_target,
             guide_covariates=guide_covariates,
             guide_covariates_ntc=guide_covariates_ntc,
             sum_factor_col=sum_factor_col,
@@ -365,9 +342,55 @@ class bayesDREAM(
         for name, mod in self.modalities.items():
             print(f"  - {name}: {mod}")
 
-    def _counts_to_dataframe(self, counts, feature_meta: Optional[pd.DataFrame] = None, cell_names=None) -> pd.DataFrame:
+    def _filter_features(self, counts, feature_meta, features_to_keep):
+        """
+        Filter features (rows) from counts matrix and feature_meta.
+
+        Works uniformly with DataFrame, numpy array, sparse matrix.
+        Returns filtered counts and feature_meta with reset numeric indices.
+
+        Parameters
+        ----------
+        counts : pd.DataFrame, np.ndarray, or scipy.sparse matrix
+            Count matrix (features × cells)
+        feature_meta : pd.DataFrame
+            Feature metadata (must have same number of rows as counts)
+        features_to_keep : array-like of int
+            Integer positions (iloc) of features to keep
+
+        Returns
+        -------
+        counts_filtered : same type as input
+            Filtered counts matrix
+        feature_meta_filtered : pd.DataFrame
+            Filtered feature_meta with index reset to range(n_kept_features)
+        """
+        if isinstance(counts, pd.DataFrame):
+            # DataFrame: use iloc
+            counts_filtered = counts.iloc[features_to_keep].copy()
+            # Reset index to numeric
+            counts_filtered.index = range(len(features_to_keep))
+        else:
+            # Array or sparse matrix: use numpy indexing
+            if hasattr(counts, 'toarray'):
+                # Sparse matrix
+                counts_filtered = counts[features_to_keep, :]
+            else:
+                # Dense array
+                counts_filtered = counts[features_to_keep, :]
+
+        # Filter and reset feature_meta index
+        feature_meta_filtered = feature_meta.iloc[features_to_keep].copy()
+        feature_meta_filtered.index = range(len(features_to_keep))
+
+        return counts_filtered, feature_meta_filtered
+
+    def _counts_to_dataframe(self, counts, feature_meta: Optional[pd.DataFrame] = None, cell_names=None, keep_sparse=False):
         """
         Convert counts (DataFrame, array, or sparse matrix) to DataFrame.
+
+        WARNING: This method densifies sparse matrices by default. Use keep_sparse=True to
+        return a dict with sparse matrix + metadata instead.
 
         Parameters
         ----------
@@ -377,34 +400,66 @@ class bayesDREAM(
             Feature metadata to use as index. If None, uses integer indices.
         cell_names : list, optional
             Cell names to use as columns. If None, uses integer indices.
+        keep_sparse : bool, default=False
+            If True and counts is sparse, returns dict with keys:
+            {'counts': sparse_matrix, 'gene_names': list, 'cell_names': list}
+            instead of densifying to DataFrame.
 
         Returns
         -------
-        pd.DataFrame
-            Counts as DataFrame
+        pd.DataFrame or dict
+            If keep_sparse=False: Counts as DataFrame
+            If keep_sparse=True and input is sparse: dict with sparse data + metadata
         """
         if isinstance(counts, pd.DataFrame):
-            return counts
+            if keep_sparse:
+                # Already dense DataFrame, return as-is (no conversion to dict)
+                return counts
+            else:
+                return counts
 
-        # Convert to dense array if sparse
-        if hasattr(counts, 'toarray'):
+        # Check if sparse
+        from scipy import sparse
+        is_sparse = sparse.issparse(counts)
+
+        if is_sparse and keep_sparse:
+            # Return sparse matrix with metadata (do NOT densify)
+            # Get feature names from feature_meta
+            if feature_meta is not None:
+                feature_names = feature_meta.index.tolist()
+            else:
+                feature_names = list(range(counts.shape[0]))
+
+            # Get cell names
+            if cell_names is None:
+                cell_names = list(range(counts.shape[1]))
+
+            return {
+                'counts': counts,  # Keep sparse!
+                'gene_names': feature_names,
+                'cell_names': cell_names,
+                'is_sparse': True
+            }
+
+        # Convert to dense array if sparse (legacy behavior)
+        if is_sparse:
+            print(f"[WARNING] Densifying sparse matrix of shape {counts.shape} - this may use significant memory!")
             counts_array = counts.toarray()
         else:
             counts_array = counts
-
-        # Get feature names from feature_meta
-        if feature_meta is not None:
-            feature_names = feature_meta.index.tolist()
-        else:
-            feature_names = list(range(counts_array.shape[0]))
 
         # Get cell names
         if cell_names is None:
             cell_names = list(range(counts_array.shape[1]))
 
-        return pd.DataFrame(counts_array, index=feature_names, columns=cell_names)
+        # Use numeric index for features (not feature_meta.index)
+        # This enables compatibility when Ensembl IDs or gene names have duplicates
+        # Row i in DataFrame corresponds to row i in feature_meta
+        feature_index = list(range(counts_array.shape[0]))
 
-    def _extract_cis_from_gene(self, counts, cis_gene: str, feature_meta: Optional[pd.DataFrame] = None):
+        return pd.DataFrame(counts_array, index=feature_index, columns=cell_names)
+
+    def _extract_cis_from_gene(self, counts, cis_gene: str, feature_meta: Optional[pd.DataFrame] = None, meta: Optional[pd.DataFrame] = None) -> tuple:
         """
         Extract 'cis' modality from gene counts.
 
@@ -416,17 +471,51 @@ class bayesDREAM(
             Gene name to extract as cis modality
         feature_meta : pd.DataFrame, optional
             Feature metadata with gene names. Required if counts is not a DataFrame.
+        meta : pd.DataFrame, optional
+            Cell metadata with 'cell' column. Required if counts is not a DataFrame
+            (used to get cell names for proper subsetting later).
+
+        Returns
+        -------
+        tuple (str, int)
+            (original_gene_name, numeric_row_index)
+            Returns the original gene name and the numeric row position
         """
         # Handle different count formats
+        numeric_idx = None
+
         if isinstance(counts, pd.DataFrame):
-            # DataFrame: use index
-            if cis_gene not in counts.index:
-                raise ValueError(
-                    f"cis_gene '{cis_gene}' not found in counts.\n"
-                    f"Available genes: {counts.index[:10].tolist()}..."
-                )
-            gene_idx = counts.index.get_loc(cis_gene)
-            cis_counts = counts.loc[[cis_gene]].values
+            # DataFrame: check if index is numeric or string-based
+            if pd.api.types.is_integer_dtype(counts.index):
+                # Numeric index: use feature_meta to find gene
+                if feature_meta is None:
+                    raise ValueError(
+                        f"counts has numeric index but no feature_meta provided to locate '{cis_gene}'"
+                    )
+                # Find gene in feature_meta columns (same order as core.py)
+                gene_col = None
+                for col in ['gene_name', 'gene', 'gene_id', 'feature_id']:
+                    if col in feature_meta.columns and cis_gene in feature_meta[col].values:
+                        gene_col = col
+                        break
+
+                if gene_col is None:
+                    raise ValueError(
+                        f"cis_gene '{cis_gene}' not found in feature_meta columns: {list(feature_meta.columns)}"
+                    )
+
+                # Get numeric position (iloc)
+                numeric_idx = feature_meta[feature_meta[gene_col] == cis_gene].index[0]
+                cis_counts = counts.iloc[[numeric_idx]].values
+            else:
+                # String-based index: use index directly
+                if cis_gene not in counts.index:
+                    raise ValueError(
+                        f"cis_gene '{cis_gene}' not found in counts.index.\n"
+                        f"Available genes: {counts.index[:10].tolist()}..."
+                    )
+                numeric_idx = counts.index.get_loc(cis_gene)
+                cis_counts = counts.loc[[cis_gene]].values
         else:
             # Array or sparse matrix: use feature_meta
             if feature_meta is None:
@@ -434,38 +523,31 @@ class bayesDREAM(
                     "When counts is not a DataFrame, feature_meta must be provided to locate cis_gene"
                 )
 
-            # Find gene in feature_meta
-            # Try multiple gene identifier columns
+            # Find gene in feature_meta columns (same order as core.py)
             gene_col = None
-            for col in ['gene', 'gene_name', 'gene_id']:
-                if col in feature_meta.columns:
-                    if cis_gene in feature_meta[col].values:
-                        gene_col = col
-                        break
+            for col in ['gene_name', 'gene', 'gene_id', 'feature_id']:
+                if col in feature_meta.columns and cis_gene in feature_meta[col].values:
+                    gene_col = col
+                    break
 
             if gene_col is None:
-                # Try index
-                if cis_gene in feature_meta.index:
-                    gene_idx = feature_meta.index.get_loc(cis_gene)
-                else:
-                    available = feature_meta.index[:10].tolist() if hasattr(feature_meta.index, 'tolist') else list(feature_meta.index[:10])
-                    raise ValueError(
-                        f"cis_gene '{cis_gene}' not found in feature_meta.\n"
-                        f"Tried columns: gene, gene_name, gene_id, and index.\n"
-                        f"Available features (first 10): {available}..."
-                    )
-            else:
-                # Found in a column
-                gene_idx = feature_meta[feature_meta[gene_col] == cis_gene].index[0]
-                gene_idx = feature_meta.index.get_loc(gene_idx)
+                available_cols = list(feature_meta.columns)
+                raise ValueError(
+                    f"cis_gene '{cis_gene}' not found in feature_meta.\n"
+                    f"Tried columns: gene_name, gene, gene_id, feature_id.\n"
+                    f"Available columns: {available_cols}"
+                )
+
+            # Get numeric position (iloc, which is the row number)
+            numeric_idx = feature_meta[feature_meta[gene_col] == cis_gene].index[0]
 
             # Extract row from counts (works for numpy arrays and sparse matrices)
             if hasattr(counts, 'toarray'):
                 # Sparse matrix
-                cis_counts = counts[gene_idx, :].toarray()
+                cis_counts = counts[numeric_idx, :].toarray()
             else:
-                # Numpy array
-                cis_counts = counts[gene_idx:gene_idx+1, :]
+                # Dense matrix or numpy array
+                cis_counts = counts[numeric_idx:numeric_idx+1, :]
 
         # Check if cis gene has zero variance (critical for cis modeling)
         cis_gene_std = np.std(cis_counts)
@@ -475,19 +557,50 @@ class bayesDREAM(
                 f"Cannot model cis effects for a gene with constant expression."
             )
 
-        print(f"[INFO] Extracting 'cis' modality from gene '{cis_gene}'")
+        print(f"[INFO] Extracting 'cis' modality from gene '{cis_gene}' (row {numeric_idx})")
+
+        # Use numeric index and keep original gene name
         cis_feature_meta = pd.DataFrame({
-            'gene': [cis_gene]
-        }, index=[cis_gene])
+            'gene': [cis_gene],
+            'gene_name': [cis_gene]  # Store original name
+        }, index=[numeric_idx])
+
+        # Add Ensembl ID if available in feature_meta
+        if feature_meta is not None and 'ens_id' in feature_meta.columns:
+            cis_feature_meta['ens_id'] = feature_meta.loc[numeric_idx, 'ens_id']
+
+        # Extract cell names from counts or meta
+        if isinstance(counts, pd.DataFrame):
+            cell_names = counts.columns.tolist()
+        elif meta is not None and 'cell' in meta.columns:
+            # Array or sparse matrix - get cell names from meta
+            # Ensure correct number of cells
+            if len(meta) != counts.shape[1]:
+                raise ValueError(
+                    f"Cell count mismatch: meta has {len(meta)} cells but counts has {counts.shape[1]} cells"
+                )
+            cell_names = meta['cell'].tolist()
+        else:
+            # No meta provided - will be None and subsetting will be skipped
+            # This should not happen in normal usage
+            warnings.warn(
+                "Creating cis modality without cell_names. Modality will not be subsetted to match filtered cells.",
+                UserWarning
+            )
+            cell_names = None
+
         self.modalities['cis'] = Modality(
             name='cis',
             counts=cis_counts,
             feature_meta=cis_feature_meta,
+            cell_names=cell_names,
             distribution='negbinom',
             cells_axis=1
         )
 
-    def _extract_cis_generic(self, counts, cis_feature: str, modality_name: str, feature_meta: Optional[pd.DataFrame] = None):
+        return cis_gene, numeric_idx
+
+    def _extract_cis_generic(self, counts, cis_feature: str, modality_name: str, feature_meta: Optional[pd.DataFrame] = None, meta: Optional[pd.DataFrame] = None) -> tuple:
         """
         Extract 'cis' modality from a generic negbinom modality.
 
@@ -501,17 +614,51 @@ class bayesDREAM(
             Name of the modality type (for error messages)
         feature_meta : pd.DataFrame, optional
             Feature metadata. Required if counts is not a DataFrame.
+        meta : pd.DataFrame, optional
+            Cell metadata with 'cell' column. Required if counts is not a DataFrame
+            (used to get cell names for proper subsetting later).
+
+        Returns
+        -------
+        tuple (str, int)
+            (original_feature_name, numeric_row_index)
+            Returns the original feature name and the numeric row position
         """
         # Handle different count formats
+        numeric_idx = None
+
         if isinstance(counts, pd.DataFrame):
-            # DataFrame: use index
-            if cis_feature not in counts.index:
-                raise ValueError(
-                    f"cis_feature '{cis_feature}' not found in counts.\n"
-                    f"Available features: {counts.index[:10].tolist()}..."
-                )
-            feature_idx = counts.index.get_loc(cis_feature)
-            cis_counts = counts.loc[[cis_feature]].values
+            # DataFrame: check if index is numeric or string-based
+            if pd.api.types.is_integer_dtype(counts.index):
+                # Numeric index: use feature_meta to find feature
+                if feature_meta is None:
+                    raise ValueError(
+                        f"counts has numeric index but no feature_meta provided to locate '{cis_feature}'"
+                    )
+                # Find feature in feature_meta columns (consistent with core.py)
+                feature_col = None
+                for col in ['gene_name', 'gene', 'gene_id', 'feature_id', 'feature', 'feature_name']:
+                    if col in feature_meta.columns and cis_feature in feature_meta[col].values:
+                        feature_col = col
+                        break
+
+                if feature_col is None:
+                    raise ValueError(
+                        f"cis_feature '{cis_feature}' not found in feature_meta columns: {list(feature_meta.columns)}"
+                    )
+
+                # Get numeric position (iloc)
+                numeric_idx = feature_meta[feature_meta[feature_col] == cis_feature].index[0]
+                cis_counts = counts.iloc[[numeric_idx]].values
+            else:
+                # String-based index: use index directly
+                if cis_feature not in counts.index:
+                    raise ValueError(
+                        f"cis_feature '{cis_feature}' not found in counts.index.\n"
+                        f"Available features: {counts.index[:10].tolist()}..."
+                    )
+                numeric_idx = counts.index.get_loc(cis_feature)
+                cis_counts = counts.loc[[cis_feature]].values
         else:
             # Array or sparse matrix: use feature_meta
             if feature_meta is None:
@@ -519,37 +666,31 @@ class bayesDREAM(
                     "When counts is not a DataFrame, feature_meta must be provided to locate cis_feature"
                 )
 
-            # Find feature in feature_meta (try index first, then common columns)
-            if cis_feature in feature_meta.index:
-                feature_idx = feature_meta.index.get_loc(cis_feature)
-            else:
-                # Try common feature identifier columns
-                feature_col = None
-                for col in ['feature', 'feature_name', 'feature_id', 'gene', 'gene_name', 'gene_id']:
-                    if col in feature_meta.columns:
-                        if cis_feature in feature_meta[col].values:
-                            feature_col = col
-                            break
+            # Find feature in feature_meta columns (consistent with core.py)
+            feature_col = None
+            for col in ['gene_name', 'gene', 'gene_id', 'feature_id', 'feature', 'feature_name']:
+                if col in feature_meta.columns and cis_feature in feature_meta[col].values:
+                    feature_col = col
+                    break
 
-                if feature_col is None:
-                    available = feature_meta.index[:10].tolist() if hasattr(feature_meta.index, 'tolist') else list(feature_meta.index[:10])
-                    raise ValueError(
-                        f"cis_feature '{cis_feature}' not found in feature_meta.\n"
-                        f"Tried index and columns: feature, feature_name, feature_id, gene, gene_name, gene_id.\n"
-                        f"Available features (first 10): {available}..."
-                    )
+            if feature_col is None:
+                available_cols = list(feature_meta.columns)
+                raise ValueError(
+                    f"cis_feature '{cis_feature}' not found in feature_meta.\n"
+                    f"Tried columns: gene_name, gene, gene_id, feature_id, feature, feature_name.\n"
+                    f"Available columns: {available_cols}"
+                )
 
-                # Found in a column
-                feature_idx = feature_meta[feature_meta[feature_col] == cis_feature].index[0]
-                feature_idx = feature_meta.index.get_loc(feature_idx)
+            # Get numeric position (iloc, which is the row number)
+            numeric_idx = feature_meta[feature_meta[feature_col] == cis_feature].index[0]
 
             # Extract row from counts (works for numpy arrays and sparse matrices)
             if hasattr(counts, 'toarray'):
                 # Sparse matrix
-                cis_counts = counts[feature_idx, :].toarray()
+                cis_counts = counts[numeric_idx, :].toarray()
             else:
-                # Numpy array
-                cis_counts = counts[feature_idx:feature_idx+1, :]
+                # Dense matrix or numpy array
+                cis_counts = counts[numeric_idx:numeric_idx+1, :]
 
         # Check if cis feature has zero variance (critical for cis modeling)
         cis_feature_std = np.std(cis_counts)
@@ -559,25 +700,50 @@ class bayesDREAM(
                 f"Cannot model cis effects for a feature with constant values."
             )
 
-        print(f"[INFO] Extracting 'cis' modality from feature '{cis_feature}' ({modality_name})")
+        print(f"[INFO] Extracting 'cis' modality from feature '{cis_feature}' (row {numeric_idx}, {modality_name})")
+
+        # Use numeric index and keep original feature name
         cis_feature_meta = pd.DataFrame({
             'feature': [cis_feature],
             'modality_type': [modality_name]
-        }, index=[cis_feature])
+        }, index=[numeric_idx])
+
+        # Extract cell names from counts or meta
+        if isinstance(counts, pd.DataFrame):
+            cell_names = counts.columns.tolist()
+        elif meta is not None and 'cell' in meta.columns:
+            # Array or sparse matrix - get cell names from meta
+            if len(meta) != counts.shape[1]:
+                raise ValueError(
+                    f"Cell count mismatch: meta has {len(meta)} cells but counts has {counts.shape[1]} cells"
+                )
+            cell_names = meta['cell'].tolist()
+        else:
+            warnings.warn(
+                "Creating cis modality without cell_names. Modality will not be subsetted to match filtered cells.",
+                UserWarning
+            )
+            cell_names = None
+
         self.modalities['cis'] = Modality(
             name='cis',
             counts=cis_counts,
             feature_meta=cis_feature_meta,
+            cell_names=cell_names,
             distribution='negbinom',
             cells_axis=1
         )
+
+        return cis_feature, numeric_idx
 
     def _create_negbinom_modality(
         self,
         counts,
         modality_name: str,
         cis_feature: Optional[str] = None,
-        feature_meta: Optional[pd.DataFrame] = None
+        cis_feature_idx: Optional[int] = None,
+        feature_meta: Optional[pd.DataFrame] = None,
+        meta: Optional[pd.DataFrame] = None
     ):
         """
         Create a generic negbinom modality (excluding cis feature if specified).
@@ -590,91 +756,132 @@ class bayesDREAM(
             Name for this modality
         cis_feature : str, optional
             If provided, this feature will be excluded from the modality
+        cis_feature_idx : int, optional
+            Numeric row index of cis feature (for exclusion when counts has numeric index)
         feature_meta : pd.DataFrame, optional
             Feature metadata. If None, creates minimal metadata from counts.index
+        meta : pd.DataFrame, optional
+            Cell metadata with 'cell' column. Used to get cell names if counts is not a DataFrame.
         """
         if modality_name in self.modalities:
             warnings.warn(f"Modality '{modality_name}' already exists. Overwriting.")
 
-        # Convert to DataFrame if needed
-        if not isinstance(counts, pd.DataFrame):
-            counts = self._counts_to_dataframe(
-                counts,
-                feature_meta=feature_meta,
-                cell_names=self.meta['cell'].tolist() if hasattr(self, 'meta') and 'cell' in self.meta.columns else None
-            )
-
-        # Exclude cis feature from modality (trans features only)
-        if cis_feature is not None and cis_feature in counts.index:
-            print(f"[INFO] Creating '{modality_name}' modality with trans features (excluding '{cis_feature}')")
-            counts_trans = counts.drop(index=cis_feature)
+        # Prepare feature metadata
+        if feature_meta is None:
+            # Auto-create from DataFrame index if available, else require it for arrays
+            if isinstance(counts, pd.DataFrame):
+                # Check if DataFrame has meaningful feature names as index
+                if pd.api.types.is_integer_dtype(counts.index):
+                    # Numeric index - no feature names available
+                    raise ValueError(
+                        "counts has numeric index but no feature_meta provided. "
+                        "Either:\n"
+                        "  1. Provide feature_meta with feature names/IDs, OR\n"
+                        "  2. Set feature names as counts.index before initialization"
+                    )
+                else:
+                    # String-based index - extract feature names
+                    print(f"[INFO] No feature_meta provided - creating from counts.index")
+                    feature_names = counts.index.tolist()
+                    feature_meta = pd.DataFrame({
+                        'feature': feature_names,
+                        'feature_name': feature_names  # Also store in 'feature_name' column
+                    }, index=range(len(feature_names)))
+            else:
+                # Array or sparse matrix - feature_meta is REQUIRED
+                raise ValueError(
+                    "When counts is not a DataFrame, feature_meta must be provided. "
+                    "feature_meta should contain feature names/IDs to enable plotting and analysis."
+                )
         else:
-            counts_trans = counts
+            # feature_meta provided - ensure it has numeric index and required columns
+            if len(feature_meta) != counts.shape[0]:
+                raise ValueError(
+                    f"feature_meta has {len(feature_meta)} rows but counts has {counts.shape[0]} rows. "
+                    f"They must match (row i in counts = row i in feature_meta)."
+                )
+            feature_meta = feature_meta.copy()
 
-        # Check for and remove duplicate indices in counts_trans
-        if counts_trans.index.duplicated().any():
-            n_dups = counts_trans.index.duplicated().sum()
-            dup_features = counts_trans.index[counts_trans.index.duplicated()].unique().tolist()
+            # Ensure at least one feature identifier column exists
+            feature_id_cols = ['feature_name', 'feature', 'gene_name', 'gene', 'feature_id']
+            has_feature_col = any(col in feature_meta.columns for col in feature_id_cols)
+
+            if not has_feature_col:
+                # If DataFrame with string index, try to extract from there
+                if isinstance(counts, pd.DataFrame) and not pd.api.types.is_integer_dtype(counts.index):
+                    print(f"[INFO] feature_meta has no feature identifier columns - adding 'feature_name' from counts.index")
+                    feature_meta['feature_name'] = counts.index.tolist()
+                    feature_meta['feature'] = counts.index.tolist()
+                else:
+                    warnings.warn(
+                        "feature_meta has no feature identifier columns (feature_name, feature, gene_name, gene, feature_id). "
+                        "Plotting by feature name will not work.",
+                        UserWarning
+                    )
+
+            feature_meta.index = range(len(feature_meta))  # Reset to numeric
+
+        # Build list of features to keep
+        features_to_keep = []
+
+        for i in range(len(feature_meta)):
+            # Skip cis feature
+            if i == cis_feature_idx:
+                continue
+
+            # Check for zero std
+            if isinstance(counts, pd.DataFrame):
+                feature_std = counts.iloc[i].std()
+            else:
+                # Array or sparse matrix
+                if hasattr(counts, 'toarray'):
+                    feature_std = np.std(counts[i, :].toarray())
+                else:
+                    feature_std = np.std(counts[i, :])
+
+            if feature_std == 0:
+                continue  # Skip zero-std features
+
+            features_to_keep.append(i)
+
+        if len(features_to_keep) == 0:
+            raise ValueError(f"No features left in '{modality_name}' after filtering!")
+
+        # Report what was filtered
+        n_total = len(feature_meta)
+        n_cis = 1 if cis_feature_idx is not None else 0
+        n_zero_std = n_total - len(features_to_keep) - n_cis
+
+        if cis_feature_idx is not None:
+            print(f"[INFO] Creating '{modality_name}' modality: excluding cis feature '{cis_feature}' (row {cis_feature_idx})")
+        if n_zero_std > 0:
+            print(f"[INFO] Filtered {n_zero_std} feature(s) with zero standard deviation")
+        print(f"[INFO] {modality_name} modality: {len(features_to_keep)} features (from {n_total} total)")
+
+        # Filter counts and metadata
+        counts_trans, mod_feature_meta = self._filter_features(counts, feature_meta, features_to_keep)
+
+        # Extract cell names from counts or meta
+        if isinstance(counts, pd.DataFrame):
+            cell_names = counts.columns.tolist()
+        elif meta is not None and 'cell' in meta.columns:
+            if len(meta) != counts.shape[1]:
+                raise ValueError(
+                    f"Cell count mismatch: meta has {len(meta)} cells but counts has {counts.shape[1]} cells"
+                )
+            cell_names = meta['cell'].tolist()
+        else:
             warnings.warn(
-                f"[WARNING] counts has {n_dups} duplicate feature(s). "
-                f"Keeping first occurrence for each duplicate. "
-                f"Duplicates: {dup_features[:10]}",
+                f"Creating '{modality_name}' modality without cell_names. Modality will not be subsetted to match filtered cells.",
                 UserWarning
             )
-            # Remove duplicates, keeping first occurrence
-            counts_trans = counts_trans[~counts_trans.index.duplicated(keep='first')]
-
-        # Filter features with zero standard deviation across ALL cells
-        feature_stds = counts_trans.std(axis=1)
-        zero_std_mask = feature_stds == 0
-        num_zero_std = zero_std_mask.sum()
-
-        if num_zero_std > 0:
-            print(f"[INFO] Filtering {num_zero_std} feature(s) with zero standard deviation across all cells")
-            counts_trans = counts_trans.loc[~zero_std_mask]
-
-        if len(counts_trans) == 0:
-            raise ValueError(f"No features left in '{modality_name}' after filtering features with zero standard deviation!")
-
-        # Create or use provided feature metadata
-        if feature_meta is None:
-            mod_feature_meta = pd.DataFrame({
-                'feature': counts_trans.index.tolist()
-            }, index=counts_trans.index)
-        else:
-            # Check for duplicate indices in feature_meta
-            if feature_meta.index.duplicated().any():
-                n_dups = feature_meta.index.duplicated().sum()
-                dup_features = feature_meta.index[feature_meta.index.duplicated()].unique().tolist()
-                warnings.warn(
-                    f"[WARNING] feature_meta has {n_dups} duplicate feature(s). "
-                    f"Keeping first occurrence for each duplicate. "
-                    f"Duplicates: {dup_features[:10]}",
-                    UserWarning
-                )
-                # Remove duplicates, keeping first occurrence
-                feature_meta = feature_meta[~feature_meta.index.duplicated(keep='first')]
-
-            # Use provided metadata, but subset to remaining features
-            # Use reindex instead of loc to guarantee exact match (no duplicates after deduplication)
-            mod_feature_meta = feature_meta.reindex(counts_trans.index).copy()
-
-            # Check for any missing features in feature_meta
-            if mod_feature_meta.isnull().any().any():
-                missing_features = counts_trans.index[mod_feature_meta.isnull().any(axis=1)]
-                warnings.warn(
-                    f"[WARNING] {len(missing_features)} feature(s) in counts not found in feature_meta. "
-                    f"Creating minimal metadata for these features. First few: {missing_features[:5].tolist()}",
-                    UserWarning
-                )
-                # Fill missing features with minimal metadata
-                for feature in missing_features:
-                    mod_feature_meta.loc[feature, 'feature'] = feature
+            cell_names = None
 
         self.modalities[modality_name] = Modality(
             name=modality_name,
             counts=counts_trans,
             feature_meta=mod_feature_meta,
+            cell_names=cell_names,
             distribution='negbinom',
             cells_axis=1
         )
@@ -683,7 +890,9 @@ class bayesDREAM(
         self,
         counts,
         cis_gene: Optional[str] = None,
-        gene_meta: Optional[pd.DataFrame] = None
+        cis_gene_idx: Optional[int] = None,
+        gene_meta: Optional[pd.DataFrame] = None,
+        meta: Optional[pd.DataFrame] = None
     ):
         """
         Create 'gene' modality from gene counts (excluding cis gene if specified).
@@ -694,91 +903,132 @@ class bayesDREAM(
             Gene counts (genes × cells)
         cis_gene : str, optional
             If provided, this gene will be excluded from the gene modality
+        cis_gene_idx : int, optional
+            Numeric row index of cis gene (for exclusion when counts has numeric index)
         gene_meta : pd.DataFrame, optional
             Gene metadata. If None, creates minimal metadata from counts.index
+        meta : pd.DataFrame, optional
+            Cell metadata with 'cell' column. Used to get cell names if counts is not a DataFrame.
         """
         if 'gene' in self.modalities:
             warnings.warn("Gene modality already exists. Overwriting.")
 
-        # Convert to DataFrame if needed
-        if not isinstance(counts, pd.DataFrame):
-            counts = self._counts_to_dataframe(
-                counts,
-                feature_meta=gene_meta,
-                cell_names=self.meta['cell'].tolist() if hasattr(self, 'meta') and 'cell' in self.meta.columns else None
-            )
-
-        # Exclude cis gene from gene modality (trans genes only)
-        if cis_gene is not None and cis_gene in counts.index:
-            print(f"[INFO] Creating 'gene' modality with trans genes (excluding '{cis_gene}')")
-            counts_trans = counts.drop(index=cis_gene)
+        # Prepare gene metadata
+        if gene_meta is None:
+            # Auto-create from DataFrame index if available, else require it for arrays
+            if isinstance(counts, pd.DataFrame):
+                # Check if DataFrame has meaningful gene names as index
+                if pd.api.types.is_integer_dtype(counts.index):
+                    # Numeric index - no gene names available
+                    raise ValueError(
+                        "counts has numeric index but no gene_meta provided. "
+                        "Either:\n"
+                        "  1. Provide gene_meta with gene names/IDs, OR\n"
+                        "  2. Set gene names as counts.index before initialization"
+                    )
+                else:
+                    # String-based index - extract gene names
+                    print(f"[INFO] No gene_meta provided - creating from counts.index")
+                    gene_names = counts.index.tolist()
+                    gene_meta = pd.DataFrame({
+                        'gene_name': gene_names,
+                        'gene': gene_names  # Also store in 'gene' column for compatibility
+                    }, index=range(len(gene_names)))
+            else:
+                # Array or sparse matrix - gene_meta is REQUIRED
+                raise ValueError(
+                    "When counts is not a DataFrame, gene_meta must be provided. "
+                    "gene_meta should contain gene names/IDs to enable plotting and analysis."
+                )
         else:
-            counts_trans = counts
+            # gene_meta provided - ensure it has numeric index and required columns
+            if len(gene_meta) != counts.shape[0]:
+                raise ValueError(
+                    f"gene_meta has {len(gene_meta)} rows but counts has {counts.shape[0]} rows. "
+                    f"They must match (row i in counts = row i in gene_meta)."
+                )
+            gene_meta = gene_meta.copy()
 
-        # Check for and remove duplicate indices in counts_trans
-        if counts_trans.index.duplicated().any():
-            n_dups = counts_trans.index.duplicated().sum()
-            dup_genes = counts_trans.index[counts_trans.index.duplicated()].unique().tolist()
+            # Ensure at least one gene identifier column exists
+            gene_id_cols = ['gene_name', 'gene', 'gene_id', 'ens_id']
+            has_gene_col = any(col in gene_meta.columns for col in gene_id_cols)
+
+            if not has_gene_col:
+                # If DataFrame with string index, try to extract from there
+                if isinstance(counts, pd.DataFrame) and not pd.api.types.is_integer_dtype(counts.index):
+                    print(f"[INFO] gene_meta has no gene identifier columns - adding 'gene_name' from counts.index")
+                    gene_meta['gene_name'] = counts.index.tolist()
+                    gene_meta['gene'] = counts.index.tolist()
+                else:
+                    warnings.warn(
+                        "gene_meta has no gene identifier columns (gene_name, gene, gene_id, ens_id). "
+                        "Plotting by gene name will not work.",
+                        UserWarning
+                    )
+
+            gene_meta.index = range(len(gene_meta))  # Reset to numeric
+
+        # Build list of features to keep
+        features_to_keep = []
+
+        for i in range(len(gene_meta)):
+            # Skip cis gene
+            if i == cis_gene_idx:
+                continue
+
+            # Check for zero std
+            if isinstance(counts, pd.DataFrame):
+                gene_std = counts.iloc[i].std()
+            else:
+                # Array or sparse matrix
+                if hasattr(counts, 'toarray'):
+                    gene_std = np.std(counts[i, :].toarray())
+                else:
+                    gene_std = np.std(counts[i, :])
+
+            if gene_std == 0:
+                continue  # Skip zero-std genes
+
+            features_to_keep.append(i)
+
+        if len(features_to_keep) == 0:
+            raise ValueError("No genes left after filtering!")
+
+        # Report what was filtered
+        n_total = len(gene_meta)
+        n_cis = 1 if cis_gene_idx is not None else 0
+        n_zero_std = n_total - len(features_to_keep) - n_cis
+
+        if cis_gene_idx is not None:
+            print(f"[INFO] Creating 'gene' modality: excluding cis gene '{cis_gene}' (row {cis_gene_idx})")
+        if n_zero_std > 0:
+            print(f"[INFO] Filtered {n_zero_std} gene(s) with zero standard deviation")
+        print(f"[INFO] Gene modality: {len(features_to_keep)} features (from {n_total} total)")
+
+        # Filter counts and metadata
+        counts_trans, gene_feature_meta = self._filter_features(counts, gene_meta, features_to_keep)
+
+        # Extract cell names from counts or meta
+        if isinstance(counts, pd.DataFrame):
+            cell_names = counts.columns.tolist()
+        elif meta is not None and 'cell' in meta.columns:
+            if len(meta) != counts.shape[1]:
+                raise ValueError(
+                    f"Cell count mismatch: meta has {len(meta)} cells but counts has {counts.shape[1]} cells"
+                )
+            cell_names = meta['cell'].tolist()
+        else:
             warnings.warn(
-                f"[WARNING] counts has {n_dups} duplicate gene(s). "
-                f"Keeping first occurrence for each duplicate. "
-                f"Duplicates: {dup_genes[:10]}",
+                "Creating 'gene' modality without cell_names. Modality will not be subsetted to match filtered cells.",
                 UserWarning
             )
-            # Remove duplicates, keeping first occurrence
-            counts_trans = counts_trans[~counts_trans.index.duplicated(keep='first')]
-
-        # Filter genes with zero standard deviation across ALL cells
-        gene_stds = counts_trans.std(axis=1)
-        zero_std_mask = gene_stds == 0
-        num_zero_std = zero_std_mask.sum()
-
-        if num_zero_std > 0:
-            print(f"[INFO] Filtering {num_zero_std} gene(s) with zero standard deviation across all cells")
-            counts_trans = counts_trans.loc[~zero_std_mask]
-
-        if len(counts_trans) == 0:
-            raise ValueError("No genes left after filtering genes with zero standard deviation!")
-
-        # Create or use provided gene metadata
-        if gene_meta is None:
-            gene_feature_meta = pd.DataFrame({
-                'gene': counts_trans.index.tolist()
-            }, index=counts_trans.index)
-        else:
-            # Check for duplicate indices in gene_meta
-            if gene_meta.index.duplicated().any():
-                n_dups = gene_meta.index.duplicated().sum()
-                dup_genes = gene_meta.index[gene_meta.index.duplicated()].unique().tolist()
-                warnings.warn(
-                    f"[WARNING] gene_meta has {n_dups} duplicate gene(s). "
-                    f"Keeping first occurrence for each duplicate. "
-                    f"Duplicates: {dup_genes[:10]}",
-                    UserWarning
-                )
-                # Remove duplicates, keeping first occurrence
-                gene_meta = gene_meta[~gene_meta.index.duplicated(keep='first')]
-
-            # Use provided gene_meta, but subset to remaining genes
-            # Use reindex instead of loc to guarantee exact match (no duplicates after deduplication)
-            gene_feature_meta = gene_meta.reindex(counts_trans.index).copy()
-
-            # Check for any missing genes in gene_meta
-            if gene_feature_meta.isnull().any().any():
-                missing_genes = counts_trans.index[gene_feature_meta.isnull().any(axis=1)]
-                warnings.warn(
-                    f"[WARNING] {len(missing_genes)} gene(s) in counts not found in gene_meta. "
-                    f"Creating minimal metadata for these genes. First few: {missing_genes[:5].tolist()}",
-                    UserWarning
-                )
-                # Fill missing genes with minimal metadata
-                for gene in missing_genes:
-                    gene_feature_meta.loc[gene, 'gene'] = gene
+            cell_names = None
 
         self.modalities['gene'] = Modality(
             name='gene',
             counts=counts_trans,
             feature_meta=gene_feature_meta,
+            cell_names=cell_names,
             distribution='negbinom',
             cells_axis=1
         )

@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import torch
 from typing import Literal, Optional, Union, Dict, Any
+from scipy import sparse
 
 
 class Modality:
@@ -85,10 +86,15 @@ class Modality:
         self.distribution = distribution
         self.cells_axis = cells_axis
 
-        # Convert DataFrame to array if needed
+        # Handle different count input formats
+        # Check if counts is sparse matrix
+        self.is_sparse = sparse.issparse(counts)
+
         if isinstance(counts, pd.DataFrame):
+            # DataFrame: store both values and DataFrame
             self.counts = counts.values
             self.count_df = counts
+            self.is_sparse = False  # DataFrames are dense
             # Feature names from index or columns depending on orientation
             if cells_axis == 1:
                 self.feature_names = counts.index.tolist()
@@ -96,15 +102,30 @@ class Modality:
             else:
                 self.feature_names = counts.columns.tolist()
                 self.cell_names = counts.index.tolist()
+        elif self.is_sparse:
+            # Sparse matrix: keep sparse, don't densify!
+            self.counts = counts
+            self.count_df = None
+            self.feature_names = feature_names if feature_names is not None else None
+            self.cell_names = cell_names if cell_names is not None else None
+            print(f"[SPARSE] Modality '{name}': Keeping counts as sparse matrix (shape: {counts.shape}, sparsity: {1 - counts.nnz / (counts.shape[0] * counts.shape[1]):.2%} zeros)")
         else:
+            # Dense array: convert to numpy array
             self.counts = np.asarray(counts)
             self.count_df = None
             self.feature_names = feature_names if feature_names is not None else None
-            # Use provided cell_names if available, otherwise None
             self.cell_names = cell_names if cell_names is not None else None
 
         self.feature_meta = feature_meta.copy()
-        self.denominator = np.asarray(denominator) if denominator is not None else None
+
+        # Handle denominator (can also be sparse)
+        if denominator is not None:
+            if sparse.issparse(denominator):
+                self.denominator = denominator  # Keep sparse
+            else:
+                self.denominator = np.asarray(denominator)
+        else:
+            self.denominator = None
 
         # Exon skipping specific storage
         self.inc1 = np.asarray(inc1) if inc1 is not None else None
@@ -134,15 +155,19 @@ class Modality:
 
     def _validate(self):
         """Validate data shapes and requirements."""
+        # Get ndim and shape (sparse matrices have these attributes too)
+        counts_ndim = self.counts.ndim if hasattr(self.counts, 'ndim') else len(self.counts.shape)
+        counts_shape = self.counts.shape
+
         if self.distribution in ['negbinom', 'normal', 'binomial', 'studentt']:
-            if self.counts.ndim != 2:
-                raise ValueError(f"{self.distribution} modality requires 2D counts, got shape {self.counts.shape}")
-            n_features = self.counts.shape[1 - self.cells_axis]
+            if counts_ndim != 2:
+                raise ValueError(f"{self.distribution} modality requires 2D counts, got shape {counts_shape}")
+            n_features = counts_shape[1 - self.cells_axis]
 
         elif self.distribution == 'multinomial':
-            if self.counts.ndim != 3:
-                raise ValueError(f"multinomial modality requires 3D counts (features, cells, categories), got shape {self.counts.shape}")
-            n_features = self.counts.shape[0]
+            if counts_ndim != 3:
+                raise ValueError(f"multinomial modality requires 3D counts (features, cells, categories), got shape {counts_shape}")
+            n_features = counts_shape[0]
         
         if self.feature_names is not None:
             if len(self.feature_names) != n_features:
@@ -188,8 +213,13 @@ class Modality:
         return dims
 
     def to_tensor(self, device: torch.device = torch.device('cpu')) -> torch.Tensor:
-        """Convert counts to torch tensor."""
-        return torch.tensor(self.counts, dtype=torch.float32, device=device)
+        """Convert counts to torch tensor. Densifies if sparse."""
+        if self.is_sparse:
+            # Convert sparse to dense, then to tensor
+            counts_dense = self.counts.toarray()
+            return torch.tensor(counts_dense, dtype=torch.float32, device=device)
+        else:
+            return torch.tensor(self.counts, dtype=torch.float32, device=device)
 
     def get_feature_subset(self, feature_indices: Union[list, np.ndarray]) -> 'Modality':
         """
@@ -212,9 +242,10 @@ class Modality:
                     raise ValueError("Cannot subset by name: feature_names not available")
                 feature_indices = [self.feature_names.index(n) for n in feature_indices]
 
-        # Subset counts
+        # Subset counts (maintain sparsity if counts is sparse)
         if self.distribution in ['negbinom', 'normal', 'binomial', 'studentt']:
             if self.cells_axis == 1:
+                # Sparse-aware indexing
                 new_counts = self.counts[feature_indices, :]
                 new_denom = self.denominator[feature_indices, :] if self.denominator is not None else None
                 new_inc1 = self.inc1[feature_indices, :] if self.inc1 is not None else None
@@ -227,7 +258,7 @@ class Modality:
                 new_inc2 = self.inc2[:, feature_indices] if self.inc2 is not None else None
                 new_skip = self.skip[:, feature_indices] if self.skip is not None else None
         else:
-            # multinomial: features on axis 0
+            # multinomial: features on axis 0 (not supported as sparse currently)
             new_counts = self.counts[feature_indices, :, :]
             new_denom = None
             new_inc1 = None
@@ -275,9 +306,10 @@ class Modality:
                     raise ValueError("Cannot subset by name: cell_names not available")
                 cell_indices = [self.cell_names.index(n) for n in cell_indices]
 
-        # Subset counts
+        # Subset counts (maintain sparsity if counts is sparse)
         if self.distribution in ['negbinom', 'normal', 'binomial', 'studentt']:
             if self.cells_axis == 1:
+                # Sparse-aware indexing
                 new_counts = self.counts[:, cell_indices]
                 new_denom = self.denominator[:, cell_indices] if self.denominator is not None else None
                 new_inc1 = self.inc1[:, cell_indices] if self.inc1 is not None else None
@@ -290,7 +322,7 @@ class Modality:
                 new_inc2 = self.inc2[cell_indices, :] if self.inc2 is not None else None
                 new_skip = self.skip[cell_indices, :] if self.skip is not None else None
         else:
-            # multinomial: cells on axis 1
+            # multinomial: cells on axis 1 (not supported as sparse currently)
             new_counts = self.counts[:, cell_indices, :]
             new_denom = None
             new_inc1 = None
