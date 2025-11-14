@@ -583,11 +583,16 @@ class TechnicalFitter:
         # ---------------------------
         if counts_ntc_array.ndim == 2:
             feature_sums_ntc = counts_ntc_array.sum(axis=1 if modality.cells_axis == 1 else 0)
+            # CRITICAL: Sparse matrices return numpy.matrix of shape (n, 1) from sum()
+            # This must be flattened to 1D to avoid broadcasting issues with masks
+            from scipy import sparse
+            if sparse.issparse(counts_ntc_array):
+                feature_sums_ntc = np.asarray(feature_sums_ntc).flatten()
         elif counts_ntc_array.ndim == 3:
             feature_sums_ntc = counts_ntc_array.sum(axis=(1, 2))
         else:
             raise ValueError(f"Unexpected number of dimensions: {counts_ntc_array.ndim}")
-    
+
         zero_count_mask = feature_sums_ntc == 0
         zero_std_mask = np.zeros(len(feature_sums_ntc), dtype=bool)
     
