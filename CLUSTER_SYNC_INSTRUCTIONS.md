@@ -6,7 +6,8 @@ Your cluster code is outdated and missing critical fixes for sparse matrix handl
 
 1. **IndexError**: Sparse matrices can't use boolean indexing like `sparse[boolean_mask, :]`
 2. **AttributeError**: Sparse matrices don't have `.std()` method
-3. **Wrong feature counts**: 48 million features excluded instead of expected ~800
+3. **ValueError**: negative dimensions in scipy sparse indexing
+4. **Wrong feature counts**: 48 million features excluded instead of expected ~800
 
 ## Files That Need to Be Synced
 
@@ -16,6 +17,7 @@ The following files have been fixed locally and need to be copied to the cluster
 **Fixes**:
 - Lines 489-492: Convert numpy.matrix denominator to numpy.ndarray
 - Lines 531-538: Convert numpy.matrix counts to numpy.ndarray
+- Lines 586-590: **CRITICAL** Flatten sparse matrix sum results to avoid broadcasting bugs
 - Lines 732-745: Handle sparse matrices for `.std()` calculation
 - Lines 809-837: Use integer indices (not boolean masks) for sparse matrix subsetting
 
