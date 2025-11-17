@@ -599,7 +599,6 @@ class TechnicalFitter:
 
         if use_all_cells:
             # Use all cells in the dataset
-            import warnings
             warnings.warn(
                 "[WARNING] use_all_cells=True: Fitting technical effects on ALL cells. "
                 "Only use this mode if technical effects are independent of perturbation effects. "
