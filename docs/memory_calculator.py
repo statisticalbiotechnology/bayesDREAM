@@ -24,6 +24,7 @@ def estimate_memory(
     ntc_fraction: float = 0.4,
     function_type: str = 'additive_hill',
     nsamples: int = 1000,
+    use_all_cells: bool = False,
     verbose: bool = True
 ):
     """
@@ -46,11 +47,15 @@ def estimate_memory(
     distribution : str
         Distribution type: 'negbinom', 'multinomial', 'binomial', 'normal', 'studentt'
     ntc_fraction : float
-        Fraction of cells that are non-targeting controls
+        Fraction of cells that are non-targeting controls (ignored if use_all_cells=True)
     function_type : str
         Trans function: 'single_hill', 'additive_hill', 'polynomial'
     nsamples : int
         Number of posterior samples
+    use_all_cells : bool, default False
+        If True, fit_technical uses ALL cells instead of NTC-only (high MOI mode).
+        When True, ignores ntc_fraction and uses 100% of cells for technical fitting.
+        Increases fit_technical memory by ~2.5× but saves compute (only run once per dataset).
     verbose : bool
         Print detailed breakdown
 
@@ -74,10 +79,14 @@ def estimate_memory(
     if n_guides is None:
         n_guides = max(100, n_features // 20)
 
+    # Override ntc_fraction if use_all_cells mode
+    if use_all_cells:
+        ntc_fraction = 1.0
+
     # Validate inputs
     if not 0 <= sparsity <= 1:
         raise ValueError("sparsity must be between 0 and 1")
-    if not 0 < ntc_fraction < 1:
+    if not 0 < ntc_fraction <= 1:
         raise ValueError("ntc_fraction must be between 0 and 1")
 
     # Calculate derived quantities
@@ -225,7 +234,12 @@ def estimate_memory(
         print(f"\nDataset Characteristics:")
         print(f"  Features (T):           {n_features:,}")
         print(f"  Cells (N):              {n_cells:,}")
-        print(f"  NTC cells:              {n_ntc:,} ({ntc_fraction*100:.0f}%)")
+        if use_all_cells:
+            print(f"  fit_technical mode:     ALL CELLS (high MOI mode)")
+            print(f"  Cells for technical:    {n_ntc:,} (100%)")
+        else:
+            print(f"  fit_technical mode:     NTC-only (standard)")
+            print(f"  NTC cells:              {n_ntc:,} ({ntc_fraction*100:.0f}%)")
         print(f"  Technical groups (C):   {n_groups}")
         print(f"  Guides (G):             {n_guides:,}")
         if distribution == 'multinomial':
@@ -324,6 +338,9 @@ def interactive_calculator():
         func_type = input("Trans function (single_hill/additive_hill/polynomial) [additive_hill]: ").strip()
         func_type = func_type if func_type else "additive_hill"
 
+        use_all_str = input("Use all cells for fit_technical (high MOI mode)? (y/n) [n]: ").strip().lower()
+        use_all_cells = use_all_str in ('y', 'yes')
+
         print("\nCalculating...\n")
 
         estimate_memory(
@@ -335,6 +352,7 @@ def interactive_calculator():
             sparsity=sparsity,
             distribution=dist,
             function_type=func_type,
+            use_all_cells=use_all_cells,
             verbose=True
         )
 
@@ -397,6 +415,19 @@ if __name__ == "__main__":
             n_categories=10,
             sparsity=0.70,
             distribution='multinomial',
+            verbose=True
+        )
+
+        print("\n" * 2)
+        print("Example 5: High MOI mode (use_all_cells=True)")
+        print("-" * 70)
+        estimate_memory(
+            n_features=30000,
+            n_cells=50000,
+            n_groups=2,
+            n_guides=1000,
+            sparsity=0.85,
+            use_all_cells=True,  # Compare fit_technical to Example 3
             verbose=True
         )
     else:

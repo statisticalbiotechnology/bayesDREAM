@@ -33,11 +33,48 @@ To estimate memory requirements, you'll need:
 
 ---
 
-## 1. fit_technical (NTC-only fitting)
+## 1. fit_technical
+
+### Fitting Modes
+
+bayesDREAM offers two modes for technical fitting:
+
+#### Standard Mode (use_all_cells=False, default)
+Fits only on **NTC cells** (~20-50% of total cells). This is the recommended approach for most experiments.
+
+```python
+model.fit_technical(use_all_cells=False)  # Default
+```
+
+**When to use**:
+- Standard low MOI experiments
+- Technical groups correlate with perturbation effects (e.g., CRISPRi vs CRISPRa cell lines)
+- Separate technical correction per cis gene
+
+#### High MOI Mode (use_all_cells=True)
+Fits on **ALL cells** (100% of dataset). Use for high MOI experiments where technical effects are batch/lane specific.
+
+```python
+model.fit_technical(use_all_cells=True)  # High MOI mode
+```
+
+**When to use**:
+- High MOI experiments (multiple guides per cell)
+- Technical variation is batch/lane specific, independent of perturbations
+- Want to run fit_technical once per dataset (not per cis gene)
+
+**When NOT to use**:
+- Technical groups correlate with cis gene expression
+- CRISPRi vs CRISPRa as technical groups
+- Low MOI with clear NTC vs perturbed distinction
+
+**Memory impact**: Data component increases by ~2.5× (all cells vs 40% NTC), but total memory increase is more modest (~15-20%) due to fixed overheads.
 
 ### Data Memory
 
-Fits only on **NTC cells** (~20-50% of total cells).
+**N_ntc** = number of cells used for fitting:
+- **Standard mode**: N_ntc ≈ 0.4 × N (40% NTC cells, typical)
+- **High MOI mode (use_all_cells=True)**: N_ntc = N (100% of cells)
 
 | Component | Size Formula | Notes |
 |-----------|--------------|-------|
@@ -56,6 +93,8 @@ Data_GB = (T × N_ntc × 4) / 1e9
 ```
 Data_GB = (T × N_ntc × 4 × 0.15) / 1e9
 ```
+
+**High MOI mode**: Data component increases by 2.5× (N_ntc = N instead of 0.4 × N), but total memory increase is ~15-20% due to fixed overheads (guide, gradients, etc.).
 
 ### Guide Memory
 
@@ -374,6 +413,34 @@ sparsity = 90%
 - **Total: 32-50 GB RAM, 28-40 GB VRAM** ✓
 
 **Recommended**: 128 GB RAM, 80 GB VRAM (e.g., A100 80GB)
+
+---
+
+### Example 5: High MOI Mode (use_all_cells=True)
+```
+T = 30,000 genes
+N = 50,000 cells
+C = 2 technical groups
+G = 1,000 guides
+sparsity = 85%
+use_all_cells = True  # Compare to Example 3
+```
+
+**fit_technical** (HIGH MOI MODE):
+- N_ntc = 50,000 cells (100% of cells, not just NTC)
+- Data (sparse) = 30,000 × 50,000 × 4 × 0.15 / 1e9 = **0.9 GB** (vs 0.36 GB in Example 3, 2.5× increase)
+- Fixed overhead + guide + gradients ≈ 4.8 GB (same as Example 3)
+- **Total: 5.7 GB RAM, 7.1 GB VRAM** (vs 4.9/6.4 GB in Example 3, ~15% increase)
+
+**fit_cis**:
+- Same as Example 3: **5-8 GB RAM, 5-8 GB VRAM** ✓
+
+**fit_trans**:
+- Same as Example 3: **16-28 GB RAM, 14-24 GB VRAM** ✓
+
+**Recommended**: 32 GB RAM, 16 GB VRAM (same as Example 3)
+
+**Key takeaway**: Using `use_all_cells=True` increases fit_technical data memory by 2.5×, but total memory increase is modest (~15%) due to fixed overheads. The computational benefit is significant: fit_technical only needs to run once per dataset instead of once per cis gene.
 
 ---
 
