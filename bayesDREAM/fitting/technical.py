@@ -454,11 +454,34 @@ class TechnicalFitter:
         distribution: str = None,
         denominator: np.ndarray = None,
         modality_name: str = None,
+        use_all_cells: bool = False,
         **kwargs
     ):
         """
-        Prefit cell-line technical effects (NTC-only) for a given modality.
+        Prefit cell-line technical effects for a given modality.
         Stores both multiplicative ('alpha_y_mult') and additive/logit ('alpha_y_add') effects.
+
+        Parameters
+        ----------
+        use_all_cells : bool, default False
+            If False (default): Fit using NTC cells only (standard approach).
+            If True: Fit using all cells in the dataset.
+
+            **When to use use_all_cells=True:**
+            - High MOI experiments where technical effects are batch/lane specific
+            - Technical variation is independent of perturbation effects
+            - Saves compute: fit_technical only needs to run once per dataset (not per cis gene)
+
+            **When NOT to use use_all_cells=True (use default NTC-only):**
+            - Technical groups correlate with cis gene expression
+              Example: CRISPRi vs CRISPRa cell lines targeting the cis gene
+            - Low MOI experiments with clear NTC vs perturbed distinction
+            - When technical correction should be based solely on unperturbed cells
+
+        Warnings
+        --------
+        Using use_all_cells=True when technical effects correlate with cis expression
+        may lead to over-correction and spurious trans effects.
         """
 
         # ---------------------------
@@ -568,24 +591,45 @@ class TechnicalFitter:
         print("Running prefit_cellline...")
     
         # ---------------------------
-        # Subset to NTC cells
+        # Subset to NTC cells (or use all cells if requested)
         # ---------------------------
         modality_cell_set = set(modality_cells)
         meta_subset = self.model.meta[self.model.meta['cell'].isin(modality_cell_set)].copy()
-        meta_ntc = meta_subset[meta_subset["target"] == "ntc"].copy()
-    
-        ntc_cell_list = meta_ntc["cell"].tolist()
-        ntc_indices = [i for i, c in enumerate(modality_cells) if c in ntc_cell_list]
-    
-        # Subset counts -> NTC
-        if counts_to_fit.ndim == 2:
-            counts_ntc_array = counts_to_fit[:, ntc_indices] if modality.cells_axis == 1 else counts_to_fit[ntc_indices, :]
-        elif counts_to_fit.ndim == 3:
-            counts_ntc_array = counts_to_fit[:, ntc_indices, :]  # cells are axis 1 for 3D
+
+        if use_all_cells:
+            # Use all cells in the dataset
+            import warnings
+            warnings.warn(
+                "[WARNING] use_all_cells=True: Fitting technical effects on ALL cells. "
+                "Only use this mode if technical effects are independent of perturbation effects. "
+                "If technical groups (e.g., CRISPRi vs CRISPRa) correlate with cis gene expression, "
+                "use the default NTC-only mode to avoid over-correction.",
+                UserWarning
+            )
+            meta_ntc = meta_subset.copy()  # Use all cells
+            ntc_cell_list = meta_ntc["cell"].tolist()
+            ntc_indices = list(range(len(modality_cells)))  # All cell indices
+
+            # Subset counts -> ALL cells (no subsetting needed)
+            counts_ntc_array = counts_to_fit
+
+            print(f"[INFO] Modality '{modality_name}': {len(modality_cells)} total cells, using ALL cells for technical fit")
         else:
-            raise ValueError(f"Unexpected number of dimensions: {counts_to_fit.ndim}")
-    
-        print(f"[INFO] Modality '{modality_name}': {len(modality_cells)} total cells, {len(ntc_indices)} NTC cells")
+            # Standard NTC-only mode
+            meta_ntc = meta_subset[meta_subset["target"] == "ntc"].copy()
+
+            ntc_cell_list = meta_ntc["cell"].tolist()
+            ntc_indices = [i for i, c in enumerate(modality_cells) if c in ntc_cell_list]
+
+            # Subset counts -> NTC
+            if counts_to_fit.ndim == 2:
+                counts_ntc_array = counts_to_fit[:, ntc_indices] if modality.cells_axis == 1 else counts_to_fit[ntc_indices, :]
+            elif counts_to_fit.ndim == 3:
+                counts_ntc_array = counts_to_fit[:, ntc_indices, :]  # cells are axis 1 for 3D
+            else:
+                raise ValueError(f"Unexpected number of dimensions: {counts_to_fit.ndim}")
+
+            print(f"[INFO] Modality '{modality_name}': {len(modality_cells)} total cells, {len(ntc_indices)} NTC cells")
     
         # ---------------------------
         # Quality filters per feature
