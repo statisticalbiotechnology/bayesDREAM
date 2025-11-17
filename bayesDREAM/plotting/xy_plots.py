@@ -2359,13 +2359,16 @@ def plot_xy_data(
 
         # Special handling for multinomial - needs K subplots per feature
         if distribution == 'multinomial':
+            # Subset x_true if needed (multinomial path doesn't use _align_cells_to_modality)
+            x_true_plot = x_true[subset_mask] if subset_mask is not None else x_true
+
             return _plot_multinomial_multifeature(
                 model=model,
                 feature_indices=feature_indices,
                 feature_names=feature_names_resolved,
                 gene_name=feature,
                 modality=modality,
-                x_true=x_true,
+                x_true=x_true_plot,
                 window=window,
                 min_counts=min_counts,
                 show_correction=show_correction,

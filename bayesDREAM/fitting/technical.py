@@ -537,6 +537,15 @@ class TechnicalFitter:
             # Handle any other array-like objects that aren't standard numpy arrays
             counts_to_fit = np.asarray(counts_to_fit)
 
+        # CRITICAL: Convert COO sparse matrices to CSR for efficient row indexing
+        # COO matrices don't support indexing operations needed throughout this function
+        # CSR is optimal for row-based operations (subsetting, slicing, means)
+        from scipy import sparse
+        if sparse.issparse(counts_to_fit):
+            if sparse.isspmatrix_coo(counts_to_fit):
+                print(f"[INFO] Converting COO sparse matrix to CSR for efficient row indexing")
+                counts_to_fit = counts_to_fit.tocsr()
+
         print(f"[INFO] Fitting technical model for modality '{modality_name}' (distribution: {distribution})")
     
         # ---------------------------
@@ -853,6 +862,9 @@ class TechnicalFitter:
             else:
                 y_obs_ntc = counts_ntc_for_fit     # [N, T]
                 T_fit = counts_ntc_for_fit.shape[1]
+            # Convert sparse to dense for PyTorch tensor creation
+            if sparse.issparse(y_obs_ntc):
+                y_obs_ntc = y_obs_ntc.toarray()
         else:
             y_obs_ntc = counts_ntc_for_fit.transpose(1, 0, 2)  # [T, N, K/D] -> [N, T, K/D]
             T_fit = counts_ntc_for_fit.shape[0]
@@ -879,16 +891,35 @@ class TechnicalFitter:
         else:
             y_obs_ntc_for_priors = y_obs_ntc
 
-    
+
         # Size-factor use only for NB; otherwise ignore
         if distribution == 'negbinom' and sum_factor_col is not None:
             y_obs_ntc_factored = y_obs_ntc_for_priors / meta_ntc[sum_factor_col].values.reshape(-1, 1)
         else:
             y_obs_ntc_factored = y_obs_ntc_for_priors
 
+        # Helper function to extract rows by mask from sparse or dense matrix
+        # Maintains sparsity until the final computation
+        from scipy import sparse
+        def _extract_rows_sparse_safe(matrix, mask):
+            """Extract rows using mask, handling sparse matrices efficiently."""
+            if sparse.issparse(matrix):
+                # Convert boolean mask to integer indices for sparse compatibility
+                indices = np.where(mask)[0]
+                # COO matrices don't support indexing - convert to CSR first
+                if sparse.isspmatrix_coo(matrix):
+                    matrix = matrix.tocsr()
+                # Extract subset - stays sparse
+                subset = matrix[indices, :]
+                # Convert to dense only for the subset
+                return np.asarray(subset.toarray() if hasattr(subset, 'toarray') else subset)
+            else:
+                # Dense array: use boolean indexing directly
+                return matrix[mask, :]
+
         if distribution in ('normal', 'studentt'):
             baseline_mask = (groups_ntc == 0)
-            y_baseline = y_obs_ntc_factored[baseline_mask, :]
+            y_baseline = _extract_rows_sparse_safe(y_obs_ntc_factored, baseline_mask)
             sigma_hat = np.nanstd(y_baseline, axis=0) + epsilon
             sigma_hat = np.where(np.isfinite(sigma_hat), sigma_hat, 1.0)
             sigma_hat_tensor = torch.tensor(sigma_hat, dtype=torch.float32, device=self.model.device)
@@ -898,19 +929,25 @@ class TechnicalFitter:
         # ---- mu_x priors per distribution ----
         if distribution == 'negbinom':
             baseline_mask = (groups_ntc == 0)
-            mu_x_mean = np.mean(y_obs_ntc_factored[baseline_mask, :], axis=0)                 # [T_fit]
-            guide_means = np.array([np.mean(y_obs_ntc_factored[guides == g], axis=0) for g in np.unique(guides)])
+            y_baseline = _extract_rows_sparse_safe(y_obs_ntc_factored, baseline_mask)
+            mu_x_mean = np.mean(y_baseline, axis=0)  # [T_fit]
+
+            # Compute guide means efficiently
+            guide_means_list = []
+            for g in np.unique(guides):
+                g_mask = (guides == g)
+                y_guide = _extract_rows_sparse_safe(y_obs_ntc_factored, g_mask)
+                guide_means_list.append(np.mean(y_guide, axis=0))
+            guide_means = np.array(guide_means_list)
             mu_x_sd = np.std(guide_means, axis=0) + epsilon
             mu_x_mean = mu_x_mean + epsilon  # strictly positive for Gamma
-    
+
         elif distribution in ('normal', 'studentt'):
             baseline_mask = (groups_ntc == 0)
+            y_baseline = _extract_rows_sparse_safe(y_obs_ntc_factored, baseline_mask)
 
             # NaN-aware baseline mean
-            mu_x_mean = np.nanmean(
-                y_obs_ntc_factored[baseline_mask, :],
-                axis=0
-            )  # [T_fit]
+            mu_x_mean = np.nanmean(y_baseline, axis=0)  # [T_fit]
 
             # NaN-aware between-guide SD, skipping guides with no NTC cells
             gids = np.unique(guides)
@@ -920,7 +957,8 @@ class TechnicalFitter:
                 if not g_mask.any():
                     # No NTC cells for this guide -> skip it
                     continue
-                gm = np.nanmean(y_obs_ntc_factored[g_mask, :], axis=0)
+                y_guide = _extract_rows_sparse_safe(y_obs_ntc_factored, g_mask)
+                gm = np.nanmean(y_guide, axis=0)
                 guide_means_list.append(gm)
 
             if len(guide_means_list) > 0:
@@ -939,21 +977,38 @@ class TechnicalFitter:
             mu_x_mean = np.zeros((T_fit,), dtype=float)
             mu_x_sd   = np.ones((T_fit,), dtype=float)
     
-        # Tensors
+        # CRITICAL MEMORY OPTIMIZATION: Use torch.from_numpy() to avoid copies
+        # torch.tensor() creates a NEW copy, torch.from_numpy() shares memory with numpy array
+        # Then explicitly delete numpy arrays and move tensors to device
+        import gc
+
+        # Tensors (scalars and small arrays - copy is fine)
         beta_o_beta_tensor  = torch.tensor(beta_o_beta,  dtype=torch.float32, device=self.model.device)
         beta_o_alpha_tensor = torch.tensor(beta_o_alpha, dtype=torch.float32, device=self.model.device)
-    
-        mu_x_mean_tensor = torch.tensor(mu_x_mean, dtype=torch.float32, device=self.model.device)  # [T_fit]
-        mu_x_sd_tensor   = torch.tensor(mu_x_sd,   dtype=torch.float32, device=self.model.device)  # [T_fit]
-    
+        epsilon_tensor      = torch.tensor(epsilon, dtype=torch.float32, device=self.model.device)
+
+        # Large arrays: use from_numpy() to share memory, then move to device
+        mu_x_mean_tensor = torch.from_numpy(mu_x_mean.astype(np.float32)).to(self.model.device)  # [T_fit]
+        mu_x_sd_tensor   = torch.from_numpy(mu_x_sd.astype(np.float32)).to(self.model.device)    # [T_fit]
+        del mu_x_mean, mu_x_sd  # Free numpy arrays
+
         if sum_factor_col is not None and distribution == 'negbinom':
-            sum_factor_ntc_tensor = torch.tensor(meta_ntc[sum_factor_col].values, dtype=torch.float32, device=self.model.device)
+            sum_factor_np = meta_ntc[sum_factor_col].values.astype(np.float32)
+            sum_factor_ntc_tensor = torch.from_numpy(sum_factor_np).to(self.model.device)
+            del sum_factor_np
         else:
             sum_factor_ntc_tensor = torch.ones(N, dtype=torch.float32, device=self.model.device)
-    
-        groups_ntc_tensor   = torch.tensor(groups_ntc, dtype=torch.long, device=self.model.device)
-        y_obs_ntc_tensor    = torch.tensor(y_obs_ntc, dtype=torch.float32, device=self.model.device)
-        epsilon_tensor      = torch.tensor(epsilon, dtype=torch.float32, device=self.model.device)
+
+        groups_ntc_tensor = torch.from_numpy(groups_ntc.astype(np.int64)).to(self.model.device)
+        del groups_ntc
+
+        # CRITICAL: y_obs_ntc is the LARGEST array (2.5 GB)
+        # Ensure it's contiguous numpy array (required for from_numpy)
+        if not y_obs_ntc.flags['C_CONTIGUOUS']:
+            y_obs_ntc = np.ascontiguousarray(y_obs_ntc)
+        y_obs_ntc_tensor = torch.from_numpy(y_obs_ntc.astype(np.float32)).to(self.model.device)
+        del y_obs_ntc  # Free the 2.5 GB numpy array immediately
+        gc.collect()  # Force garbage collection
 
         # TODO: PERFORMANCE OPTIMIZATION
         # Pre-compute sums that are currently recomputed in every _model_technical call:
@@ -967,7 +1022,17 @@ class TechnicalFitter:
                 denom_for_tensor = denominator_ntc_for_fit.T   # [T_fit, N] -> [N, T_fit]
             else:
                 denom_for_tensor = denominator_ntc_for_fit     # [N, T_fit]
-            denominator_ntc_tensor = torch.tensor(denom_for_tensor, dtype=torch.float32, device=self.model.device)
+
+            # CRITICAL: Use from_numpy() to avoid copy (denominator can be 2.5 GB!)
+            # Handle sparse matrices first
+            from scipy import sparse
+            if sparse.issparse(denom_for_tensor):
+                denom_for_tensor = denom_for_tensor.toarray()
+            if not denom_for_tensor.flags['C_CONTIGUOUS']:
+                denom_for_tensor = np.ascontiguousarray(denom_for_tensor)
+            denominator_ntc_tensor = torch.from_numpy(denom_for_tensor.astype(np.float32)).to(self.model.device)
+            del denom_for_tensor  # Free numpy array immediately
+            gc.collect()
     
         # ---------------------------
         # Guide + init functions
@@ -1083,9 +1148,13 @@ class TechnicalFitter:
                     group_codes = meta_ntc["technical_group_code"].values
                     group_labels = np.array(sorted(set(group_codes) - {0}))
                     init_values = []
-                    baseline_mean = np.mean(y_obs_ntc_factored[group_codes == 0], axis=0) + 1e-8
+                    # Use helper to safely extract baseline group (handles sparse matrices)
+                    baseline_data = _extract_rows_sparse_safe(y_obs_ntc_factored, group_codes == 0)
+                    baseline_mean = np.mean(baseline_data, axis=0) + 1e-8
                     for g in group_labels:
-                        group_mean = np.mean(y_obs_ntc_factored[group_codes == g], axis=0) + 1e-8
+                        # Use helper for each group
+                        group_data = _extract_rows_sparse_safe(y_obs_ntc_factored, group_codes == g)
+                        group_mean = np.mean(group_data, axis=0) + 1e-8
                         init_values.append(np.log2(group_mean / baseline_mean))
                     init_arr = np.stack(init_values) if len(init_values) else np.zeros((0, T_local), dtype=np.float32)
                     return torch.tensor(init_arr, dtype=torch.float32, device=self.model.device)
@@ -1139,53 +1208,97 @@ class TechnicalFitter:
             return init_to_median(site)
         
         pyro.clear_param_store()
-        
+
         # ---------------------------
-        # Guide choice
+        # Guide choice with memory check
         # ---------------------------
         if distribution == 'multinomial':
             # Split guide: point-mass for Dirichlet baseline, Gaussian for the rest
             guide_cellline = AutoGuideList(self._model_technical)
-        
+
             # Pin the Dirichlet site with a learnable point; init uses our interior simplex
             guide_dirichlet = AutoDelta(
                 poutine.block(self._model_technical, expose=["probs_baseline_raw"]),
                 init_loc_fn=init_loc_fn,
             )
             guide_cellline.add(guide_dirichlet)
-        
+
             # Everything else stays as a stable Normal guide (uses your inits for alpha_logits_y, etc.)
             guide_rest = AutoNormal(
                 poutine.block(self._model_technical, hide=["probs_baseline_raw"]),
                 init_loc_fn=init_loc_fn,
             )
             guide_cellline.add(guide_rest)
-        
+
         elif distribution in ['binomial', 'normal', 'studentt']:
-            # Calmer guide for binomial
+            # Calmer guide for these distributions
             guide_cellline = AutoNormal(self._model_technical, init_loc_fn=init_loc_fn)
-        
+
         else:
-            # IAF for the rest
-            guide_cellline = AutoIAFNormal(self._model_technical, init_loc_fn=init_loc_fn)
-            # Initialize the guide by calling it once with the model
-            # This forces AutoIAFNormal to create its internal parameters
-            with torch.no_grad():
-                guide_cellline(
-                    N, T_fit, C,
-                    groups_ntc_tensor,
-                    y_obs_ntc_tensor,
-                    sum_factor_ntc_tensor,
-                    beta_o_alpha_tensor,
-                    beta_o_beta_tensor,
-                    mu_x_mean_tensor,
-                    mu_x_sd_tensor,
-                    epsilon_tensor,
-                    distribution,
-                    denominator_ntc_tensor,
-                    K, D,
-                )
-            guide_cellline.to(self.model.device)
+            # For negbinom and other distributions: check if IAF is feasible
+            # Estimate number of latent variables
+            if distribution == 'negbinom':
+                # log2_alpha_y: (C-1) × T_fit
+                # o_y: T_fit
+                # mu_ntc: T_fit
+                n_latent = (C - 1 + 2) * T_fit
+            else:
+                # Conservative estimate for unknown distributions
+                n_latent = C * T_fit
+
+            # IAF memory estimate (rough approximation):
+            # - Transformation matrices: n_latent × n_latent × 4 bytes (float32)
+            # - Hidden states: ~2× the matrix size
+            # - Safety margin: 1.5×
+            iaf_memory_gb = (n_latent ** 2 * 4 * 3 * 1.5) / 1e9
+
+            # Check available VRAM
+            use_iaf = False
+            if self.model.device.type == 'cuda':
+                try:
+                    # torch is already imported at module level
+                    total_memory_gb = torch.cuda.get_device_properties(self.model.device).total_memory / 1e9
+                    # Reserve 10 GB for data, gradients, and other operations
+                    available_for_guide_gb = total_memory_gb - 10.0
+
+                    if iaf_memory_gb < available_for_guide_gb:
+                        use_iaf = True
+                        print(f"[INFO] Using AutoIAFNormal guide (estimated {iaf_memory_gb:.1f} GB < {available_for_guide_gb:.1f} GB available)")
+                    else:
+                        print(f"[WARNING] AutoIAFNormal would require ~{iaf_memory_gb:.1f} GB VRAM (>{available_for_guide_gb:.1f} GB available)")
+                        print(f"[WARNING] Falling back to AutoNormal (mean-field approximation) for {n_latent} latent variables")
+                except Exception as e:
+                    print(f"[WARNING] Could not check VRAM ({e}), using AutoNormal for safety")
+            else:
+                # CPU: always use AutoNormal for large models
+                if n_latent > 5000:
+                    print(f"[INFO] Using AutoNormal for CPU fitting with {n_latent} latent variables")
+                else:
+                    use_iaf = True
+
+            if use_iaf:
+                guide_cellline = AutoIAFNormal(self._model_technical, init_loc_fn=init_loc_fn)
+                # Initialize the guide by calling it once with the model
+                with torch.no_grad():
+                    guide_cellline(
+                        N, T_fit, C,
+                        groups_ntc_tensor,
+                        y_obs_ntc_tensor,
+                        sum_factor_ntc_tensor,
+                        beta_o_alpha_tensor,
+                        beta_o_beta_tensor,
+                        mu_x_mean_tensor,
+                        mu_x_sd_tensor,
+                        epsilon_tensor,
+                        distribution,
+                        denominator_ntc_tensor,
+                        K, D,
+                        sigma_hat_tensor,
+                    )
+                guide_cellline.to(self.model.device)
+            else:
+                # Fallback to memory-efficient AutoNormal
+                guide_cellline = AutoNormal(self._model_technical, init_loc_fn=init_loc_fn)
         
         optimizer = pyro.optim.Adam({"lr": lr})
         svi = pyro.infer.SVI(self._model_technical, guide_cellline, optimizer, loss=pyro.infer.Trace_ELBO())
@@ -1267,8 +1380,18 @@ class TechnicalFitter:
         if self.model.device.type == "cuda":
             torch.cuda.empty_cache()
         import gc; gc.collect()
-    
-        keep_sites = kwargs.get("keep_sites", lambda name, site: site["value"].ndim <= 2 or name != "y_obs_ntc")
+
+        # CRITICAL MEMORY OPTIMIZATION: Exclude observation predictions from posterior
+        # These are enormous ([S, N, T]) and redundant since we already have the data
+        # Default filter excludes: y_obs_ntc, y_obs (for any distribution)
+        def default_keep_sites(name, site):
+            # Exclude all observation-level predictions (huge memory waste)
+            if name in ('y_obs_ntc', 'y_obs', 'obs'):
+                return False
+            # Keep all parameter posteriors (small: alpha, mu, phi, sigma, etc.)
+            return True
+
+        keep_sites = kwargs.get("keep_sites", default_keep_sites)
     
         if minibatch_size is not None:
             from collections import defaultdict
