@@ -241,22 +241,30 @@ The generator automatically selects optimal resources for Berzelius:
 
 | Node Type | Constraint | GPUs per Node | VRAM per GPU | RAM per GPU | Best For |
 |-----------|------------|---------------|--------------|-------------|----------|
-| **Fat** | `-C fat` | 4 | 10 GB | 128 GB | Standard fitting |
-| **Thin** | `-C thin` | 2 | 5 GB | 64 GB | Small datasets |
-| **CPU** | `--partition=berzelius-cpu` | 0 | 0 | 7.76 GB/core | Very large datasets, fit_cis |
+| **Fat** | `-C fat` | 8 | 10 GB | 128 GB | Standard fitting |
+| **Thin** | `-C thin` | 8 | 5 GB | 64 GB | Small datasets |
+| **CPU** | `--partition=berzelius-cpu` | 0 | 0 | 7.76 GB/core | Extremely large datasets, fit_cis |
+
+**Note:** Full node = 8 GPUs. The generator will use up to 8 GPUs before switching to CPU.
 
 #### Automatic Selection Logic
 
 The generator analyzes memory requirements and selects:
 
-**fit_technical:**
+**fit_technical and fit_trans** (same logic):
 ```
-If VRAM ≤ 10 GB and RAM ≤ 128 GB:
-    → 1 fat GPU ✓ (most cost-effective)
+If VRAM ≤ 5 GB and RAM ≤ 64 GB:
+    → 1 thin GPU ✓ (most efficient for small datasets)
+Elif VRAM ≤ 10 GB and RAM ≤ 128 GB:
+    → 1 fat GPU ✓ (most common case)
 Elif VRAM ≤ 20 GB and RAM ≤ 256 GB:
     → 2 fat GPUs
+Elif VRAM ≤ 40 GB and RAM ≤ 512 GB:
+    → 4 fat GPUs
+Elif VRAM ≤ 80 GB and RAM ≤ 1024 GB:
+    → 8 fat GPUs (full node)
 Else:
-    → CPU partition (dataset too large for GPU)
+    → CPU partition (dataset too large for 8 GPUs)
 ```
 
 **fit_cis:**
@@ -264,19 +272,7 @@ Else:
 Default: CPU partition (doesn't need GPU for most datasets)
 ```
 
-**fit_trans:**
-```
-If VRAM ≤ 10 GB and RAM ≤ 128 GB:
-    → 1 fat GPU ✓
-Elif VRAM ≤ 5 GB and RAM ≤ 64 GB:
-    → 1 thin GPU (saves resources)
-Elif VRAM ≤ 20 GB:
-    → 2 fat GPUs
-Else:
-    → CPU partition
-```
-
-**Goal:** Minimize GPU requests while ensuring jobs succeed.
+**Goal:** Use thin nodes for small datasets, scale up to full 8-GPU node before falling back to CPU.
 
 #### Manual Override
 
@@ -456,9 +452,16 @@ Auto-generated documentation includes:
 - Dataset characteristics
 - Memory and time estimates
 - Resource allocation rationale
+- **Complete Python code** that will be executed for each step
+- **Expected log output** with examples
 - Usage instructions
 - Monitoring commands
 - Troubleshooting guide
+
+**Key sections:**
+- **"What Will Be Run"**: Shows exact Python code for fit_technical, fit_cis, and fit_trans with all parameters
+- **"Log Output"**: Shows what you'll see in logs/tech_*.out, logs/cis_*.out, and logs/trans_*.out
+- Includes device selection (cuda/cpu), niters, nsamples, and all other parameters
 
 ---
 

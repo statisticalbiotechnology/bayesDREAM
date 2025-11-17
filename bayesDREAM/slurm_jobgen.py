@@ -232,7 +232,7 @@ class SlurmJobGenerator:
         """
         resources = {}
 
-        # fit_technical
+        # fit_technical (same conditions as fit_trans)
         tech_ram = memory['fit_technical_ram_gb']
         tech_vram = memory['fit_technical_vram_gb']
 
@@ -269,9 +269,20 @@ class SlurmJobGenerator:
                     'rationale': 'User requested thin nodes'
                 }
         else:
-            # Auto-select
-            if tech_vram <= 10 and tech_ram <= 128:
-                # Single fat GPU works
+            # Auto-select (same logic as fit_trans)
+            if tech_vram <= 5 and tech_ram <= 64:
+                # Single thin GPU
+                resources['fit_technical'] = {
+                    'partition': 'berzelius',
+                    'constraint': 'thin',
+                    'gpus': 1,
+                    'cpus': 1,
+                    'mem_gb': tech_ram,
+                    'vram_gb': tech_vram,
+                    'rationale': 'Fits on 1 thin GPU (5GB VRAM, 64GB RAM)'
+                }
+            elif tech_vram <= 10 and tech_ram <= 128:
+                # Single fat GPU
                 resources['fit_technical'] = {
                     'partition': 'berzelius',
                     'constraint': 'fat',
@@ -292,6 +303,28 @@ class SlurmJobGenerator:
                     'vram_gb': tech_vram,
                     'rationale': 'Requires 2 fat GPUs (20GB VRAM, 256GB RAM)'
                 }
+            elif tech_vram <= 40 and tech_ram <= 512:
+                # 4 fat GPUs
+                resources['fit_technical'] = {
+                    'partition': 'berzelius',
+                    'constraint': 'fat',
+                    'gpus': 4,
+                    'cpus': 1,
+                    'mem_gb': tech_ram,
+                    'vram_gb': tech_vram,
+                    'rationale': 'Requires 4 fat GPUs (40GB VRAM, 512GB RAM)'
+                }
+            elif tech_vram <= 80 and tech_ram <= 1024:
+                # 8 fat GPUs (full node)
+                resources['fit_technical'] = {
+                    'partition': 'berzelius',
+                    'constraint': 'fat',
+                    'gpus': 8,
+                    'cpus': 1,
+                    'mem_gb': tech_ram,
+                    'vram_gb': tech_vram,
+                    'rationale': 'Requires 8 fat GPUs (80GB VRAM, 1024GB RAM) - full node'
+                }
             else:
                 # Too large for GPU, use CPU
                 resources['fit_technical'] = {
@@ -301,7 +334,7 @@ class SlurmJobGenerator:
                     'cpus': max(1, int(np.ceil(tech_ram / 7.76))),
                     'mem_gb': tech_ram,
                     'vram_gb': 0,
-                    'rationale': 'Dataset too large for GPU, using CPU'
+                    'rationale': 'Dataset too large for 8 GPUs, using CPU'
                 }
 
         # fit_cis (usually CPU is fine)
@@ -322,17 +355,8 @@ class SlurmJobGenerator:
         trans_ram = memory['fit_trans_ram_gb']
         trans_vram = memory['fit_trans_vram_gb']
 
-        if trans_vram <= 10 and trans_ram <= 128:
-            resources['fit_trans'] = {
-                'partition': 'berzelius',
-                'constraint': 'fat',
-                'gpus': 1,
-                'cpus': 1,
-                'mem_gb': trans_ram,
-                'vram_gb': trans_vram,
-                'rationale': 'Fits on 1 fat GPU (10GB VRAM, 128GB RAM)'
-            }
-        elif trans_vram <= 5 and trans_ram <= 64:
+        if trans_vram <= 5 and trans_ram <= 64:
+            # Single thin GPU
             resources['fit_trans'] = {
                 'partition': 'berzelius',
                 'constraint': 'thin',
@@ -342,7 +366,19 @@ class SlurmJobGenerator:
                 'vram_gb': trans_vram,
                 'rationale': 'Fits on 1 thin GPU (5GB VRAM, 64GB RAM)'
             }
+        elif trans_vram <= 10 and trans_ram <= 128:
+            # Single fat GPU
+            resources['fit_trans'] = {
+                'partition': 'berzelius',
+                'constraint': 'fat',
+                'gpus': 1,
+                'cpus': 1,
+                'mem_gb': trans_ram,
+                'vram_gb': trans_vram,
+                'rationale': 'Fits on 1 fat GPU (10GB VRAM, 128GB RAM)'
+            }
         elif trans_vram <= 20 and trans_ram <= 256:
+            # 2 fat GPUs
             resources['fit_trans'] = {
                 'partition': 'berzelius',
                 'constraint': 'fat',
@@ -352,7 +388,30 @@ class SlurmJobGenerator:
                 'vram_gb': trans_vram,
                 'rationale': 'Requires 2 fat GPUs (20GB VRAM, 256GB RAM)'
             }
+        elif trans_vram <= 40 and trans_ram <= 512:
+            # 4 fat GPUs
+            resources['fit_trans'] = {
+                'partition': 'berzelius',
+                'constraint': 'fat',
+                'gpus': 4,
+                'cpus': 1,
+                'mem_gb': trans_ram,
+                'vram_gb': trans_vram,
+                'rationale': 'Requires 4 fat GPUs (40GB VRAM, 512GB RAM)'
+            }
+        elif trans_vram <= 80 and trans_ram <= 1024:
+            # 8 fat GPUs (full node)
+            resources['fit_trans'] = {
+                'partition': 'berzelius',
+                'constraint': 'fat',
+                'gpus': 8,
+                'cpus': 1,
+                'mem_gb': trans_ram,
+                'vram_gb': trans_vram,
+                'rationale': 'Requires 8 fat GPUs (80GB VRAM, 1024GB RAM) - full node'
+            }
         else:
+            # Too large for GPU, use CPU
             resources['fit_trans'] = {
                 'partition': 'berzelius-cpu',
                 'constraint': None,
@@ -360,7 +419,7 @@ class SlurmJobGenerator:
                 'cpus': max(1, int(np.ceil(trans_ram / 7.76))),
                 'mem_gb': trans_ram,
                 'vram_gb': 0,
-                'rationale': 'Dataset too large for GPU, using CPU'
+                'rationale': 'Dataset too large for 8 GPUs, using CPU'
             }
 
         return resources
@@ -876,7 +935,130 @@ Generated: {pd.Timestamp.now()}
                 readme += f"- RAM: {res['mem_gb']:.1f} GB\n"
             readme += f"- Rationale: {res['rationale']}\n\n"
 
+        # Determine niters based on AutoNormal vs AutoIAFNormal
+        niters = 100_000 if self.use_autonormal else 50_000
+
         readme += f"""
+## What Will Be Run
+
+### fit_technical
+
+**Script**: `01_fit_technical.sh`
+
+**Python Code**:
+```python
+model = bayesDREAM(
+    meta=meta,
+    counts=counts,
+    cis_gene={'None' if not self.low_moi else 'cis_gene_per_job'},
+    label="{self.label}",
+    output_dir="{self.output_dir}/output",
+    device="{'cuda' if resources['fit_technical']['gpus'] > 0 else 'cpu'}"
+)
+
+model.set_technical_groups(['cell_line'])
+model.fit_technical(
+    niters={niters},
+    use_all_cells={str(self.use_all_cells_technical)},
+    nsamples={self.nsamples}
+)
+```
+
+**Output**: `alpha_y_prefit.pt`, `posterior_samples_technical.pt`
+
+### fit_cis
+
+**Script**: `02_fit_cis.sh` (job array over {len(self.cis_genes)} cis genes)
+
+**Python Code** (per cis gene):
+```python
+model = bayesDREAM(
+    meta=meta,
+    counts=counts,
+    cis_gene=cis_gene,  # e.g., 'GFI1B'
+    label="{self.label}",
+    output_dir="{self.output_dir}/output",
+    device="{'cuda' if resources['fit_cis']['gpus'] > 0 else 'cpu'}"
+)
+
+model.load_technical_results()
+model.fit_cis(sum_factor_col='sum_factor', nsamples={self.nsamples})
+```
+
+**Output** (per gene): `{{gene}}_run/x_true.pt`, `{{gene}}_run/posterior_samples_cis.pt`
+
+### fit_trans
+
+**Script**: `03_fit_trans.sh` (job array over {len(self.cis_genes)} cis genes)
+
+**Python Code** (per cis gene):
+```python
+model = bayesDREAM(
+    meta=meta,
+    counts=counts,
+    cis_gene=cis_gene,  # e.g., 'GFI1B'
+    label="{self.label}",
+    output_dir="{self.output_dir}/output",
+    device="{'cuda' if resources['fit_trans']['gpus'] > 0 else 'cpu'}"
+)
+
+model.load_technical_results()
+model.load_cis_results()
+model.fit_trans(
+    sum_factor_col='sum_factor_adj',
+    function_type='additive_hill',
+    nsamples={self.nsamples}
+)
+```
+
+**Output** (per gene): `{{gene}}_run/posterior_samples_trans_additive_hill_none.pt`
+
+## Log Output
+
+Each script produces logs in `logs/` with stdout and stderr:
+
+**fit_technical** (`logs/tech_*.out`):
+```
+Processing cis gene: GFI1B
+Loading data...
+Initializing bayesDREAM for cis_gene: GFI1B
+Running fit_technical...
+[Pyro iteration output with ELBO values]
+fit_technical completed successfully
+Job completed: 123456
+```
+
+**fit_cis** (`logs/cis_*_*.out`):
+```
+Processing cis gene: GFI1B (array task 0)
+Loading data...
+Initializing bayesDREAM for cis_gene: GFI1B
+Loading technical fit results...
+Running fit_cis...
+[Pyro iteration output with ELBO values]
+fit_cis completed successfully for GFI1B
+Job completed: 123457 (array task 0)
+```
+
+**fit_trans** (`logs/trans_*_*.out`):
+```
+Processing cis gene: GFI1B (array task 0)
+Loading data...
+Initializing bayesDREAM for cis_gene: GFI1B
+Loading previous results...
+Running fit_trans...
+[Pyro iteration output with ELBO values]
+fit_trans completed successfully for GFI1B
+Job completed: 123458 (array task 0)
+```
+
+**Monitor logs in real-time**:
+```bash
+tail -f logs/tech_*.out
+tail -f logs/cis_*_*.out
+tail -f logs/trans_*_*.out
+```
+
 ## Usage
 
 ### Quick Start (recommended)
