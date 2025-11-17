@@ -28,7 +28,7 @@ Supports multiple molecular modalities including genes, transcripts, splicing, A
 - Guide-level priors: Provide expected log2FC for specific guides from prior experiments
 - Hyperparameter-level priors: Use prior dataset statistics to inform hierarchical parameters
 - Main use case: Prior GEX data → improve ATAC inference (or vice versa)
-- See [CODEBASE_EVOLUTION.md](CODEBASE_EVOLUTION.md#2c-prior-informed-cis-fitting--in-development) for implementation status
+- See [docs/OUTSTANDING_TASKS.md](docs/OUTSTANDING_TASKS.md) for implementation status
 
 **🔬 Multi-Modal Integration**
 - Add transcripts, splicing, ATAC-seq, and custom modalities to any analysis
@@ -218,7 +218,7 @@ current_atac_model.fit_cis(
 - ❌ Integration into Pyro model (in progress)
 - ❌ Hyperparameter-level priors (planned)
 
-See [CODEBASE_EVOLUTION.md](CODEBASE_EVOLUTION.md#2c-prior-informed-cis-fitting--in-development) for detailed roadmap.
+See [docs/OUTSTANDING_TASKS.md](docs/OUTSTANDING_TASKS.md) for detailed roadmap.
 
 ### Visualization
 
@@ -305,21 +305,95 @@ model.save_trans_summary()      # Feature-wise parameters, log2FC, inflection po
 - **[docs/SUMMARY_EXPORT_GUIDE.md](docs/SUMMARY_EXPORT_GUIDE.md)** - Complete export guide with R examples
 - **[docs/example_summary_plots.R](docs/example_summary_plots.R)** - Comprehensive R plotting script
 
+## HPC and Resource Planning
+
+### Running on HPC Clusters
+
+bayesDREAM includes automated SLURM job generation for HPC clusters:
+
+```python
+from bayesDREAM.slurm_jobgen import SlurmJobGenerator
+
+# Generate optimized SLURM scripts
+gen = SlurmJobGenerator(
+    meta=meta,
+    counts=counts,
+    cis_genes=['GFI1B', 'TET2', 'MYB'],
+    output_dir='./slurm_jobs',
+    label='my_experiment',
+    python_env='/path/to/pyroenv/bin/python',
+    bayesdream_path='/path/to/bayesDREAM',
+    data_path='/path/to/data'
+)
+
+gen.generate_all_scripts()
+```
+
+**Features:**
+- Automatic resource allocation (GPU fat/thin nodes or CPU)
+- Memory estimation based on dataset characteristics
+- Time estimation with safety margins
+- Job dependencies and array parallelization
+- Throttling to prevent cluster overload
+
+**On cluster (Berzelius):**
+```bash
+cd slurm_jobs
+bash submit_all.sh  # Submits all jobs with dependencies
+```
+
+### Memory Requirements
+
+Estimate RAM and VRAM needs before running:
+
+```python
+from docs.memory_calculator import estimate_memory
+
+memory = estimate_memory(
+    n_features=30000,
+    n_cells=50000,
+    n_groups=2,
+    sparsity=0.85,
+    use_all_cells=False  # True for high MOI mode
+)
+
+print(f"fit_technical: {memory['fit_technical_ram_gb']:.1f} GB RAM")
+print(f"fit_trans: {memory['fit_trans_vram_gb']:.1f} GB VRAM")
+```
+
+**Quick estimates:**
+- **fit_technical**: 5-10 GB (NTC only), 8-15 GB (all cells)
+- **fit_cis**: 4-6 GB (usually CPU is fine)
+- **fit_trans**: 10-20 GB (needs GPU for large datasets)
+
+**See:**
+- **[docs/SLURM_JOB_GENERATOR.md](docs/SLURM_JOB_GENERATOR.md)** - Complete HPC job generation guide
+- **[docs/MEMORY_REQUIREMENTS.md](docs/MEMORY_REQUIREMENTS.md)** - Memory estimation guide
+- **[docs/memory_calculator.py](docs/memory_calculator.py)** - Interactive calculator
 
 ## Documentation
 
 ### User Guides
+- **[docs/README.md](docs/README.md)** - Documentation index
 - **[docs/QUICKSTART_MULTIMODAL.md](docs/QUICKSTART_MULTIMODAL.md)** - Quick reference guide
 - **[docs/PLOTTING_GUIDE.md](docs/PLOTTING_GUIDE.md)** - Comprehensive visualization guide
-- **[docs/SAVE_LOAD_GUIDE.md](docs/SAVE_LOAD_GUIDE.md)** - Save/load pipeline stages with modality-specific control
-- **[docs/API_REFERENCE.md](docs/API_REFERENCE.md)** - Complete API reference with all functions
-- **[docs/DATA_ACCESS.md](docs/DATA_ACCESS.md)** - Guide to accessing and working with data
-- **[examples/](examples/)** - Example scripts for staged pipeline execution
+- **[docs/SAVE_LOAD_GUIDE.md](docs/SAVE_LOAD_GUIDE.md)** - Save/load pipeline stages
+- **[docs/API_REFERENCE.md](docs/API_REFERENCE.md)** - Complete API reference
+- **[docs/DATA_ACCESS.md](docs/DATA_ACCESS.md)** - Accessing fitted parameters
+- **[docs/HIGH_MOI_GUIDE.md](docs/HIGH_MOI_GUIDE.md)** - High MOI workflows
+- **[docs/FIT_TRANS_GUIDE.md](docs/FIT_TRANS_GUIDE.md)** - Trans fitting guide
+- **[examples/](examples/)** - Example scripts
+
+### HPC and Resource Planning
+- **[docs/SLURM_JOB_GENERATOR.md](docs/SLURM_JOB_GENERATOR.md)** - HPC job generation
+- **[docs/MEMORY_REQUIREMENTS.md](docs/MEMORY_REQUIREMENTS.md)** - Memory estimation
+- **[examples/generate_slurm_jobs.py](examples/generate_slurm_jobs.py)** - Example script
 
 ### Technical Documentation
-- **[CLAUDE.md](CLAUDE.md)** - Complete architecture documentation for Claude Code
-- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - System architecture and design patterns
-- **[docs/archive/](docs/archive/)** - Historical design documents and refactoring summaries
+- **[CLAUDE.md](CLAUDE.md)** - Complete architecture documentation
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - System architecture
+- **[docs/OUTSTANDING_TASKS.md](docs/OUTSTANDING_TASKS.md)** - Development roadmap
+- **[archive/](archive/)** - Historical development documents
 
 ## Data Requirements
 
