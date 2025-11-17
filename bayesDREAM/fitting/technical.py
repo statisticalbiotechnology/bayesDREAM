@@ -497,6 +497,7 @@ class TechnicalFitter:
         # ---------------------------
         # Set conditional default for niters
         # ---------------------------
+        niters_was_default = (niters is None)
         if niters is None:
             # Default: 50,000 unless multivariate (multinomial), then 100,000
             if distribution in ('multinomial'):
@@ -1311,12 +1312,27 @@ class TechnicalFitter:
                     else:
                         print(f"[WARNING] AutoIAFNormal would require ~{iaf_memory_gb:.1f} GB VRAM (>{available_for_guide_gb:.1f} GB available)")
                         print(f"[WARNING] Falling back to AutoNormal (mean-field approximation) for {n_latent} latent variables")
+                        # Increase niters for AutoNormal if using default (AutoNormal needs more iterations)
+                        if niters_was_default and niters < 100_000:
+                            old_niters = niters
+                            niters = 100_000
+                            print(f"[INFO] Increasing niters from {old_niters:,} to {niters:,} for AutoNormal convergence")
                 except Exception as e:
                     print(f"[WARNING] Could not check VRAM ({e}), using AutoNormal for safety")
+                    # Increase niters for AutoNormal if using default
+                    if niters_was_default and niters < 100_000:
+                        old_niters = niters
+                        niters = 100_000
+                        print(f"[INFO] Increasing niters from {old_niters:,} to {niters:,} for AutoNormal convergence")
             else:
                 # CPU: always use AutoNormal for large models
                 if n_latent > 5000:
                     print(f"[INFO] Using AutoNormal for CPU fitting with {n_latent} latent variables")
+                    # Increase niters for AutoNormal if using default
+                    if niters_was_default and niters < 100_000:
+                        old_niters = niters
+                        niters = 100_000
+                        print(f"[INFO] Increasing niters from {old_niters:,} to {niters:,} for AutoNormal convergence")
                 else:
                     use_iaf = True
 
