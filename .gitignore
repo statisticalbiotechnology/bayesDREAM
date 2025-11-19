@@ -76,6 +76,9 @@ toydata/SpliZ_counts.csv
 toydata/spliZVD_z0.csv
 toydata/spliZVD_z1.csv
 toydata/spliZVD_z2.csv
+toydata/Josie_gene_counts.csv
+toydata/cell_meta.csv
+toydata/gene_counts.csv
 toydata/toydata/
 
 # R
