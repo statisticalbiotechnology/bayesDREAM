@@ -44,7 +44,7 @@ bayesDREAM_forClaude/
 └── docs/                    # Documentation
 ```
 
-**Note**: The codebase was recently refactored from a single 4,537-line `model.py` file into a modular structure. This improves maintainability while preserving backward compatibility. See `docs/REFACTORING_SUMMARY.md` for details.
+**Note**: The codebase was recently refactored from a single 4,537-line `model.py` file into a modular structure. This improves maintainability while preserving backward compatibility. See `docs/archive/planning/REFACTORING_SUMMARY.md` for details.
 
 ## Core Architecture
 
@@ -396,11 +396,14 @@ All documentation is in the `docs/` directory:
 - `ARCHITECTURE.md`: System architecture and design decisions
 - `INITIALIZATION.md`: Technical fitting initialization strategies (empirical Bayes for negbinom, binomial, multinomial)
 - `OUTSTANDING_TASKS.md`: **Current outstanding tasks and known issues**
-- `REFACTORING_PLAN.md`: Details of the modular refactoring
 - `SAVE_LOAD_GUIDE.md`: Guide to save/load functionality
 - `QUICKSTART_MULTIMODAL.md`: Quick start for multi-modal analysis
-- `PER_MODALITY_FITTING_PLAN.md`: Plan for per-modality fitting
-- Various specialized guides (ATAC, splicing, etc.)
+- `SLURM_JOB_GENERATOR.md`: HPC job generation guide
+- `MEMORY_REQUIREMENTS.md`: Memory estimation guide
+- `PLOTTING_GUIDE.md`: Comprehensive visualization guide
+- `SUMMARY_EXPORT_GUIDE.md`: Exporting results for R/plotting
+- Various specialized guides (ATAC, splicing, high MOI, etc.)
+- Historical planning documents available in `docs/archive/`
 
 **Important**: Check `docs/OUTSTANDING_TASKS.md` for current development priorities, including the guide-prior infrastructure that needs to be integrated into `fit_cis()`.
 
