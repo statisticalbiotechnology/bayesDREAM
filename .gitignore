@@ -53,6 +53,11 @@ Thumbs.db
 model_out/
 output/
 test_output/
+test_output_*/
+test_high_moi_*/
+test_sparse/
+test_dense/
+test_ntc_*/
 test_cis_fix/
 test_plotting/
 test_unit/
