@@ -12,6 +12,133 @@ The trans fitting step models downstream effects of perturbations by fitting dos
 2. **fit_cis()**: Model direct effects on the cis feature → estimate `x_true` (true cis expression per cell)
 3. **fit_trans()**: Model trans features as functions of `x_true` → discover dose-response relationships
 
+## Distribution-Specific Implementation
+
+bayesDREAM applies trans functions differently depending on the distribution type. This ensures the function output matches the natural space of each distribution.
+
+### Negative Binomial (Gene/Transcript Counts, ATAC Peaks)
+
+**Function Application:**
+- **Hill functions**: Applied in count space (natural scale)
+  ```
+  y_count = A + alpha * Hill(x)
+  ```
+- **Polynomial**: Applied in log2 space to ensure multiplicative effects
+  ```
+  log2(y) = log2(A) + alpha * polynomial(log2(x))
+  y_count = 2^(log2(y))
+  ```
+
+**Priors:**
+- `A` (baseline): `Exponential(1/Amean)` → positive counts
+- `Vmax` (Hill amplitude): `Gamma(mean², mean/σ²)` → positive amplitude
+- `K` (EC50/IC50): `Gamma((K_max/2)², (K_max/2)/σ²)` → positive half-max point
+- `n` (Hill coefficient): `Normal(0, σ_n)` clamped to `[nmin, nmax]` to avoid overflow
+
+**Technical Correction:**
+```
+mu_final = y_dose_response * alpha_y[group] * sum_factor
+```
+Applied multiplicatively on count scale (default: no correction if `set_technical_groups()` not called).
+
+---
+
+### Binomial (Exon Skipping PSI, Raw SJ Counts)
+
+**Function Application:**
+- **Hill functions**: Applied in probability space [0, 1], clamped
+  ```
+  p = A + alpha * Hill(x)
+  p = clamp(p, ε, 1-ε)
+  ```
+- **Polynomial**: Applied in logit space (unbounded), then sigmoid
+  ```
+  logit(p) = logit(A) + alpha * polynomial(x)
+  p = sigmoid(logit(p))  # Maps to [0, 1]
+  ```
+
+**Priors:**
+- `A` (baseline probability): `Beta(α, β)` with mean = Amean → constrained to [0, 1]
+- `Vmax` (Hill amplitude): `Beta(α, β)` → probability in [0, 1]
+- `K` (EC50/IC50): `Gamma((K_max/2)², (K_max/2)/σ²)` → positive half-max point
+- `n` (Hill coefficient): `Normal(0, σ_n)` clamped to `[nmin, nmax]`
+
+**Technical Correction:**
+```
+logit(p_final) = logit(p_baseline) + log(alpha_y[group])
+```
+Applied on logit scale (additive in log-odds space).
+
+---
+
+### Multinomial (Donor/Acceptor Usage, Isoform Proportions)
+
+**Function Application:**
+- **Hill functions**: K independent Hill functions for K-1 categories, Kth is residual
+  ```
+  p_k = A_k + alpha * Hill_k(x)  for k=1..K-1
+  p_K = 1 - sum(p_1, ..., p_{K-1})  # Residual category
+  ```
+- **Polynomial**: K independent polynomials in logit space, softmax to get probabilities
+  ```
+  logit_k = logit(A_k) + alpha * polynomial_k(x)  for k=1..K
+  p = softmax(logit_1, ..., logit_K)  # Sum to 1
+  ```
+
+**Priors (per category k=1..K-1):**
+- `A_k` (baseline probability): `Beta(α, β)` → each category in [0, 1]
+- `Vmax_k` (Hill amplitude): `Beta(α, β)` → probability amplitude per category
+- `K_k` (EC50): `Gamma((K_max/2)², (K_max/2)/σ²)` → per-category half-max
+- `n_k` (Hill coefficient): `Normal(0, σ_n)` per category, clamped
+
+**Technical Correction:**
+```
+Not yet implemented for multinomial
+```
+(Currently no technical group correction for multinomial distributions)
+
+---
+
+### Normal (SpliZ Scores, Continuous Measurements)
+
+**Function Application:**
+- **Hill functions**: Applied in natural value space (can be negative)
+  ```
+  y = A + alpha * Hill(x)  # No clamping
+  ```
+- **Polynomial**: Applied directly in natural space
+  ```
+  y = A + alpha * polynomial(x)  # Can be negative
+  ```
+
+**Priors:**
+- `A` (baseline): `Normal(Amean, |Amean|)` → can be negative
+- `Vmax` (Hill amplitude): `Gamma(mean², mean/σ²)` → positive amplitude
+- `K` (EC50/IC50): `Gamma((K_max/2)², (K_max/2)/σ²)` → positive half-max point
+- `n` (Hill coefficient): `Normal(0, σ_n)` clamped to `[nmin, nmax]`
+
+**Technical Correction:**
+```
+y_final = y_baseline + alpha_y[group]
+```
+Applied additively (since values can be negative).
+
+---
+
+### Student-t (Robust SpliZ, Heavy-Tailed Continuous)
+
+**Function Application:**
+Same as Normal distribution (natural value space).
+
+**Priors:**
+Same as Normal distribution, plus:
+- `nu_y` (degrees of freedom): `Gamma(10, 2)` → mean ~5, ensures df > 2
+
+**Technical Correction:**
+Same as Normal (additive).
+
+---
+
 ## Function Types
 
 bayesDREAM supports three function types for modeling trans effects:
