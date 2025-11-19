@@ -859,6 +859,11 @@ class TransFitter:
         if distribution == 'binomial' and denominator_tensor is not None:
             # For binomial: normalize by denominator to get probabilities [0,1]
             y_obs_factored = y_obs_tensor / denominator_tensor.clamp_min(epsilon_tensor)
+        elif distribution == 'multinomial' and y_obs_tensor.ndim == 3:
+            # For multinomial: normalize by total across categories to get proportions [0,1]
+            # y_obs_tensor is [N, T, K], sum across K to get [N, T, 1]
+            total_counts = y_obs_tensor.sum(dim=-1, keepdim=True).clamp_min(epsilon_tensor)
+            y_obs_factored = y_obs_tensor / total_counts  # [N, T, K] with proportions in [0,1]
         elif sum_factor_col is not None:
             # For negbinom: normalize by sum factors to get expression per size factor
             y_obs_factored = y_obs_tensor / sum_factor_tensor.view(-1, 1)
