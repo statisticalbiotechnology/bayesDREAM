@@ -271,10 +271,24 @@ class TransFitter:
                         K_minus_1 = K - 1
                         with pyro.plate("category_plate_b", K_minus_1, dim=-2):
                             n_b_raw = pyro.sample("n_b_raw", dist.Normal(n_mu_tensor, sigma_n_b))  # [K-1, T]
-                            n_b = pyro.deterministic("n_b", (beta.unsqueeze(-2) * n_b_raw).clamp(min=-20, max=20))  # [K-1, T]
+                            BOX_LOW  = self._t(-20.0)
+                            BOX_HIGH = self._t( 20.0)
+                            low  = torch.maximum(nmin, BOX_LOW)
+                            high = torch.minimum(nmax, BOX_HIGH)
+                            n_b = pyro.deterministic(
+                                "n_b",
+                                (beta.unsqueeze(-2) * n_b_raw).clamp(min=low.item(), max=high.item())
+                            )  # [K-1, T]
                     else:
                         n_b_raw = pyro.sample("n_b_raw", dist.Normal(n_mu_tensor, sigma_n_b))
-                        n_b = pyro.deterministic("n_b", (beta * n_b_raw).clamp(min=-20, max=20))
+                        BOX_LOW  = self._t(-20.0)
+                        BOX_HIGH = self._t( 20.0)
+                        low  = torch.maximum(nmin, BOX_LOW)
+                        high = torch.minimum(nmax, BOX_HIGH)
+                        n_b = pyro.deterministic(
+                            "n_b",
+                            (beta * n_b_raw).clamp(min=low.item(), max=high.item())
+                        )
 
                     # Vmax_b and K_b: Distribution-specific priors
                     if distribution == 'multinomial' and K is not None:
@@ -841,10 +855,15 @@ class TransFitter:
         guides_tensor = torch.tensor(self.model.meta['guide_code'].values, dtype=torch.long, device=self.model.device)
         K_max_tensor = torch.max(torch.stack([torch.mean(x_true_mean[guides_tensor == g]) for g in torch.unique(guides_tensor)]))
 
-        # For negbinom, normalize by sum factors; for other distributions, use raw values
-        if sum_factor_col is not None:
+        # Distribution-specific normalization for data-driven priors
+        if distribution == 'binomial' and denominator_tensor is not None:
+            # For binomial: normalize by denominator to get probabilities [0,1]
+            y_obs_factored = y_obs_tensor / denominator_tensor.clamp_min(epsilon_tensor)
+        elif sum_factor_col is not None:
+            # For negbinom: normalize by sum factors to get expression per size factor
             y_obs_factored = y_obs_tensor / sum_factor_tensor.view(-1, 1)
         else:
+            # For other distributions: use raw values
             y_obs_factored = y_obs_tensor
 
         Vmax_mean_tensor = torch.max(torch.stack([torch.mean(y_obs_factored[guides_tensor == g, :], dim=0) for g in torch.unique(guides_tensor)]), dim=0)[0]

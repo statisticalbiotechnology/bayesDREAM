@@ -1359,8 +1359,15 @@ class TechnicalFitter:
                 # Fallback to memory-efficient AutoNormal
                 guide_cellline = AutoNormal(self._model_technical, init_loc_fn=init_loc_fn)
         
+        # Choose ELBO based on guide type
+        if isinstance(guide_cellline, infer.autoguide.AutoNormal):
+            # lower-variance estimator for mean-field Normal
+            elbo = pyro.infer.TraceMeanField_ELBO(num_particles=1)
+        else:
+            elbo = pyro.infer.Trace_ELBO(num_particles=1)   # you can bump num_particles later if needed
+        
         optimizer = pyro.optim.Adam({"lr": lr})
-        svi = pyro.infer.SVI(self._model_technical, guide_cellline, optimizer, loss=pyro.infer.Trace_ELBO())
+        svi = pyro.infer.SVI(self._model_technical, guide_cellline, optimizer, loss=elbo)
         guide_cellline.to(self.model.device)
     
         # ---------------------------
