@@ -632,9 +632,8 @@ class _BayesDREAMCore(PlottingMixin):
                     if col in self.gene_meta.columns:
                         matches = self.gene_meta[self.gene_meta[col] == self.cis_gene]
                         if len(matches) > 0:
-                            # Found cis gene - use its numeric index
+                            # Found cis gene - use its numeric index for validation
                             cis_idx = matches.index[0]
-                            print(f"[INFO] Found cis gene '{self.cis_gene}' in gene_meta['{col}'] at row index {cis_idx}")
                             break
 
                 if cis_idx is None:
