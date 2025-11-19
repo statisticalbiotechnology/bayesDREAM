@@ -1100,11 +1100,18 @@ class bayesDREAM(
             if not has_technical_groups:
                 has_technical = '-'  # Not configured/not needed
             else:
-                has_technical = '✓' if mod.alpha_y_prefit is not None else '✗'
+                # For 'cis' modality: check primary modality's technical fit status
+                # (cis gene was included in primary modality's technical fit)
+                if name == 'cis' and self.primary_modality in self.modalities:
+                    primary_mod = self.modalities[self.primary_modality]
+                    has_technical = '✓' if primary_mod.alpha_y_prefit is not None else '✗'
+                else:
+                    has_technical = '✓' if mod.alpha_y_prefit is not None else '✗'
 
             # fit_cis only applies to 'cis' modality
             if name == 'cis':
-                has_cis = '✓' if mod.x_true is not None else '✗'
+                # x_true is stored on the main model, not on the modality
+                has_cis = '✓' if getattr(self, 'x_true', None) is not None else '✗'
             else:
                 has_cis = '-'  # Not applicable
 
