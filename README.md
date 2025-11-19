@@ -393,7 +393,7 @@ print(f"fit_trans: {memory['fit_trans_vram_gb']:.1f} GB VRAM")
 - **[CLAUDE.md](CLAUDE.md)** - Complete architecture documentation
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - System architecture
 - **[docs/OUTSTANDING_TASKS.md](docs/OUTSTANDING_TASKS.md)** - Development roadmap
-- **[archive/](archive/)** - Historical development documents
+- **[docs/archive/](docs/archive/)** - Historical development documents
 
 ## Data Requirements
 
@@ -519,7 +519,7 @@ bayesDREAM/
 └── toydata/              # Test datasets
 ```
 
-**Note**: The codebase was refactored from a single 4,537-line file into a modular structure (93% reduction in model.py). This improves maintainability while preserving complete backward compatibility. See [docs/archive/](docs/archive/) for refactoring history and [CODEBASE_EVOLUTION.md](CODEBASE_EVOLUTION.md) for a detailed overview of enhancements.
+**Note**: The codebase was refactored from a single 4,537-line file into a modular structure (93% reduction in model.py). This improves maintainability while preserving complete backward compatibility. See [docs/archive/](docs/archive/) for refactoring history and [docs/archive/CODEBASE_EVOLUTION.md](docs/archive/CODEBASE_EVOLUTION.md) for a detailed overview of enhancements.
 
 ## Contributing
 
