@@ -1075,18 +1075,32 @@ class bayesDREAM(
             - distribution: Distribution type
             - n_features: Number of features
             - n_cells: Number of cells
-            - fit_technical: ✓ if fitted, ✗ if not
-            - fit_cis: ✓ if fitted, ✗ if not (only for 'cis' modality)
-            - fit_trans: ✓ if fitted, ✗ if not
+            - fit_technical: ✓ if fitted, ✗ if not fitted, - if not configured
+            - fit_cis: ✓ if fitted, ✗ if not fitted, - if not applicable
+            - fit_trans: ✓ if fitted, ✗ if not fitted
+
+        Notes
+        -----
+        fit_technical shows:
+        - '-' if technical_group_code not set (no technical covariates configured)
+        - '✗' if technical_group_code set but fit_technical() not run
+        - '✓' if fit_technical() completed
         """
         if not self.modalities:
             return pd.DataFrame(columns=['name', 'distribution', 'n_features', 'n_cells',
                                         'fit_technical', 'fit_cis', 'fit_trans'])
 
+        # Check if technical groups are configured
+        has_technical_groups = 'technical_group_code' in self.meta.columns
+
         rows = []
         for name, mod in self.modalities.items():
-            # Check fitting status
-            has_technical = '✓' if mod.alpha_y_prefit is not None else '✗'
+            # Check fitting status for technical fit
+            # Only show as needed (✓/✗) if technical groups are configured
+            if not has_technical_groups:
+                has_technical = '-'  # Not configured/not needed
+            else:
+                has_technical = '✓' if mod.alpha_y_prefit is not None else '✗'
 
             # fit_cis only applies to 'cis' modality
             if name == 'cis':
