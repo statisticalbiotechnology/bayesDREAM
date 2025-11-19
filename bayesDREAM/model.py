@@ -1065,23 +1065,45 @@ class bayesDREAM(
 
     def list_modalities(self) -> pd.DataFrame:
         """
-        List all modalities.
+        List all modalities with fitting status.
 
         Returns
         -------
         pd.DataFrame
-            Summary of modalities with columns: name, distribution, n_features, n_cells
+            Summary of modalities with columns:
+            - name: Modality name
+            - distribution: Distribution type
+            - n_features: Number of features
+            - n_cells: Number of cells
+            - fit_technical: ✓ if fitted, ✗ if not
+            - fit_cis: ✓ if fitted, ✗ if not (only for 'cis' modality)
+            - fit_trans: ✓ if fitted, ✗ if not
         """
         if not self.modalities:
-            return pd.DataFrame(columns=['name', 'distribution', 'n_features', 'n_cells'])
+            return pd.DataFrame(columns=['name', 'distribution', 'n_features', 'n_cells',
+                                        'fit_technical', 'fit_cis', 'fit_trans'])
 
         rows = []
         for name, mod in self.modalities.items():
+            # Check fitting status
+            has_technical = '✓' if mod.alpha_y_prefit is not None else '✗'
+
+            # fit_cis only applies to 'cis' modality
+            if name == 'cis':
+                has_cis = '✓' if mod.x_true is not None else '✗'
+            else:
+                has_cis = '-'  # Not applicable
+
+            has_trans = '✓' if mod.posterior_samples_trans is not None else '✗'
+
             rows.append({
                 'name': name,
                 'distribution': mod.distribution,
                 'n_features': mod.dims['n_features'],
-                'n_cells': mod.dims['n_cells']
+                'n_cells': mod.dims['n_cells'],
+                'fit_technical': has_technical,
+                'fit_cis': has_cis,
+                'fit_trans': has_trans
             })
         return pd.DataFrame(rows)
 
