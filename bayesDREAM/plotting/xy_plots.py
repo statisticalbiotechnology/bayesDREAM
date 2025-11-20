@@ -809,11 +809,22 @@ def predict_trans_function(
     A_samples = posterior['A']
 
     # Get posterior dimensions
+    # For primary modality: A_samples is (S, T) where S=samples, T=trans_genes
+    #   After mean(dim=0): (T,)
+    # For non-primary modality: A_samples is (S, C, T) where C=cis_genes, T=trans_features
+    #   After mean(dim=0): (C, T)
+    # We want the LAST dimension (T) in both cases
     if hasattr(A_samples, 'mean'):
         A_mean = A_samples.mean(dim=0)
+        # Squeeze out cis gene dimension if present (should be size 1 for non-primary modalities)
+        if A_mean.ndim > 1:
+            A_mean = A_mean.squeeze(0)
         n_genes_posterior = A_mean.shape[0]
     else:
         A_mean = A_samples.mean(axis=0)
+        # Squeeze out cis gene dimension if present
+        if A_mean.ndim > 1:
+            A_mean = A_mean.squeeze(0)
         n_genes_posterior = A_mean.shape[0]
 
     # Get feature list from modality (NOT model.trans_genes!)
@@ -874,19 +885,36 @@ def predict_trans_function(
     feature_idx = feature_list.index(feature)
     A = A_mean[feature_idx].item() if hasattr(A_mean, 'item') else A_mean[feature_idx]
 
+    # Helper function to extract parameter value for a specific feature
+    # Handles both primary modality (S, T) and non-primary modality (S, C, T) shapes
+    def _extract_param(param_samples, feature_idx):
+        """Extract mean parameter value for a specific feature, handling dimension squeezing."""
+        if hasattr(param_samples, 'mean'):
+            param_mean = param_samples.mean(dim=0)
+        else:
+            param_mean = param_samples.mean(axis=0)
+
+        # Squeeze out cis gene dimension if present
+        if param_mean.ndim > 1:
+            param_mean = param_mean.squeeze(0)
+
+        # Extract value for this feature
+        val = param_mean[feature_idx]
+        return val.item() if hasattr(val, 'item') else val
+
     # Determine function type from available parameters
     if 'Vmax_a' in posterior and 'Vmax_b' in posterior:
         # ===== ADDITIVE HILL =====
         try:
-            # Extract parameters
-            alpha = posterior['alpha'].mean(dim=0)[feature_idx].item() if hasattr(posterior['alpha'], 'mean') else posterior['alpha'].mean(axis=0)[feature_idx]
-            beta = posterior['beta'].mean(dim=0)[feature_idx].item() if hasattr(posterior['beta'], 'mean') else posterior['beta'].mean(axis=0)[feature_idx]
-            Vmax_a = posterior['Vmax_a'].mean(dim=0)[feature_idx].item() if hasattr(posterior['Vmax_a'], 'mean') else posterior['Vmax_a'].mean(axis=0)[feature_idx]
-            Vmax_b = posterior['Vmax_b'].mean(dim=0)[feature_idx].item() if hasattr(posterior['Vmax_b'], 'mean') else posterior['Vmax_b'].mean(axis=0)[feature_idx]
-            K_a = posterior['K_a'].mean(dim=0)[feature_idx].item() if hasattr(posterior['K_a'], 'mean') else posterior['K_a'].mean(axis=0)[feature_idx]
-            K_b = posterior['K_b'].mean(dim=0)[feature_idx].item() if hasattr(posterior['K_b'], 'mean') else posterior['K_b'].mean(axis=0)[feature_idx]
-            n_a = posterior['n_a'].mean(dim=0)[feature_idx].item() if hasattr(posterior['n_a'], 'mean') else posterior['n_a'].mean(axis=0)[feature_idx]
-            n_b = posterior['n_b'].mean(dim=0)[feature_idx].item() if hasattr(posterior['n_b'], 'mean') else posterior['n_b'].mean(axis=0)[feature_idx]
+            # Extract parameters using helper function
+            alpha = _extract_param(posterior['alpha'], feature_idx)
+            beta = _extract_param(posterior['beta'], feature_idx)
+            Vmax_a = _extract_param(posterior['Vmax_a'], feature_idx)
+            Vmax_b = _extract_param(posterior['Vmax_b'], feature_idx)
+            K_a = _extract_param(posterior['K_a'], feature_idx)
+            K_b = _extract_param(posterior['K_b'], feature_idx)
+            n_a = _extract_param(posterior['n_a'], feature_idx)
+            n_b = _extract_param(posterior['n_b'], feature_idx)
 
             # Compute Hill functions
             Hill_a = Hill_based_positive(x_range, Vmax=Vmax_a, A=0, K=K_a, n=n_a)
@@ -902,9 +930,9 @@ def predict_trans_function(
     elif 'Vmax' in posterior and 'K' in posterior and 'n' in posterior:
         # ===== SINGLE HILL =====
         try:
-            Vmax = posterior['Vmax'].mean(dim=0)[feature_idx].item() if hasattr(posterior['Vmax'], 'mean') else posterior['Vmax'].mean(axis=0)[feature_idx]
-            K = posterior['K'].mean(dim=0)[feature_idx].item() if hasattr(posterior['K'], 'mean') else posterior['K'].mean(axis=0)[feature_idx]
-            n = posterior['n'].mean(dim=0)[feature_idx].item() if hasattr(posterior['n'], 'mean') else posterior['n'].mean(axis=0)[feature_idx]
+            Vmax = _extract_param(posterior['Vmax'], feature_idx)
+            K = _extract_param(posterior['K'], feature_idx)
+            n = _extract_param(posterior['n'], feature_idx)
 
             # Compute Hill function
             y_pred = Hill_based_positive(x_range, Vmax=Vmax, A=A, K=K, n=n)
@@ -917,14 +945,22 @@ def predict_trans_function(
         # ===== POLYNOMIAL OR THETA-BASED =====
         try:
             theta_samples = posterior['theta']
-            # theta shape: (samples, features, n_params)
+            # theta shape for primary: (samples, features, n_params)
+            # theta shape for non-primary: (samples, cis_genes, features, n_params)
 
-            # Check if it's polynomial by number of parameters
+            # Average over samples and squeeze cis gene dimension if present
             if hasattr(theta_samples, 'mean'):
-                theta_mean = theta_samples.mean(dim=0)[feature_idx, :]  # (n_params,)
+                theta_mean = theta_samples.mean(dim=0)
+                # Squeeze out cis gene dimension if present
+                if theta_mean.ndim > 2:  # (cis_genes, features, n_params)
+                    theta_mean = theta_mean.squeeze(0)  # (features, n_params)
+                theta_mean = theta_mean[feature_idx, :]  # (n_params,)
                 theta_np = theta_mean.cpu().numpy() if hasattr(theta_mean, 'cpu') else np.array(theta_mean)
             else:
-                theta_mean = theta_samples.mean(axis=0)[feature_idx, :]
+                theta_mean = theta_samples.mean(axis=0)
+                if theta_mean.ndim > 2:
+                    theta_mean = theta_mean.squeeze(0)
+                theta_mean = theta_mean[feature_idx, :]
                 theta_np = np.array(theta_mean)
 
             # Polynomial: y = coeffs[0] + coeffs[1]*x + coeffs[2]*x^2 + ...
