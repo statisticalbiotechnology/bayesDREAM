@@ -780,31 +780,22 @@ def predict_trans_function(
     if modality_name is None:
         modality_name = model.primary_modality
 
-    print(f"[DEBUG] predict_trans_function called for feature='{feature}', modality='{modality_name}'")
-
     # Check if trans model fitted for this modality
     if modality_name == model.primary_modality:
         # Primary modality: check model-level posterior
         if not hasattr(model, 'posterior_samples_trans') or model.posterior_samples_trans is None:
-            print(f"[DEBUG] No model.posterior_samples_trans - returning None")
             return None
         posterior = model.posterior_samples_trans
-        print(f"[DEBUG] Using model-level posterior")
     else:
         # Non-primary modality: check modality-level posterior
         modality = model.get_modality(modality_name)
         if not hasattr(modality, 'posterior_samples_trans') or modality.posterior_samples_trans is None:
-            print(f"[DEBUG] No modality.posterior_samples_trans for '{modality_name}' - returning None")
             return None
         posterior = modality.posterior_samples_trans
-        print(f"[DEBUG] Using modality-level posterior, keys: {list(posterior.keys())}")
 
     # Get baseline A (present in all function types)
     if 'A' not in posterior:
-        print(f"[DEBUG] 'A' not in posterior - returning None")
         return None
-
-    print(f"[DEBUG] Found 'A' in posterior")
 
     A_samples = posterior['A']
 
@@ -843,13 +834,11 @@ def predict_trans_function(
             for col in ['feature_id', 'feature', 'coord.intron', 'junction_id', 'gene_name', 'gene']:
                 if col in modality.feature_meta.columns:
                     feature_list = modality.feature_meta[col].tolist()
-                    print(f"[DEBUG] Using column '{col}' for feature identifiers")
                     break
 
             # If no column worked, try the index
             if feature_list is None:
                 feature_list = modality.feature_meta.index.tolist()
-                print(f"[DEBUG] Using index for feature identifiers")
         else:
             # No feature metadata - try to use feature count from posterior
             # Assume features are indexed 0, 1, 2, ... and cannot be matched by name
@@ -858,32 +847,13 @@ def predict_trans_function(
     n_features_list = len(feature_list)
 
     # Check dimension consistency BEFORE using feature_list for indexing
-    print(f"[DEBUG] Dimension check: n_genes_posterior={n_genes_posterior}, n_features_list={n_features_list}")
     if n_genes_posterior != n_features_list:
         # Mismatch - cannot use feature_list for indexing
         # This happens when posterior was fitted on a subset of features
-        print(f"[DEBUG] DIMENSION MISMATCH: posterior has {n_genes_posterior} features, but feature_list has {n_features_list}")
-        print(f"[DEBUG]   This happens when trans model fitted on subset of features")
-        print(f"[DEBUG]   Modality: {modality_name}")
-        if modality_name != model.primary_modality:
-            modality_obj = model.get_modality(modality_name)
-            if modality_obj.feature_meta is not None:
-                print(f"[DEBUG]   feature_meta shape: {modality_obj.feature_meta.shape}")
-                print(f"[DEBUG]   feature_meta columns: {list(modality_obj.feature_meta.columns)}")
         return None
 
     # Now safe to check if feature is in feature_list and get its index
     if feature not in feature_list:
-        # Debug output to help diagnose feature matching issues
-        print(f"[DEBUG] predict_trans_function: Feature '{feature}' not found in feature_list")
-        print(f"[DEBUG]   Modality: {modality_name}")
-        print(f"[DEBUG]   Posterior dims: {n_genes_posterior}, Feature list length: {n_features_list}")
-        if modality_name != model.primary_modality:
-            modality_obj = model.get_modality(modality_name)
-            if modality_obj.feature_meta is not None:
-                print(f"[DEBUG]   feature_meta columns: {list(modality_obj.feature_meta.columns)}")
-                print(f"[DEBUG]   feature_meta index name: {modality_obj.feature_meta.index.name}")
-        print(f"[DEBUG]   First 5 features in list: {feature_list[:min(5, len(feature_list))]}")
         return None
 
     feature_idx = feature_list.index(feature)
@@ -920,20 +890,12 @@ def predict_trans_function(
             n_a = _extract_param(posterior['n_a'], feature_idx)
             n_b = _extract_param(posterior['n_b'], feature_idx)
 
-            # Debug output to verify parameters
-            print(f"[DEBUG] Additive Hill parameters for feature '{feature}':")
-            print(f"  A={A:.4f}, alpha={alpha:.4f}, beta={beta:.4f}")
-            print(f"  Vmax_a={Vmax_a:.4f}, K_a={K_a:.4f}, n_a={n_a:.4f}")
-            print(f"  Vmax_b={Vmax_b:.4f}, K_b={K_b:.4f}, n_b={n_b:.4f}")
-
             # Compute Hill functions
             Hill_a = Hill_based_positive(x_range, Vmax=Vmax_a, A=0, K=K_a, n=n_a)
             Hill_b = Hill_based_positive(x_range, Vmax=Vmax_b, A=0, K=K_b, n=n_b)
 
             # Combined prediction
             y_pred = A + alpha * Hill_a + beta * Hill_b
-
-            print(f"  y_pred range: [{y_pred.min():.4f}, {y_pred.max():.4f}]")
             return y_pred
 
         except (KeyError, IndexError, AttributeError):
@@ -1413,12 +1375,9 @@ def plot_binomial_xy(
 
         # Trans function overlay (if trans model fitted)
         # Show on corrected plot only (trans model was fitted on corrected data)
-        print(f"[DEBUG] plot_binomial_xy _plot_one: show_trans_function={show_trans_function}, corrected={corrected}")
         if show_trans_function and corrected:
-            print(f"[DEBUG] About to call predict_trans_function for feature='{feature}', modality='{modality.name}'")
             x_range = np.linspace(x_true.min(), x_true.max(), 100)
             y_pred = predict_trans_function(model, feature, x_range, modality_name=modality.name)
-            print(f"[DEBUG] predict_trans_function returned: {type(y_pred)}, is None: {y_pred is None}")
 
             if y_pred is not None:
                 # For binomial, PSI is in percentage scale [0, 100], so scale and clip predictions
