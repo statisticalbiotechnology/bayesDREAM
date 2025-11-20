@@ -920,12 +920,20 @@ def predict_trans_function(
             n_a = _extract_param(posterior['n_a'], feature_idx)
             n_b = _extract_param(posterior['n_b'], feature_idx)
 
+            # Debug output to verify parameters
+            print(f"[DEBUG] Additive Hill parameters for feature '{feature}':")
+            print(f"  A={A:.4f}, alpha={alpha:.4f}, beta={beta:.4f}")
+            print(f"  Vmax_a={Vmax_a:.4f}, K_a={K_a:.4f}, n_a={n_a:.4f}")
+            print(f"  Vmax_b={Vmax_b:.4f}, K_b={K_b:.4f}, n_b={n_b:.4f}")
+
             # Compute Hill functions
             Hill_a = Hill_based_positive(x_range, Vmax=Vmax_a, A=0, K=K_a, n=n_a)
             Hill_b = Hill_based_positive(x_range, Vmax=Vmax_b, A=0, K=K_b, n=n_b)
 
             # Combined prediction
             y_pred = A + alpha * Hill_a + beta * Hill_b
+
+            print(f"  y_pred range: [{y_pred.min():.4f}, {y_pred.max():.4f}]")
             return y_pred
 
         except (KeyError, IndexError, AttributeError):
@@ -1174,7 +1182,8 @@ def plot_negbinom_xy(
                 ax_plot.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2, label=group_label)
 
         # Trans function overlay (if trans model fitted)
-        if show_hill_function and not corrected:
+        # Show on corrected plot only (trans model was fitted on corrected data)
+        if show_hill_function and corrected:
             x_range = np.linspace(x_true.min(), x_true.max(), 100)
             y_pred = predict_trans_function(model, feature, x_range, modality_name=None)
 
@@ -1403,8 +1412,9 @@ def plot_binomial_xy(
             ax_plot.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2, label=group_label)
 
         # Trans function overlay (if trans model fitted)
+        # Show on corrected plot only (trans model was fitted on corrected data)
         print(f"[DEBUG] plot_binomial_xy _plot_one: show_trans_function={show_trans_function}, corrected={corrected}")
-        if show_trans_function and not corrected:
+        if show_trans_function and corrected:
             print(f"[DEBUG] About to call predict_trans_function for feature='{feature}', modality='{modality.name}'")
             x_range = np.linspace(x_true.min(), x_true.max(), 100)
             y_pred = predict_trans_function(model, feature, x_range, modality_name=modality.name)
@@ -1899,7 +1909,8 @@ def plot_normal_xy(
                 ax_plot.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2, label=group_label)
 
         # Trans function overlay (if trans model fitted)
-        if show_trans_function and not corrected:
+        # Show on corrected plot only (trans model was fitted on corrected data)
+        if show_trans_function and corrected:
             x_range = np.linspace(x_true.min(), x_true.max(), 100)
             y_pred = predict_trans_function(model, feature, x_range, modality_name=modality.name)
 
