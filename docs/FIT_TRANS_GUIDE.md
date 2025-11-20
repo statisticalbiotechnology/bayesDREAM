@@ -63,6 +63,9 @@ Applied multiplicatively on count scale (default: no correction if `set_technica
 - `K` (EC50/IC50): `Gamma((K_max/2)², (K_max/2)/σ²)` → positive half-max point
 - `n` (Hill coefficient): `Normal(0, σ_n)` clamped to `[nmin, nmax]`
 
+**Data-Driven Priors:**
+For binomial distributions, observed counts (numerator) are normalized by the denominator to get probabilities [0, 1] before computing `Amean` and `Vmax_mean`. This ensures priors are in the correct probability space, preventing parameter explosions.
+
 **Technical Correction:**
 ```
 logit(p_final) = logit(p_baseline) + log(alpha_y[group])
@@ -74,22 +77,28 @@ Applied on logit scale (additive in log-odds space).
 ### Multinomial (Donor/Acceptor Usage, Isoform Proportions)
 
 **Function Application:**
-- **Hill functions**: K independent Hill functions for K-1 categories, Kth is residual
+- **Hill functions**: K-1 independent Hill functions for K-1 categories, Kth is residual
   ```
   p_k = A_k + alpha * Hill_k(x)  for k=1..K-1
   p_K = 1 - sum(p_1, ..., p_{K-1})  # Residual category
   ```
+  The K-1 approach avoids identifiability issues in probability space.
+
 - **Polynomial**: K independent polynomials in logit space, softmax to get probabilities
   ```
   logit_k = logit(A_k) + alpha * polynomial_k(x)  for k=1..K
   p = softmax(logit_1, ..., logit_K)  # Sum to 1
   ```
+  The K-in-logit-space approach uses softmax for normalization.
 
-**Priors (per category k=1..K-1):**
+**Priors (per category k=1..K-1 for Hill, k=1..K for polynomial):**
 - `A_k` (baseline probability): `Beta(α, β)` → each category in [0, 1]
 - `Vmax_k` (Hill amplitude): `Beta(α, β)` → probability amplitude per category
 - `K_k` (EC50): `Gamma((K_max/2)², (K_max/2)/σ²)` → per-category half-max
 - `n_k` (Hill coefficient): `Normal(0, σ_n)` per category, clamped
+
+**Data-Driven Priors:**
+For multinomial distributions, observed counts [N, T, K] are normalized by the total across categories (sum over K) to get proportions [0, 1] before computing `Amean` and `Vmax_mean`. This ensures priors are in probability space.
 
 **Technical Correction:**
 ```
@@ -598,6 +607,9 @@ model.fit_trans(
 4. **Check convergence**: Monitor loss curves to ensure model has converged
 
 5. **Validate with plots**: Visualize fitted curves using `plot_xy_data()` with `show_hill_function=True`
+   - **Multi-modality support**: Plotting now works for all modalities (genes, splicing, ATAC, etc.)
+   - The plotting function automatically detects which modality was fitted and retrieves the correct posterior samples
+   - For non-gene modalities, pass the feature identifier that matches the modality's feature_meta column (e.g., 'coord.intron' for splice junctions)
 
 6. **Save intermediate results**: Save after each major step (technical, cis, trans)
 
