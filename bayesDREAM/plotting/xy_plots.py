@@ -780,22 +780,31 @@ def predict_trans_function(
     if modality_name is None:
         modality_name = model.primary_modality
 
+    print(f"[DEBUG] predict_trans_function called for feature='{feature}', modality='{modality_name}'")
+
     # Check if trans model fitted for this modality
     if modality_name == model.primary_modality:
         # Primary modality: check model-level posterior
         if not hasattr(model, 'posterior_samples_trans') or model.posterior_samples_trans is None:
+            print(f"[DEBUG] No model.posterior_samples_trans - returning None")
             return None
         posterior = model.posterior_samples_trans
+        print(f"[DEBUG] Using model-level posterior")
     else:
         # Non-primary modality: check modality-level posterior
         modality = model.get_modality(modality_name)
         if not hasattr(modality, 'posterior_samples_trans') or modality.posterior_samples_trans is None:
+            print(f"[DEBUG] No modality.posterior_samples_trans for '{modality_name}' - returning None")
             return None
         posterior = modality.posterior_samples_trans
+        print(f"[DEBUG] Using modality-level posterior, keys: {list(posterior.keys())[:10]}")
 
     # Get baseline A (present in all function types)
     if 'A' not in posterior:
+        print(f"[DEBUG] 'A' not in posterior - returning None")
         return None
+
+    print(f"[DEBUG] Found 'A' in posterior")
 
     A_samples = posterior['A']
 
@@ -1345,9 +1354,12 @@ def plot_binomial_xy(
             ax_plot.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2, label=group_label)
 
         # Trans function overlay (if trans model fitted)
+        print(f"[DEBUG] plot_binomial_xy _plot_one: show_trans_function={show_trans_function}, corrected={corrected}")
         if show_trans_function and not corrected:
+            print(f"[DEBUG] About to call predict_trans_function for feature='{feature}', modality='{modality.name}'")
             x_range = np.linspace(x_true.min(), x_true.max(), 100)
             y_pred = predict_trans_function(model, feature, x_range, modality_name=modality.name)
+            print(f"[DEBUG] predict_trans_function returned: {type(y_pred)}, is None: {y_pred is None}")
 
             if y_pred is not None:
                 # For binomial, PSI is in percentage scale [0, 100], so scale and clip predictions
