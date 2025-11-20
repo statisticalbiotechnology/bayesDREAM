@@ -837,15 +837,19 @@ def predict_trans_function(
         modality = model.get_modality(modality_name)
         if modality.feature_meta is not None:
             # Try common identifier columns in order of preference
+            # For splicing: prioritize coordinate-based identifiers (coord.intron, junction_id)
+            # For others: prioritize feature_id, feature, then fall back to gene names
             feature_list = None
-            for col in ['feature_id', 'feature', 'gene', 'gene_name', 'coord.intron', 'junction_id']:
+            for col in ['feature_id', 'feature', 'coord.intron', 'junction_id', 'gene_name', 'gene']:
                 if col in modality.feature_meta.columns:
                     feature_list = modality.feature_meta[col].tolist()
+                    print(f"[DEBUG] Using column '{col}' for feature identifiers")
                     break
 
             # If no column worked, try the index
             if feature_list is None:
                 feature_list = modality.feature_meta.index.tolist()
+                print(f"[DEBUG] Using index for feature identifiers")
         else:
             # No feature metadata - try to use feature count from posterior
             # Assume features are indexed 0, 1, 2, ... and cannot be matched by name
