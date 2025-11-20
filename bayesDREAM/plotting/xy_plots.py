@@ -817,15 +817,18 @@ def predict_trans_function(
         modality = model.get_modality(modality_name)
         if modality.feature_meta is not None:
             # Try common identifier columns in order of preference
+            feature_list = None
             for col in ['feature_id', 'feature', 'gene', 'gene_name', 'coord.intron', 'junction_id']:
                 if col in modality.feature_meta.columns:
                     feature_list = modality.feature_meta[col].tolist()
                     break
-            else:
-                # Fall back to index
+
+            # If no column worked, try the index
+            if feature_list is None:
                 feature_list = modality.feature_meta.index.tolist()
         else:
-            # No feature metadata - cannot map feature name to index
+            # No feature metadata - try to use feature count from posterior
+            # Assume features are indexed 0, 1, 2, ... and cannot be matched by name
             return None
 
     n_features_list = len(feature_list)
@@ -838,6 +841,16 @@ def predict_trans_function(
 
     # Now safe to check if feature is in feature_list and get its index
     if feature not in feature_list:
+        # Debug output to help diagnose feature matching issues
+        print(f"[DEBUG] predict_trans_function: Feature '{feature}' not found in feature_list")
+        print(f"[DEBUG]   Modality: {modality_name}")
+        print(f"[DEBUG]   Posterior dims: {n_genes_posterior}, Feature list length: {n_features_list}")
+        if modality_name != model.primary_modality:
+            modality_obj = model.get_modality(modality_name)
+            if modality_obj.feature_meta is not None:
+                print(f"[DEBUG]   feature_meta columns: {list(modality_obj.feature_meta.columns)}")
+                print(f"[DEBUG]   feature_meta index name: {modality_obj.feature_meta.index.name}")
+        print(f"[DEBUG]   First 5 features in list: {feature_list[:min(5, len(feature_list))]}")
         return None
 
     feature_idx = feature_list.index(feature)
