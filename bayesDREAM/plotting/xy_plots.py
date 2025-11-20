@@ -797,7 +797,7 @@ def predict_trans_function(
             print(f"[DEBUG] No modality.posterior_samples_trans for '{modality_name}' - returning None")
             return None
         posterior = modality.posterior_samples_trans
-        print(f"[DEBUG] Using modality-level posterior, keys: {list(posterior.keys())[:10]}")
+        print(f"[DEBUG] Using modality-level posterior, keys: {list(posterior.keys())}")
 
     # Get baseline A (present in all function types)
     if 'A' not in posterior:
@@ -843,9 +843,18 @@ def predict_trans_function(
     n_features_list = len(feature_list)
 
     # Check dimension consistency BEFORE using feature_list for indexing
+    print(f"[DEBUG] Dimension check: n_genes_posterior={n_genes_posterior}, n_features_list={n_features_list}")
     if n_genes_posterior != n_features_list:
         # Mismatch - cannot use feature_list for indexing
         # This happens when posterior was fitted on a subset of features
+        print(f"[DEBUG] DIMENSION MISMATCH: posterior has {n_genes_posterior} features, but feature_list has {n_features_list}")
+        print(f"[DEBUG]   This happens when trans model fitted on subset of features")
+        print(f"[DEBUG]   Modality: {modality_name}")
+        if modality_name != model.primary_modality:
+            modality_obj = model.get_modality(modality_name)
+            if modality_obj.feature_meta is not None:
+                print(f"[DEBUG]   feature_meta shape: {modality_obj.feature_meta.shape}")
+                print(f"[DEBUG]   feature_meta columns: {list(modality_obj.feature_meta.columns)}")
         return None
 
     # Now safe to check if feature is in feature_list and get its index
