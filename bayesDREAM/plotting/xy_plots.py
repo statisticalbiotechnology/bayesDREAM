@@ -776,11 +776,22 @@ def predict_trans_function(
     - single_hill: A + Vmax*Hill(x, K, n)
     - polynomial: sum(coeffs[i] * x^i)
     """
-    # Check if trans model fitted
-    if not hasattr(model, 'posterior_samples_trans') or model.posterior_samples_trans is None:
-        return None
+    # Determine which modality to use
+    if modality_name is None:
+        modality_name = model.primary_modality
 
-    posterior = model.posterior_samples_trans
+    # Check if trans model fitted for this modality
+    if modality_name == model.primary_modality:
+        # Primary modality: check model-level posterior
+        if not hasattr(model, 'posterior_samples_trans') or model.posterior_samples_trans is None:
+            return None
+        posterior = model.posterior_samples_trans
+    else:
+        # Non-primary modality: check modality-level posterior
+        modality = model.get_modality(modality_name)
+        if not hasattr(modality, 'posterior_samples_trans') or modality.posterior_samples_trans is None:
+            return None
+        posterior = modality.posterior_samples_trans
 
     # Get baseline A (present in all function types)
     if 'A' not in posterior:
@@ -796,36 +807,55 @@ def predict_trans_function(
         A_mean = A_samples.mean(axis=0)
         n_genes_posterior = A_mean.shape[0]
 
-    # Get trans_genes list (should match posterior dimensions)
-    trans_genes = model.trans_genes if hasattr(model, 'trans_genes') else []
-    n_genes_list = len(trans_genes)
+    # Get feature list from modality (NOT model.trans_genes!)
+    # model.trans_genes is only valid for primary modality
+    if modality_name == model.primary_modality:
+        # Primary modality: use model.trans_genes if available
+        feature_list = model.trans_genes if hasattr(model, 'trans_genes') else []
+    else:
+        # Non-primary modality: get feature names from modality
+        modality = model.get_modality(modality_name)
+        if modality.feature_meta is not None:
+            # Try common identifier columns in order of preference
+            for col in ['feature_id', 'feature', 'gene', 'gene_name', 'coord.intron', 'junction_id']:
+                if col in modality.feature_meta.columns:
+                    feature_list = modality.feature_meta[col].tolist()
+                    break
+            else:
+                # Fall back to index
+                feature_list = modality.feature_meta.index.tolist()
+        else:
+            # No feature metadata - cannot map feature name to index
+            return None
 
-    # Check dimension consistency BEFORE using trans_genes for indexing
-    if n_genes_posterior != n_genes_list:
-        # Mismatch - cannot use trans_genes for indexing
-        # This happens when posterior was fitted on a subset of genes
+    n_features_list = len(feature_list)
+
+    # Check dimension consistency BEFORE using feature_list for indexing
+    if n_genes_posterior != n_features_list:
+        # Mismatch - cannot use feature_list for indexing
+        # This happens when posterior was fitted on a subset of features
         return None
 
-    # Now safe to check if feature is in trans_genes and get its index
-    if feature not in trans_genes:
+    # Now safe to check if feature is in feature_list and get its index
+    if feature not in feature_list:
         return None
 
-    gene_idx = trans_genes.index(feature)
-    A = A_mean[gene_idx].item() if hasattr(A_mean, 'item') else A_mean[gene_idx]
+    feature_idx = feature_list.index(feature)
+    A = A_mean[feature_idx].item() if hasattr(A_mean, 'item') else A_mean[feature_idx]
 
     # Determine function type from available parameters
     if 'Vmax_a' in posterior and 'Vmax_b' in posterior:
         # ===== ADDITIVE HILL =====
         try:
             # Extract parameters
-            alpha = posterior['alpha'].mean(dim=0)[gene_idx].item() if hasattr(posterior['alpha'], 'mean') else posterior['alpha'].mean(axis=0)[gene_idx]
-            beta = posterior['beta'].mean(dim=0)[gene_idx].item() if hasattr(posterior['beta'], 'mean') else posterior['beta'].mean(axis=0)[gene_idx]
-            Vmax_a = posterior['Vmax_a'].mean(dim=0)[gene_idx].item() if hasattr(posterior['Vmax_a'], 'mean') else posterior['Vmax_a'].mean(axis=0)[gene_idx]
-            Vmax_b = posterior['Vmax_b'].mean(dim=0)[gene_idx].item() if hasattr(posterior['Vmax_b'], 'mean') else posterior['Vmax_b'].mean(axis=0)[gene_idx]
-            K_a = posterior['K_a'].mean(dim=0)[gene_idx].item() if hasattr(posterior['K_a'], 'mean') else posterior['K_a'].mean(axis=0)[gene_idx]
-            K_b = posterior['K_b'].mean(dim=0)[gene_idx].item() if hasattr(posterior['K_b'], 'mean') else posterior['K_b'].mean(axis=0)[gene_idx]
-            n_a = posterior['n_a'].mean(dim=0)[gene_idx].item() if hasattr(posterior['n_a'], 'mean') else posterior['n_a'].mean(axis=0)[gene_idx]
-            n_b = posterior['n_b'].mean(dim=0)[gene_idx].item() if hasattr(posterior['n_b'], 'mean') else posterior['n_b'].mean(axis=0)[gene_idx]
+            alpha = posterior['alpha'].mean(dim=0)[feature_idx].item() if hasattr(posterior['alpha'], 'mean') else posterior['alpha'].mean(axis=0)[feature_idx]
+            beta = posterior['beta'].mean(dim=0)[feature_idx].item() if hasattr(posterior['beta'], 'mean') else posterior['beta'].mean(axis=0)[feature_idx]
+            Vmax_a = posterior['Vmax_a'].mean(dim=0)[feature_idx].item() if hasattr(posterior['Vmax_a'], 'mean') else posterior['Vmax_a'].mean(axis=0)[feature_idx]
+            Vmax_b = posterior['Vmax_b'].mean(dim=0)[feature_idx].item() if hasattr(posterior['Vmax_b'], 'mean') else posterior['Vmax_b'].mean(axis=0)[feature_idx]
+            K_a = posterior['K_a'].mean(dim=0)[feature_idx].item() if hasattr(posterior['K_a'], 'mean') else posterior['K_a'].mean(axis=0)[feature_idx]
+            K_b = posterior['K_b'].mean(dim=0)[feature_idx].item() if hasattr(posterior['K_b'], 'mean') else posterior['K_b'].mean(axis=0)[feature_idx]
+            n_a = posterior['n_a'].mean(dim=0)[feature_idx].item() if hasattr(posterior['n_a'], 'mean') else posterior['n_a'].mean(axis=0)[feature_idx]
+            n_b = posterior['n_b'].mean(dim=0)[feature_idx].item() if hasattr(posterior['n_b'], 'mean') else posterior['n_b'].mean(axis=0)[feature_idx]
 
             # Compute Hill functions
             Hill_a = Hill_based_positive(x_range, Vmax=Vmax_a, A=0, K=K_a, n=n_a)
@@ -841,9 +871,9 @@ def predict_trans_function(
     elif 'Vmax' in posterior and 'K' in posterior and 'n' in posterior:
         # ===== SINGLE HILL =====
         try:
-            Vmax = posterior['Vmax'].mean(dim=0)[gene_idx].item() if hasattr(posterior['Vmax'], 'mean') else posterior['Vmax'].mean(axis=0)[gene_idx]
-            K = posterior['K'].mean(dim=0)[gene_idx].item() if hasattr(posterior['K'], 'mean') else posterior['K'].mean(axis=0)[gene_idx]
-            n = posterior['n'].mean(dim=0)[gene_idx].item() if hasattr(posterior['n'], 'mean') else posterior['n'].mean(axis=0)[gene_idx]
+            Vmax = posterior['Vmax'].mean(dim=0)[feature_idx].item() if hasattr(posterior['Vmax'], 'mean') else posterior['Vmax'].mean(axis=0)[feature_idx]
+            K = posterior['K'].mean(dim=0)[feature_idx].item() if hasattr(posterior['K'], 'mean') else posterior['K'].mean(axis=0)[feature_idx]
+            n = posterior['n'].mean(dim=0)[feature_idx].item() if hasattr(posterior['n'], 'mean') else posterior['n'].mean(axis=0)[feature_idx]
 
             # Compute Hill function
             y_pred = Hill_based_positive(x_range, Vmax=Vmax, A=A, K=K, n=n)
@@ -856,14 +886,14 @@ def predict_trans_function(
         # ===== POLYNOMIAL OR THETA-BASED =====
         try:
             theta_samples = posterior['theta']
-            # theta shape: (samples, genes, n_params)
+            # theta shape: (samples, features, n_params)
 
             # Check if it's polynomial by number of parameters
             if hasattr(theta_samples, 'mean'):
-                theta_mean = theta_samples.mean(dim=0)[gene_idx, :]  # (n_params,)
+                theta_mean = theta_samples.mean(dim=0)[feature_idx, :]  # (n_params,)
                 theta_np = theta_mean.cpu().numpy() if hasattr(theta_mean, 'cpu') else np.array(theta_mean)
             else:
-                theta_mean = theta_samples.mean(axis=0)[gene_idx, :]
+                theta_mean = theta_samples.mean(axis=0)[feature_idx, :]
                 theta_np = np.array(theta_mean)
 
             # Polynomial: y = coeffs[0] + coeffs[1]*x + coeffs[2]*x^2 + ...
