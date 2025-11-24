@@ -52,7 +52,7 @@ class TechnicalFitter:
         self,
         N, T, C, nsamples, minibatch_size=None,
         distribution='negbinom',
-        safety_factor=0.7  # Use 70% of available RAM
+        safety_factor=0.35  # Use 35% of available RAM (conservative for shared nodes)
     ):
         """
         Estimate memory requirements for Predictive and auto-set minibatch_size.
@@ -72,7 +72,7 @@ class TechnicalFitter:
         distribution : str
             Distribution type
         safety_factor : float
-            Fraction of available RAM to use (default 0.7 = 70%)
+            Fraction of available RAM to use (default 0.35 = 35%, conservative for shared nodes)
 
         Returns
         -------
@@ -98,7 +98,24 @@ class TechnicalFitter:
         available_gb = mem.available / (1024**3)
         total_gb = mem.total / (1024**3)
 
-        print(f"[MEMORY] Available CPU RAM: {available_gb:.1f} GB / {total_gb:.1f} GB total")
+        # Check for SLURM allocation (more accurate on HPC)
+        slurm_mem_gb = None
+        if 'SLURM_MEM_PER_NODE' in os.environ:
+            try:
+                slurm_mem_mb = int(os.environ['SLURM_MEM_PER_NODE'])
+                slurm_mem_gb = slurm_mem_mb / 1024
+                print(f"[MEMORY] SLURM allocation: {slurm_mem_gb:.1f} GB per node")
+            except (ValueError, KeyError):
+                pass
+
+        # Use SLURM allocation if available, otherwise use available memory
+        if slurm_mem_gb is not None:
+            usable_gb = min(slurm_mem_gb, available_gb)
+            print(f"[MEMORY] Using conservative estimate: {usable_gb:.1f} GB (from SLURM allocation)")
+        else:
+            usable_gb = available_gb
+            print(f"[MEMORY] Available CPU RAM: {available_gb:.1f} GB / {total_gb:.1f} GB total")
+            print(f"[MEMORY] Note: On shared nodes, actual usable memory may be lower")
 
         # Estimate memory per sample (in GB)
         # Parameters: alpha_y [C, T], mu_y [T], phi_y/sigma_y [T], etc.
@@ -119,14 +136,14 @@ class TechnicalFitter:
 
         print(f"[MEMORY] Estimated with parallel=True ({n_workers} workers): {total_parallel_gb:.1f} GB")
 
-        # Check if parallel execution fits in available memory
-        if total_parallel_gb > available_gb * safety_factor:
-            print(f"[MEMORY] Parallel execution would exceed safe limit ({available_gb * safety_factor:.1f} GB)")
+        # Check if parallel execution fits in usable memory
+        if total_parallel_gb > usable_gb * safety_factor:
+            print(f"[MEMORY] Parallel execution would exceed safe limit ({usable_gb * safety_factor:.1f} GB)")
             print(f"[MEMORY] Will use sequential execution (parallel=False)")
             use_parallel = False
 
             # For sequential: estimate how many samples fit in memory
-            safe_memory_gb = available_gb * safety_factor
+            safe_memory_gb = usable_gb * safety_factor
             available_for_samples_gb = safe_memory_gb - input_data_gb
 
             # How many samples can we fit?
@@ -146,9 +163,9 @@ class TechnicalFitter:
 
             # Even with parallel, check if we should batch the samples
             total_params_gb = nsamples * params_per_sample_gb
-            if total_params_gb > available_gb * safety_factor * 0.3:  # Parameters shouldn't use >30% of safe memory
+            if total_params_gb > usable_gb * safety_factor * 0.3:  # Parameters shouldn't use >30% of safe memory
                 # Recommend batching
-                safe_param_memory = available_gb * safety_factor * 0.3
+                safe_param_memory = usable_gb * safety_factor * 0.3
                 batch_size = int(safe_param_memory / params_per_sample_gb)
                 batch_size = max(10, min(100, batch_size))
                 print(f"[MEMORY] Even with parallel, recommend batching: minibatch_size={batch_size}")

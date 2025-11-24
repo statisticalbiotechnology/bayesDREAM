@@ -49,11 +49,11 @@ def sample_negbinom_trans(
     y_obs_tensor : torch.Tensor
         Observed counts, shape [N, T]
     mu_y : torch.Tensor
-        Expected expression from f(x), shape [N, T]
+        Expected expression from f(x), shape [N, T] or [T]
     phi_y_used : torch.Tensor
         Overdispersion parameter, shape [1, T] or [T]
     alpha_y_full : torch.Tensor or None
-        Technical group effects, shape [C, T] if provided
+        Technical group effects, shape [C, T] or [S, C, T] if provided
     groups_tensor : torch.Tensor or None
         Technical group codes, shape [N] if provided
     sum_factor_tensor : torch.Tensor
@@ -68,27 +68,88 @@ def sample_negbinom_trans(
     Notes
     -----
     mu_final = mu_y * alpha_y[group] * sum_factor
+    Handles both 2D ([C, T]) and 3D ([S, C, T]) alpha tensors for Predictive sampling.
     """
     # Apply technical group effects if present (multiplicative)
     if alpha_y_full is not None and groups_tensor is not None:
-        alpha_y_used = alpha_y_full[groups_tensor, :]  # [N, T]
-        mu_adjusted = mu_y * alpha_y_used
+        if alpha_y_full.dim() == 2:
+            # [C, T] -> index by group per observation -> [N, T]
+            alpha_y_used = alpha_y_full[groups_tensor, :]  # [N, T]
+            mu_adjusted = mu_y * alpha_y_used
+
+            # Apply sum factors
+            mu_final = mu_adjusted * sum_factor_tensor.unsqueeze(-1)  # [N, T]
+
+            # Sample observations
+            with pyro.plate("obs_plate", N, dim=-2):
+                pyro.sample(
+                    "y_obs",
+                    dist.NegativeBinomial(
+                        total_count=phi_y_used,
+                        logits=torch.log(mu_final + 1e-8) - torch.log(phi_y_used + 1e-8)
+                    ),
+                    obs=y_obs_tensor
+                )
+
+        elif alpha_y_full.dim() == 3:
+            # [S, C, T] -> index groups along dim=1 -> [S, N, T]
+            S = alpha_y_full.size(0)
+            alpha_y_used = alpha_y_full[:, groups_tensor, :]  # [S, N, T]
+
+            # Broadcast mu_y to [S, N, T] if needed
+            if mu_y.dim() == 1:  # [T]
+                mu_y_expanded = mu_y.unsqueeze(0).unsqueeze(0).expand(S, N, -1)  # [S, N, T]
+            elif mu_y.dim() == 2:  # [N, T]
+                mu_y_expanded = mu_y.unsqueeze(0).expand(S, -1, -1)  # [S, N, T]
+            else:
+                mu_y_expanded = mu_y  # Assume already [S, N, T]
+
+            mu_adjusted = mu_y_expanded * alpha_y_used  # [S, N, T]
+
+            # Broadcast sum_factor_tensor to [S, N, 1]
+            sum_factor_expanded = sum_factor_tensor.unsqueeze(0).unsqueeze(-1).expand(S, -1, -1)  # [S, N, 1]
+            mu_final = mu_adjusted * sum_factor_expanded  # [S, N, T]
+
+            # Broadcast phi_y_used to [S, 1, T]
+            if phi_y_used.dim() == 1:  # [T]
+                phi_expanded = phi_y_used.unsqueeze(0).unsqueeze(0).expand(S, 1, -1)
+            elif phi_y_used.dim() == 2:  # [1, T]
+                phi_expanded = phi_y_used.unsqueeze(0).expand(S, -1, -1)
+            else:
+                phi_expanded = phi_y_used
+
+            # Expand y_obs_tensor to [S, N, T]
+            y_obs_expanded = y_obs_tensor.unsqueeze(0).expand(S, -1, -1)
+
+            # Sample observations with sample dimension
+            with pyro.plate("obs_plate", S * N * T):
+                pyro.sample(
+                    "y_obs",
+                    dist.NegativeBinomial(
+                        total_count=phi_expanded,
+                        logits=torch.log(mu_final + 1e-8) - torch.log(phi_expanded + 1e-8)
+                    ),
+                    obs=y_obs_expanded.reshape(-1)
+                )
+        else:
+            raise ValueError(f"Unexpected alpha_y_full shape: {tuple(alpha_y_full.shape)}")
     else:
+        # No technical group effects
         mu_adjusted = mu_y
 
-    # Apply sum factors
-    mu_final = mu_adjusted * sum_factor_tensor.unsqueeze(-1)  # [N, T]
+        # Apply sum factors
+        mu_final = mu_adjusted * sum_factor_tensor.unsqueeze(-1)  # [N, T]
 
-    # Sample observations
-    with pyro.plate("obs_plate", N, dim=-2):
-        pyro.sample(
-            "y_obs",
-            dist.NegativeBinomial(
-                total_count=phi_y_used,
-                logits=torch.log(mu_final + 1e-8) - torch.log(phi_y_used + 1e-8)
-            ),
-            obs=y_obs_tensor
-        )
+        # Sample observations
+        with pyro.plate("obs_plate", N, dim=-2):
+            pyro.sample(
+                "y_obs",
+                dist.NegativeBinomial(
+                    total_count=phi_y_used,
+                    logits=torch.log(mu_final + 1e-8) - torch.log(phi_y_used + 1e-8)
+                ),
+                obs=y_obs_tensor
+            )
 
 
 #######################################
