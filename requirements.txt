@@ -24,6 +24,9 @@ seaborn>=0.13.0
 # Data I/O
 h5py>=3.14.0
 
+# System monitoring (recommended for automatic memory management)
+psutil>=5.9.0
+
 # Optional but recommended
 # pytest>=7.0.0  # For running tests
 # jupyter>=1.0.0  # For notebooks

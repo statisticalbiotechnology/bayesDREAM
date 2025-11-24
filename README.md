@@ -64,11 +64,16 @@ git clone https://github.com/YOUR_USERNAME/bayesDREAM.git
 cd bayesDREAM
 
 # Install dependencies
-pip install torch pyro-ppl pandas numpy scipy scikit-learn matplotlib
+pip install torch pyro-ppl pandas numpy scipy scikit-learn matplotlib psutil
+
+# Or use requirements.txt
+pip install -r requirements.txt
 
 # Install in development mode
 pip install -e .
 ```
+
+**Note:** `psutil` is recommended for automatic memory management during `fit_technical()`. Without it, the code will use conservative default batching strategies.
 
 ## Quick Start
 

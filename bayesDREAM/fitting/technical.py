@@ -15,6 +15,14 @@ import pyro.distributions as dist
 from pyro.distributions.transforms import iterated, affine_autoregressive
 import pyro.optim as optim
 import pyro.infer as infer
+import multiprocessing
+
+# Optional dependency for memory detection
+try:
+    import psutil
+    HAS_PSUTIL = True
+except ImportError:
+    HAS_PSUTIL = False
 
 
 
@@ -39,7 +47,116 @@ class TechnicalFitter:
         if isinstance(x, torch.Tensor):
             return x.detach().cpu()
         return x
-    
+
+    def _estimate_predictive_memory_and_set_minibatch(
+        self,
+        N, T, C, nsamples, minibatch_size=None,
+        distribution='negbinom',
+        safety_factor=0.7  # Use 70% of available RAM
+    ):
+        """
+        Estimate memory requirements for Predictive and auto-set minibatch_size.
+
+        Parameters
+        ----------
+        N : int
+            Number of observations (cells)
+        T : int
+            Number of features
+        C : int
+            Number of technical groups
+        nsamples : int
+            Number of posterior samples requested
+        minibatch_size : int or None
+            If provided, use this value. If None, auto-compute.
+        distribution : str
+            Distribution type
+        safety_factor : float
+            Fraction of available RAM to use (default 0.7 = 70%)
+
+        Returns
+        -------
+        minibatch_size : int or None
+            Recommended minibatch size, or None if full batch fits
+        use_parallel : bool
+            Whether to use parallel=True in Predictive
+        """
+        # If user explicitly set minibatch_size, respect it
+        if minibatch_size is not None:
+            print(f"[MEMORY] Using user-specified minibatch_size={minibatch_size}")
+            return minibatch_size, True
+
+        # If psutil not available, use conservative defaults
+        if not HAS_PSUTIL:
+            print("[MEMORY] psutil not available - using conservative defaults")
+            print("[MEMORY] Install psutil for automatic memory detection: pip install psutil")
+            # Conservative: always batch with 50 samples, no parallel
+            return 50, False
+
+        # Get available CPU RAM
+        mem = psutil.virtual_memory()
+        available_gb = mem.available / (1024**3)
+        total_gb = mem.total / (1024**3)
+
+        print(f"[MEMORY] Available CPU RAM: {available_gb:.1f} GB / {total_gb:.1f} GB total")
+
+        # Estimate memory per sample (in GB)
+        # Parameters: alpha_y [C, T], mu_y [T], phi_y/sigma_y [T], etc.
+        params_per_sample_gb = (C * T + 3 * T) * 4 / (1024**3)
+
+        # Input data (counts matrix, sum factors)
+        input_data_gb = (N * T + N) * 4 / (1024**3)
+
+        # Estimate number of parallel workers (defaults to CPU count)
+        n_workers = min(multiprocessing.cpu_count(), 32)  # Cap at 32
+
+        # Memory per worker during parallel execution
+        # Each worker gets a copy of input data + generates samples
+        mem_per_worker_gb = input_data_gb + params_per_sample_gb * 10  # Assume ~10 samples buffer
+
+        # Total memory for parallel execution
+        total_parallel_gb = n_workers * mem_per_worker_gb
+
+        print(f"[MEMORY] Estimated with parallel=True ({n_workers} workers): {total_parallel_gb:.1f} GB")
+
+        # Check if parallel execution fits in available memory
+        if total_parallel_gb > available_gb * safety_factor:
+            print(f"[MEMORY] Parallel execution would exceed safe limit ({available_gb * safety_factor:.1f} GB)")
+            print(f"[MEMORY] Will use sequential execution (parallel=False)")
+            use_parallel = False
+
+            # For sequential: estimate how many samples fit in memory
+            safe_memory_gb = available_gb * safety_factor
+            available_for_samples_gb = safe_memory_gb - input_data_gb
+
+            # How many samples can we fit?
+            max_samples_at_once = int(available_for_samples_gb / params_per_sample_gb)
+
+            if max_samples_at_once >= nsamples:
+                print(f"[MEMORY] All {nsamples} samples fit in memory (sequential mode)")
+                return None, False
+            else:
+                # Need to batch
+                recommended_batch = max(10, min(100, max_samples_at_once))
+                print(f"[MEMORY] Auto-setting minibatch_size={recommended_batch} (sequential mode)")
+                print(f"[MEMORY] This will require {int(np.ceil(nsamples / recommended_batch))} batches")
+                return recommended_batch, False
+        else:
+            print(f"[MEMORY] Parallel execution fits within safe limit")
+
+            # Even with parallel, check if we should batch the samples
+            total_params_gb = nsamples * params_per_sample_gb
+            if total_params_gb > available_gb * safety_factor * 0.3:  # Parameters shouldn't use >30% of safe memory
+                # Recommend batching
+                safe_param_memory = available_gb * safety_factor * 0.3
+                batch_size = int(safe_param_memory / params_per_sample_gb)
+                batch_size = max(10, min(100, batch_size))
+                print(f"[MEMORY] Even with parallel, recommend batching: minibatch_size={batch_size}")
+                return batch_size, True
+            else:
+                print(f"[MEMORY] Full batch ({nsamples} samples) should fit")
+                return None, True
+
     def _model_technical(
         self,
         N,
@@ -1366,7 +1483,7 @@ class TechnicalFitter:
         else:
             elbo = pyro.infer.Trace_ELBO(num_particles=1)   # you can bump num_particles later if needed
         
-        optimizer = pyro.optim.Adam({"lr": lr})
+        optimizer = pyro.optim.ClippedAdam({"lr": lr, "clip_norm": 10.0})
         svi = pyro.infer.SVI(self._model_technical, guide_cellline, optimizer, loss=elbo)
         guide_cellline.to(self.model.device)
     
@@ -1447,6 +1564,15 @@ class TechnicalFitter:
             torch.cuda.empty_cache()
         import gc; gc.collect()
 
+        # ========================================
+        # AUTO-DETECT MEMORY AND SET MINIBATCH
+        # ========================================
+        minibatch_size, use_parallel = self._estimate_predictive_memory_and_set_minibatch(
+            N=N, T=T_fit, C=C, nsamples=nsamples,
+            minibatch_size=minibatch_size,
+            distribution=distribution
+        )
+
         # CRITICAL MEMORY OPTIMIZATION: Exclude observation predictions from posterior
         # These are enormous ([S, N, T]) and redundant since we already have the data
         # Default filter excludes: y_obs_ntc, y_obs (for any distribution)
@@ -1458,12 +1584,12 @@ class TechnicalFitter:
             return True
 
         keep_sites = kwargs.get("keep_sites", default_keep_sites)
-    
+
         if minibatch_size is not None:
             from collections import defaultdict
-            print(f"[INFO] Running Predictive in minibatches of {minibatch_size}...")
+            print(f"[INFO] Running Predictive in minibatches of {minibatch_size} (parallel={use_parallel})...")
             predictive_technical = pyro.infer.Predictive(
-                self._model_technical, guide=guide_cellline, num_samples=minibatch_size, parallel=True
+                self._model_technical, guide=guide_cellline, num_samples=minibatch_size, parallel=use_parallel
             )
             all_samples = defaultdict(list)
             with torch.no_grad():
@@ -1477,8 +1603,9 @@ class TechnicalFitter:
                     gc.collect()
             posterior_samples = {k: torch.cat(v, dim=0) for k, v in all_samples.items()}
         else:
+            print(f"[INFO] Running Predictive in full batch mode (parallel={use_parallel})...")
             predictive_technical = pyro.infer.Predictive(
-                self._model_technical, guide=guide_cellline, num_samples=nsamples
+                self._model_technical, guide=guide_cellline, num_samples=nsamples, parallel=use_parallel
             )
             with torch.no_grad():
                 posterior_samples = predictive_technical(**model_inputs)
