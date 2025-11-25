@@ -152,20 +152,22 @@ class TechnicalFitter:
             print(f"[MEMORY] Safety factor: {safety_factor:.0%} (shared node, no SLURM)")
 
         # Estimate memory per sample (in GB)
-        # Parameters: alpha_y [C, T], mu_y [T], phi_y/sigma_y [T], delta_y [C, T], etc.
-        # Using return_sites, we ONLY sample parameters (not observations)
+        # Parameters STORED: alpha_y [C, T], mu_y [T], phi_y/sigma_y [T], delta_y [C, T], etc.
         params_per_sample_gb = (C * T + C * T + 3 * T) * 4 / (1024**3)  # alpha, delta, mu, phi, sigma
 
         # Input data (counts matrix, sum factors)
         input_data_gb = (N * T + N) * 4 / (1024**3)
 
-        # CRITICAL: With return_sites, we NO LONGER create observation tensors!
-        # Old code wasted 234 GB creating [S, N, T] y_obs during likelihood evaluation
-        # New code: return_sites=['alpha_y', 'mu_y', ...] skips observation sampling entirely
+        # CRITICAL: TEMPORARY tensors created during likelihood evaluation
+        # Even though we don't SAVE observations, Pyro creates temporary [S, N, T] tensors:
+        # - alpha_y_used: [S, N, T] from gather operation
+        # - mu_final: [S, N, T] after broadcasting
+        # - These exist temporarily during forward pass
+        temp_per_sample_gb = (N * T) * 4 / (1024**3)  # Temporary [N, T] per sample
 
         print(f"[MEMORY] Input data: {input_data_gb:.2f} GB")
-        print(f"[MEMORY] Params per sample: {params_per_sample_gb:.2f} GB")
-        print(f"[MEMORY] NOTE: Using return_sites to skip observation sampling (saves ~{(N * T * 4 / 1024**3):.1f} GB per sample!)")
+        print(f"[MEMORY] Params stored per sample: {params_per_sample_gb:.2f} GB")
+        print(f"[MEMORY] Temporary tensors per sample (during likelihood): {temp_per_sample_gb:.2f} GB")
 
         # Estimate number of parallel workers (defaults to CPU count)
         n_workers = min(multiprocessing.cpu_count(), 32)  # Cap at 32
@@ -188,46 +190,47 @@ class TechnicalFitter:
             print(f"[MEMORY] Parallel execution fits within safe limit")
             use_parallel = True
 
-        # Check if we need to batch based on PARAMETER storage
-        # With return_sites, we only store parameters (no [S, N, T] observations!)
+        # Check if we need to batch based on TEMPORARY tensor size during likelihood
+        # Even though we don't SAVE observations, Pyro creates [S, N, T] during forward pass
         safe_memory_gb = usable_gb * safety_factor
-        available_for_params_gb = safe_memory_gb - input_data_gb
+        available_for_sampling_gb = safe_memory_gb - input_data_gb
 
-        # Total parameter storage for all samples
-        total_params_gb = nsamples * params_per_sample_gb
+        # Memory per sample = stored parameters + temporary tensors during likelihood
+        memory_per_sample_gb = params_per_sample_gb + temp_per_sample_gb
+
+        # How many samples can we process at once?
+        max_samples_at_once = int(available_for_sampling_gb / memory_per_sample_gb)
 
         print(f"[MEMORY] Safe memory limit: {safe_memory_gb:.1f} GB")
-        print(f"[MEMORY] Available for parameters: {available_for_params_gb:.1f} GB")
-        print(f"[MEMORY] Total params for {nsamples} samples: {total_params_gb:.1f} GB")
+        print(f"[MEMORY] Available for sampling: {available_for_sampling_gb:.1f} GB")
+        print(f"[MEMORY] Memory per sample (stored + temp): {memory_per_sample_gb:.2f} GB")
+        print(f"[MEMORY] Max samples that fit: {max_samples_at_once}")
 
-        if total_params_gb <= available_for_params_gb:
-            print(f"[MEMORY] All {nsamples} samples fit in memory (only storing parameters, not observations)")
+        if max_samples_at_once >= nsamples:
+            print(f"[MEMORY] All {nsamples} samples fit in memory")
             return None, use_parallel
         else:
-            # Need to batch - too many parameter samples
+            # Need to batch - temporary tensors are too large
             # CRITICAL: Disable parallel when minibatching!
             if use_parallel:
                 print(f"[MEMORY] Disabling parallel=True for minibatching")
                 use_parallel = False
-
-            # How many samples can we fit?
-            max_samples_at_once = int(available_for_params_gb / params_per_sample_gb)
 
             if max_samples_at_once < 10:
                 # Very constrained
                 recommended_batch = max(1, max_samples_at_once)
                 print(f"[WARNING] Memory very constrained! Can only fit {recommended_batch} samples at once")
             else:
-                recommended_batch = max(10, min(200, max_samples_at_once))  # Can use larger batches now!
+                recommended_batch = max(10, min(100, max_samples_at_once))
 
-            batch_params_gb = recommended_batch * params_per_sample_gb
-            total_memory_gb = input_data_gb + batch_params_gb
+            batch_memory_gb = recommended_batch * memory_per_sample_gb
+            total_memory_gb = input_data_gb + batch_memory_gb
 
             print(f"[MEMORY] Auto-setting minibatch_size={recommended_batch}")
             print(f"[MEMORY] This will require {int(np.ceil(nsamples / recommended_batch))} batches")
             print(f"[MEMORY] Estimated memory per batch:")
             print(f"[MEMORY]   - Input data: {input_data_gb:.1f} GB")
-            print(f"[MEMORY]   - Parameters (batch): {batch_params_gb:.1f} GB")
+            print(f"[MEMORY]   - Batch samples (stored + temp): {batch_memory_gb:.1f} GB")
             print(f"[MEMORY]   - Total: {total_memory_gb:.1f} GB (vs {safe_memory_gb:.1f} GB limit)")
 
             return recommended_batch, use_parallel
@@ -249,7 +252,7 @@ class TechnicalFitter:
         denominator_ntc_tensor=None,
         K=None,
         D=None,
-        sigma_hat_tensor=None,   # ← ADD THIS
+        sigma_hat_tensor=None,
     ):
         """
         Technical model used for NTC-only prefit of cell-line effects.
@@ -533,72 +536,76 @@ class TechnicalFitter:
         # --------------------------------
         # Call distribution-specific sampler
         # --------------------------------
-        from .distributions import get_observation_sampler
-        observation_sampler = get_observation_sampler(distribution, 'trans')
-    
-        if distribution == 'negbinom':
-            observation_sampler(
-                y_obs_tensor=y_obs_ntc_tensor,           # [N, T]
-                mu_y=mu_y,                               # [T]
-                phi_y_used=phi_y.unsqueeze(-2),          # [1, T]
-                alpha_y_full=alpha_full_mul,             # [C, T]
-                groups_tensor=groups_ntc_tensor,
-                sum_factor_tensor=sum_factor_ntc_tensor,
-                N=N, T=T, C=C
-            )
-    
-        elif distribution == 'normal':
-            observation_sampler(
-                y_obs_tensor=y_obs_ntc_tensor,           # [N, T]
-                mu_y=mu_y,                               # [T]
-                sigma_y=sigma_y,                         # [T]
-                alpha_y_full=alpha_full_add,             # [C, T]
-                groups_tensor=groups_ntc_tensor,
-                N=N, T=T, C=C
-            )
+        # CRITICAL: Skip observation sampling during Predictive to save memory!
+        # During Predictive, we only need parameter posteriors (alpha, mu, phi, etc.)
+        # Observation sampling creates huge [S, N, T] tensors we don't need
+        if not skip_obs_sampling:
+            from .distributions import get_observation_sampler
+            observation_sampler = get_observation_sampler(distribution, 'trans')
 
-        elif distribution == 'studentt':
-            # Degrees of freedom (nu) - two options:
-            # Option 1: Fixed value (simpler, faster)
-            nu_y = self._t(3.0)
-            # Option 2: Sample per-feature (more flexible, slower)
-            # with f_plate:
-            #     nu_y = pyro.sample("nu_y", dist.Gamma(self._t(10.0), self._t(2.0)))  # mean~5, ensures df>2
+            if distribution == 'negbinom':
+                observation_sampler(
+                    y_obs_tensor=y_obs_ntc_tensor,           # [N, T]
+                    mu_y=mu_y,                               # [T]
+                    phi_y_used=phi_y.unsqueeze(-2),          # [1, T]
+                    alpha_y_full=alpha_full_mul,             # [C, T]
+                    groups_tensor=groups_ntc_tensor,
+                    sum_factor_tensor=sum_factor_ntc_tensor,
+                    N=N, T=T, C=C
+                )
 
-            observation_sampler(
-                y_obs_tensor=y_obs_ntc_tensor,           # [N, T]
-                mu_y=mu_y,                               # [T]
-                sigma_y=sigma_y,                         # [T]
-                nu_y=nu_y,                               # scalar or [T]
-                alpha_y_full=alpha_full_add,             # [C, T]
-                groups_tensor=groups_ntc_tensor,
-                N=N, T=T, C=C
-            )
-    
-        elif distribution == 'binomial':
-            observation_sampler(
-                y_obs_tensor=y_obs_ntc_tensor,           # [N, T]
-                denominator_tensor=denominator_ntc_tensor,
-                mu_y=mu_y,                               # [T] in [0,1]
-                alpha_y_full=alpha_full_add,             # [C, T] (add on logit)
-                groups_tensor=groups_ntc_tensor,
-                N=N, T=T, C=C
-            )
-    
-        elif distribution == 'multinomial':
-            # mu_y is [T, K] baseline; expand to [N, T, K]
-            #mu_y_multi = mu_y.unsqueeze(0).expand(N, T, K)
-            observation_sampler(
-                y_obs_tensor=y_obs_ntc_tensor,
-                #mu_y=mu_y_multi,
-                mu_y=mu_y,
-                alpha_y_full=alpha_full_add,     # <— ADD THIS
-                groups_tensor=groups_ntc_tensor, # <— ADD THIS
-                N=N, T=T, K=K, C=C
-            )
-    
-        else:
-            raise ValueError(f"Unknown distribution: {distribution}")
+            elif distribution == 'normal':
+                observation_sampler(
+                    y_obs_tensor=y_obs_ntc_tensor,           # [N, T]
+                    mu_y=mu_y,                               # [T]
+                    sigma_y=sigma_y,                         # [T]
+                    alpha_y_full=alpha_full_add,             # [C, T]
+                    groups_tensor=groups_ntc_tensor,
+                    N=N, T=T, C=C
+                )
+
+            elif distribution == 'studentt':
+                # Degrees of freedom (nu) - two options:
+                # Option 1: Fixed value (simpler, faster)
+                nu_y = self._t(3.0)
+                # Option 2: Sample per-feature (more flexible, slower)
+                # with f_plate:
+                #     nu_y = pyro.sample("nu_y", dist.Gamma(self._t(10.0), self._t(2.0)))  # mean~5, ensures df>2
+
+                observation_sampler(
+                    y_obs_tensor=y_obs_ntc_tensor,           # [N, T]
+                    mu_y=mu_y,                               # [T]
+                    sigma_y=sigma_y,                         # [T]
+                    nu_y=nu_y,                               # scalar or [T]
+                    alpha_y_full=alpha_full_add,             # [C, T]
+                    groups_tensor=groups_ntc_tensor,
+                    N=N, T=T, C=C
+                )
+
+            elif distribution == 'binomial':
+                observation_sampler(
+                    y_obs_tensor=y_obs_ntc_tensor,           # [N, T]
+                    denominator_tensor=denominator_ntc_tensor,
+                    mu_y=mu_y,                               # [T] in [0,1]
+                    alpha_y_full=alpha_full_add,             # [C, T] (add on logit)
+                    groups_tensor=groups_ntc_tensor,
+                    N=N, T=T, C=C
+                )
+
+            elif distribution == 'multinomial':
+                # mu_y is [T, K] baseline; expand to [N, T, K]
+                #mu_y_multi = mu_y.unsqueeze(0).expand(N, T, K)
+                observation_sampler(
+                    y_obs_tensor=y_obs_ntc_tensor,
+                    #mu_y=mu_y_multi,
+                    mu_y=mu_y,
+                    alpha_y_full=alpha_full_add,     # <— ADD THIS
+                    groups_tensor=groups_ntc_tensor, # <— ADD THIS
+                    N=N, T=T, K=K, C=C
+                )
+
+            else:
+                raise ValueError(f"Unknown distribution: {distribution}")
     
     def set_technical_groups(self, covariates: list[str]):
         if not covariates:
@@ -1662,16 +1669,12 @@ class TechnicalFitter:
 
         if minibatch_size is not None:
             print(f"[INFO] Running Predictive in minibatches of {minibatch_size} (parallel={use_parallel})...")
-            print(f"[MEMORY] Skipping observation sampling to save memory (only sampling parameters)")
-            # CRITICAL: Use return_sites to skip observation sampling entirely
-            # Without this, Pyro creates [S, N, T] tensors during likelihood evaluation
-            # even though we don't save them - wastes 234 GB!
-            param_sites = ['alpha_y', 'alpha_y_mul', 'delta_y_add', 'delta_y_mul',
-                          'mu_y', 'mu_ntc', 'phi_y', 'sigma_y', 'nu_y',
-                          'beta_o', 'o_y', 'log2_alpha_y', 'probs_baseline_raw']
+            print(f"[MEMORY] Skipping observation sampling to save memory (skip_obs_sampling=True)")
+            # CRITICAL: Pass skip_obs_sampling=True to prevent observation sampler execution
+            # This prevents creating huge [S, N, T] tensors we don't need
             predictive_technical = pyro.infer.Predictive(
                 self._model_technical, guide=guide_cellline, num_samples=minibatch_size,
-                parallel=use_parallel, return_sites=param_sites
+                parallel=use_parallel
             )
 
             # Run first batch to get shapes, then preallocate full tensors
@@ -1718,14 +1721,11 @@ class TechnicalFitter:
                     gc.collect()
         else:
             print(f"[INFO] Running Predictive in full batch mode (parallel={use_parallel})...")
-            print(f"[MEMORY] Skipping observation sampling to save memory (only sampling parameters)")
-            # CRITICAL: Use return_sites to skip observation sampling entirely
-            param_sites = ['alpha_y', 'alpha_y_mul', 'delta_y_add', 'delta_y_mul',
-                          'mu_y', 'mu_ntc', 'phi_y', 'sigma_y', 'nu_y',
-                          'beta_o', 'o_y', 'log2_alpha_y', 'probs_baseline_raw']
+            print(f"[MEMORY] Skipping observation sampling to save memory (skip_obs_sampling=True)")
+            # CRITICAL: Pass skip_obs_sampling=True to prevent observation sampler execution
             predictive_technical = pyro.infer.Predictive(
                 self._model_technical, guide=guide_cellline, num_samples=nsamples,
-                parallel=use_parallel, return_sites=param_sites
+                parallel=use_parallel
             )
             with torch.no_grad():
                 posterior_samples = predictive_technical(**model_inputs)
