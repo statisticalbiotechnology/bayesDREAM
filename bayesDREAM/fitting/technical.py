@@ -141,7 +141,14 @@ class TechnicalFitter:
         # Estimate memory per sample (in GB)
         params_per_sample_gb = (C * T + C * T + 3 * T) * 4 / (1024**3)
         input_data_gb = (N * T + N) * 4 / (1024**3)
-        temp_per_sample_gb = (N * T) * 4 / (1024**3)  # Temporary [N, T] tensors during likelihood
+
+        # CRITICAL: Multiple temporary [N, T] tensors exist simultaneously during forward pass:
+        # 1. alpha_y_used [S, N, T] from gather
+        # 2. mu_final [S, N, T] from broadcasting
+        # 3. mean_param [S, N, T] from arithmetic
+        # 4. observation sample [S, N, T] (filtered by keep_sites but still created)
+        # Conservative estimate: 4× the single tensor size
+        temp_per_sample_gb = 4 * (N * T) * 4 / (1024**3)
         memory_per_sample_gb = params_per_sample_gb + temp_per_sample_gb
 
         # Check if parallel execution fits
