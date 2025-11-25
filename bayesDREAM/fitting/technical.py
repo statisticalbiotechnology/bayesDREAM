@@ -152,19 +152,20 @@ class TechnicalFitter:
             print(f"[MEMORY] Safety factor: {safety_factor:.0%} (shared node, no SLURM)")
 
         # Estimate memory per sample (in GB)
-        # Parameters: alpha_y [C, T], mu_y [T], phi_y/sigma_y [T], etc.
-        params_per_sample_gb = (C * T + 3 * T) * 4 / (1024**3)
+        # Parameters: alpha_y [C, T], mu_y [T], phi_y/sigma_y [T], delta_y [C, T], etc.
+        # Using return_sites, we ONLY sample parameters (not observations)
+        params_per_sample_gb = (C * T + C * T + 3 * T) * 4 / (1024**3)  # alpha, delta, mu, phi, sigma
 
         # Input data (counts matrix, sum factors)
         input_data_gb = (N * T + N) * 4 / (1024**3)
 
-        # CRITICAL: Output tensor from Predictive sampling [S, N, T]
-        # This is the huge tensor that causes OOM!
-        output_tensor_per_sample_gb = (N * T) * 4 / (1024**3)
+        # CRITICAL: With return_sites, we NO LONGER create observation tensors!
+        # Old code wasted 234 GB creating [S, N, T] y_obs during likelihood evaluation
+        # New code: return_sites=['alpha_y', 'mu_y', ...] skips observation sampling entirely
 
         print(f"[MEMORY] Input data: {input_data_gb:.2f} GB")
         print(f"[MEMORY] Params per sample: {params_per_sample_gb:.2f} GB")
-        print(f"[MEMORY] Output per sample [N, T]: {output_tensor_per_sample_gb:.2f} GB")
+        print(f"[MEMORY] NOTE: Using return_sites to skip observation sampling (saves ~{(N * T * 4 / 1024**3):.1f} GB per sample!)")
 
         # Estimate number of parallel workers (defaults to CPU count)
         n_workers = min(multiprocessing.cpu_count(), 32)  # Cap at 32
@@ -187,39 +188,48 @@ class TechnicalFitter:
             print(f"[MEMORY] Parallel execution fits within safe limit")
             use_parallel = True
 
-        # Now check if we need to batch based on OUTPUT tensor size
-        # This is the critical check that was missing!
+        # Check if we need to batch based on PARAMETER storage
+        # With return_sites, we only store parameters (no [S, N, T] observations!)
         safe_memory_gb = usable_gb * safety_factor
-        available_for_output_gb = safe_memory_gb - input_data_gb
+        available_for_params_gb = safe_memory_gb - input_data_gb
 
-        # How many samples can we fit given the output tensor?
-        max_samples_at_once = int(available_for_output_gb / output_tensor_per_sample_gb)
+        # Total parameter storage for all samples
+        total_params_gb = nsamples * params_per_sample_gb
 
         print(f"[MEMORY] Safe memory limit: {safe_memory_gb:.1f} GB")
-        print(f"[MEMORY] Available for output tensors: {available_for_output_gb:.1f} GB")
-        print(f"[MEMORY] Max samples that fit: {max_samples_at_once}")
+        print(f"[MEMORY] Available for parameters: {available_for_params_gb:.1f} GB")
+        print(f"[MEMORY] Total params for {nsamples} samples: {total_params_gb:.1f} GB")
 
-        if max_samples_at_once >= nsamples:
-            print(f"[MEMORY] All {nsamples} samples fit in memory")
+        if total_params_gb <= available_for_params_gb:
+            print(f"[MEMORY] All {nsamples} samples fit in memory (only storing parameters, not observations)")
             return None, use_parallel
         else:
-            # Need to batch - output tensor is too large
+            # Need to batch - too many parameter samples
             # CRITICAL: Disable parallel when minibatching!
-            # Parallel creates memory spike during concatenation (2× output tensor size)
             if use_parallel:
-                print(f"[MEMORY] Disabling parallel=True for minibatching (avoids concatenation spike)")
+                print(f"[MEMORY] Disabling parallel=True for minibatching")
                 use_parallel = False
 
+            # How many samples can we fit?
+            max_samples_at_once = int(available_for_params_gb / params_per_sample_gb)
+
             if max_samples_at_once < 10:
-                # Very constrained - use minimum viable batch
+                # Very constrained
                 recommended_batch = max(1, max_samples_at_once)
                 print(f"[WARNING] Memory very constrained! Can only fit {recommended_batch} samples at once")
             else:
-                recommended_batch = max(10, min(100, max_samples_at_once))
+                recommended_batch = max(10, min(200, max_samples_at_once))  # Can use larger batches now!
+
+            batch_params_gb = recommended_batch * params_per_sample_gb
+            total_memory_gb = input_data_gb + batch_params_gb
 
             print(f"[MEMORY] Auto-setting minibatch_size={recommended_batch}")
             print(f"[MEMORY] This will require {int(np.ceil(nsamples / recommended_batch))} batches")
-            print(f"[MEMORY] Estimated memory per batch (sequential): {(input_data_gb + recommended_batch * output_tensor_per_sample_gb):.1f} GB")
+            print(f"[MEMORY] Estimated memory per batch:")
+            print(f"[MEMORY]   - Input data: {input_data_gb:.1f} GB")
+            print(f"[MEMORY]   - Parameters (batch): {batch_params_gb:.1f} GB")
+            print(f"[MEMORY]   - Total: {total_memory_gb:.1f} GB (vs {safe_memory_gb:.1f} GB limit)")
+
             return recommended_batch, use_parallel
 
     def _model_technical(
@@ -1651,26 +1661,71 @@ class TechnicalFitter:
         keep_sites = kwargs.get("keep_sites", default_keep_sites)
 
         if minibatch_size is not None:
-            from collections import defaultdict
             print(f"[INFO] Running Predictive in minibatches of {minibatch_size} (parallel={use_parallel})...")
+            print(f"[MEMORY] Skipping observation sampling to save memory (only sampling parameters)")
+            # CRITICAL: Use return_sites to skip observation sampling entirely
+            # Without this, Pyro creates [S, N, T] tensors during likelihood evaluation
+            # even though we don't save them - wastes 234 GB!
+            param_sites = ['alpha_y', 'alpha_y_mul', 'delta_y_add', 'delta_y_mul',
+                          'mu_y', 'mu_ntc', 'phi_y', 'sigma_y', 'nu_y',
+                          'beta_o', 'o_y', 'log2_alpha_y', 'probs_baseline_raw']
             predictive_technical = pyro.infer.Predictive(
-                self._model_technical, guide=guide_cellline, num_samples=minibatch_size, parallel=use_parallel
+                self._model_technical, guide=guide_cellline, num_samples=minibatch_size,
+                parallel=use_parallel, return_sites=param_sites
             )
-            all_samples = defaultdict(list)
+
+            # Run first batch to get shapes, then preallocate full tensors
+            posterior_samples = {}
+            batch_idx = 0
             with torch.no_grad():
                 for i in range(0, nsamples, minibatch_size):
-                    samples = predictive_technical(**model_inputs)
-                    for k, v in samples.items():
-                        if keep_sites(k, {"value": v}):
-                            all_samples[k].append(self._to_cpu(v))
+                    current_batch_size = min(minibatch_size, nsamples - i)
+
+                    # Generate batch
+                    if current_batch_size < minibatch_size:
+                        # Last batch might be smaller
+                        predictive_batch = pyro.infer.Predictive(
+                            self._model_technical, guide=guide_cellline, num_samples=current_batch_size, parallel=use_parallel
+                        )
+                        samples = predictive_batch(**model_inputs)
+                    else:
+                        samples = predictive_technical(**model_inputs)
+
+                    # First batch: preallocate full tensors
+                    if batch_idx == 0:
+                        for k, v in samples.items():
+                            if keep_sites(k, {"value": v}):
+                                v_cpu = self._to_cpu(v)
+                                # Preallocate: [nsamples, ...] with same dtype/shape as v
+                                full_shape = (nsamples,) + v_cpu.shape[1:]
+                                posterior_samples[k] = torch.empty(full_shape, dtype=v_cpu.dtype)
+                                # Fill first batch
+                                posterior_samples[k][:current_batch_size] = v_cpu
+                    else:
+                        # Subsequent batches: fill in-place
+                        start_idx = i
+                        end_idx = i + current_batch_size
+                        for k, v in samples.items():
+                            if k in posterior_samples:
+                                posterior_samples[k][start_idx:end_idx] = self._to_cpu(v)
+
+                    batch_idx += 1
+
+                    # Clean up after each batch
+                    del samples
                     if self.model.device.type == "cuda":
                         torch.cuda.empty_cache()
                     gc.collect()
-            posterior_samples = {k: torch.cat(v, dim=0) for k, v in all_samples.items()}
         else:
             print(f"[INFO] Running Predictive in full batch mode (parallel={use_parallel})...")
+            print(f"[MEMORY] Skipping observation sampling to save memory (only sampling parameters)")
+            # CRITICAL: Use return_sites to skip observation sampling entirely
+            param_sites = ['alpha_y', 'alpha_y_mul', 'delta_y_add', 'delta_y_mul',
+                          'mu_y', 'mu_ntc', 'phi_y', 'sigma_y', 'nu_y',
+                          'beta_o', 'o_y', 'log2_alpha_y', 'probs_baseline_raw']
             predictive_technical = pyro.infer.Predictive(
-                self._model_technical, guide=guide_cellline, num_samples=nsamples, parallel=use_parallel
+                self._model_technical, guide=guide_cellline, num_samples=nsamples,
+                parallel=use_parallel, return_sites=param_sites
             )
             with torch.no_grad():
                 posterior_samples = predictive_technical(**model_inputs)
