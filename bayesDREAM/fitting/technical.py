@@ -1669,9 +1669,9 @@ class TechnicalFitter:
 
         if minibatch_size is not None:
             print(f"[INFO] Running Predictive in minibatches of {minibatch_size} (parallel={use_parallel})...")
-            print(f"[MEMORY] Skipping observation sampling to save memory (skip_obs_sampling=True)")
-            # CRITICAL: Pass skip_obs_sampling=True to prevent observation sampler execution
-            # This prevents creating huge [S, N, T] tensors we don't need
+            print(f"[MEMORY] Observations will be calculated (for likelihood) but not saved (via keep_sites filter)")
+            # Note: Temporary [S, N, T] tensors still created during forward pass,
+            # but they're not saved in output (filtered by keep_sites)
             predictive_technical = pyro.infer.Predictive(
                 self._model_technical, guide=guide_cellline, num_samples=minibatch_size,
                 parallel=use_parallel
@@ -1721,8 +1721,9 @@ class TechnicalFitter:
                     gc.collect()
         else:
             print(f"[INFO] Running Predictive in full batch mode (parallel={use_parallel})...")
-            print(f"[MEMORY] Skipping observation sampling to save memory (skip_obs_sampling=True)")
-            # CRITICAL: Pass skip_obs_sampling=True to prevent observation sampler execution
+            print(f"[MEMORY] Observations will be calculated (for likelihood) but not saved (via keep_sites filter)")
+            # Note: Temporary [S, N, T] tensors still created during forward pass,
+            # but they're not saved in output (filtered by keep_sites)
             predictive_technical = pyro.infer.Predictive(
                 self._model_technical, guide=guide_cellline, num_samples=nsamples,
                 parallel=use_parallel
