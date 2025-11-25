@@ -52,7 +52,7 @@ class TechnicalFitter:
         self,
         N, T, C, nsamples, minibatch_size=None,
         distribution='negbinom',
-        safety_factor=0.35  # Use 35% of available RAM (conservative for shared nodes)
+        safety_factor=None  # Auto-determined: 0.7 for SLURM, 0.35 for shared nodes
     ):
         """
         Estimate memory requirements for Predictive and auto-set minibatch_size.
@@ -71,8 +71,10 @@ class TechnicalFitter:
             If provided, use this value. If None, auto-compute.
         distribution : str
             Distribution type
-        safety_factor : float
-            Fraction of available RAM to use (default 0.35 = 35%, conservative for shared nodes)
+        safety_factor : float or None
+            Fraction of available RAM to use. If None (default), auto-determined:
+            - 0.7 (70%) when SLURM allocation detected (dedicated resources)
+            - 0.35 (35%) on shared nodes without SLURM (conservative)
 
         Returns
         -------
@@ -131,14 +133,23 @@ class TechnicalFitter:
                 pass
 
         # Use SLURM allocation if available, otherwise use available memory
+        # Auto-determine safety factor based on whether we have dedicated SLURM allocation
         if slurm_mem_gb is not None:
             usable_gb = slurm_mem_gb  # Use SLURM allocation directly (it's our limit)
+            # More aggressive safety factor for SLURM (dedicated allocation)
+            if safety_factor is None:
+                safety_factor = 0.7  # 70% - allows more efficient use of dedicated resources
             print(f"[MEMORY] Using SLURM allocation limit: {usable_gb:.1f} GB")
             print(f"[MEMORY] (psutil reports {available_gb:.1f} GB available, but that may be the full node)")
+            print(f"[MEMORY] Safety factor: {safety_factor:.0%} (dedicated SLURM allocation)")
         else:
             usable_gb = available_gb
+            # Conservative safety factor for shared nodes (no SLURM detection)
+            if safety_factor is None:
+                safety_factor = 0.35  # 35% - conservative for shared nodes
             print(f"[MEMORY] Available CPU RAM: {available_gb:.1f} GB / {total_gb:.1f} GB total")
             print(f"[MEMORY] Note: On shared nodes, actual usable memory may be lower")
+            print(f"[MEMORY] Safety factor: {safety_factor:.0%} (shared node, no SLURM)")
 
         # Estimate memory per sample (in GB)
         # Parameters: alpha_y [C, T], mu_y [T], phi_y/sigma_y [T], etc.
