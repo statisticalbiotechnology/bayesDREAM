@@ -90,15 +90,12 @@ class TechnicalFitter:
 
         # If psutil not available, use conservative defaults
         if not HAS_PSUTIL:
-            print("[MEMORY] psutil not available - using conservative defaults")
-            print("[MEMORY] Install psutil for automatic memory detection: pip install psutil")
-            # Conservative: always batch with 50 samples, no parallel
+            print("[INFO] psutil not available - using conservative defaults (minibatch_size=50)")
             return 50, False
 
         # Get available CPU RAM
         mem = psutil.virtual_memory()
         available_gb = mem.available / (1024**3)
-        total_gb = mem.total / (1024**3)
 
         # Check for SLURM allocation (more accurate on HPC)
         slurm_mem_gb = None
@@ -108,7 +105,6 @@ class TechnicalFitter:
             try:
                 slurm_mem_mb = int(os.environ['SLURM_MEM_PER_NODE'])
                 slurm_mem_gb = slurm_mem_mb / 1024
-                print(f"[MEMORY] SLURM allocation (MEM_PER_NODE): {slurm_mem_gb:.1f} GB")
             except (ValueError, KeyError):
                 pass
 
@@ -128,111 +124,45 @@ class TechnicalFitter:
 
                 if n_cpus is not None:
                     slurm_mem_gb = (mem_per_cpu_mb * n_cpus) / 1024
-                    print(f"[MEMORY] SLURM allocation: {n_cpus} CPUs × {mem_per_cpu_mb} MB = {slurm_mem_gb:.1f} GB")
             except (ValueError, KeyError):
                 pass
 
         # Use SLURM allocation if available, otherwise use available memory
         # Auto-determine safety factor based on whether we have dedicated SLURM allocation
         if slurm_mem_gb is not None:
-            usable_gb = slurm_mem_gb  # Use SLURM allocation directly (it's our limit)
-            # More aggressive safety factor for SLURM (dedicated allocation)
+            usable_gb = slurm_mem_gb
             if safety_factor is None:
-                safety_factor = 0.7  # 70% - allows more efficient use of dedicated resources
-            print(f"[MEMORY] Using SLURM allocation limit: {usable_gb:.1f} GB")
-            print(f"[MEMORY] (psutil reports {available_gb:.1f} GB available, but that may be the full node)")
-            print(f"[MEMORY] Safety factor: {safety_factor:.0%} (dedicated SLURM allocation)")
+                safety_factor = 0.7  # 70% for dedicated SLURM allocation
         else:
             usable_gb = available_gb
-            # Conservative safety factor for shared nodes (no SLURM detection)
             if safety_factor is None:
-                safety_factor = 0.35  # 35% - conservative for shared nodes
-            print(f"[MEMORY] Available CPU RAM: {available_gb:.1f} GB / {total_gb:.1f} GB total")
-            print(f"[MEMORY] Note: On shared nodes, actual usable memory may be lower")
-            print(f"[MEMORY] Safety factor: {safety_factor:.0%} (shared node, no SLURM)")
+                safety_factor = 0.35  # 35% for shared nodes
 
         # Estimate memory per sample (in GB)
-        # Parameters STORED: alpha_y [C, T], mu_y [T], phi_y/sigma_y [T], delta_y [C, T], etc.
-        params_per_sample_gb = (C * T + C * T + 3 * T) * 4 / (1024**3)  # alpha, delta, mu, phi, sigma
-
-        # Input data (counts matrix, sum factors)
+        params_per_sample_gb = (C * T + C * T + 3 * T) * 4 / (1024**3)
         input_data_gb = (N * T + N) * 4 / (1024**3)
-
-        # CRITICAL: TEMPORARY tensors created during likelihood evaluation
-        # Even though we don't SAVE observations, Pyro creates temporary [S, N, T] tensors:
-        # - alpha_y_used: [S, N, T] from gather operation
-        # - mu_final: [S, N, T] after broadcasting
-        # - These exist temporarily during forward pass
-        temp_per_sample_gb = (N * T) * 4 / (1024**3)  # Temporary [N, T] per sample
-
-        print(f"[MEMORY] Input data: {input_data_gb:.2f} GB")
-        print(f"[MEMORY] Params stored per sample: {params_per_sample_gb:.2f} GB")
-        print(f"[MEMORY] Temporary tensors per sample (during likelihood): {temp_per_sample_gb:.2f} GB")
-
-        # Estimate number of parallel workers (defaults to CPU count)
-        n_workers = min(multiprocessing.cpu_count(), 32)  # Cap at 32
-
-        # Memory per worker during parallel execution
-        # Each worker gets a copy of input data + generates samples
-        mem_per_worker_gb = input_data_gb + params_per_sample_gb * 10  # Assume ~10 samples buffer
-
-        # Total memory for parallel execution
-        total_parallel_gb = n_workers * mem_per_worker_gb
-
-        print(f"[MEMORY] Estimated with parallel=True ({n_workers} workers): {total_parallel_gb:.1f} GB")
-
-        # Check if parallel execution fits in usable memory
-        if total_parallel_gb > usable_gb * safety_factor:
-            print(f"[MEMORY] Parallel execution would exceed safe limit ({usable_gb * safety_factor:.1f} GB)")
-            print(f"[MEMORY] Will use sequential execution (parallel=False)")
-            use_parallel = False
-        else:
-            print(f"[MEMORY] Parallel execution fits within safe limit")
-            use_parallel = True
-
-        # Check if we need to batch based on TEMPORARY tensor size during likelihood
-        # Even though we don't SAVE observations, Pyro creates [S, N, T] during forward pass
-        safe_memory_gb = usable_gb * safety_factor
-        available_for_sampling_gb = safe_memory_gb - input_data_gb
-
-        # Memory per sample = stored parameters + temporary tensors during likelihood
+        temp_per_sample_gb = (N * T) * 4 / (1024**3)  # Temporary [N, T] tensors during likelihood
         memory_per_sample_gb = params_per_sample_gb + temp_per_sample_gb
 
-        # How many samples can we process at once?
+        # Check if parallel execution fits
+        n_workers = min(multiprocessing.cpu_count(), 32)
+        mem_per_worker_gb = input_data_gb + params_per_sample_gb * 10
+        total_parallel_gb = n_workers * mem_per_worker_gb
+        use_parallel = total_parallel_gb <= usable_gb * safety_factor
+
+        # Determine if minibatching is needed
+        safe_memory_gb = usable_gb * safety_factor
+        available_for_sampling_gb = safe_memory_gb - input_data_gb
         max_samples_at_once = int(available_for_sampling_gb / memory_per_sample_gb)
 
-        print(f"[MEMORY] Safe memory limit: {safe_memory_gb:.1f} GB")
-        print(f"[MEMORY] Available for sampling: {available_for_sampling_gb:.1f} GB")
-        print(f"[MEMORY] Memory per sample (stored + temp): {memory_per_sample_gb:.2f} GB")
-        print(f"[MEMORY] Max samples that fit: {max_samples_at_once}")
-
         if max_samples_at_once >= nsamples:
-            print(f"[MEMORY] All {nsamples} samples fit in memory")
             return None, use_parallel
         else:
-            # Need to batch - temporary tensors are too large
-            # CRITICAL: Disable parallel when minibatching!
-            if use_parallel:
-                print(f"[MEMORY] Disabling parallel=True for minibatching")
-                use_parallel = False
-
-            if max_samples_at_once < 10:
-                # Very constrained
-                recommended_batch = max(1, max_samples_at_once)
-                print(f"[WARNING] Memory very constrained! Can only fit {recommended_batch} samples at once")
-            else:
-                recommended_batch = max(10, min(100, max_samples_at_once))
-
-            batch_memory_gb = recommended_batch * memory_per_sample_gb
-            total_memory_gb = input_data_gb + batch_memory_gb
-
-            print(f"[MEMORY] Auto-setting minibatch_size={recommended_batch}")
-            print(f"[MEMORY] This will require {int(np.ceil(nsamples / recommended_batch))} batches")
-            print(f"[MEMORY] Estimated memory per batch:")
-            print(f"[MEMORY]   - Input data: {input_data_gb:.1f} GB")
-            print(f"[MEMORY]   - Batch samples (stored + temp): {batch_memory_gb:.1f} GB")
-            print(f"[MEMORY]   - Total: {total_memory_gb:.1f} GB (vs {safe_memory_gb:.1f} GB limit)")
-
+            # Need minibatching - disable parallel to avoid memory spike
+            use_parallel = False
+            recommended_batch = max(10, min(100, max_samples_at_once)) if max_samples_at_once >= 10 else max(1, max_samples_at_once)
+            n_batches = int(np.ceil(nsamples / recommended_batch))
+            print(f"[INFO] Minibatching: {recommended_batch} samples/batch × {n_batches} batches (parallel=False)")
             return recommended_batch, use_parallel
 
     def _model_technical(
@@ -1605,7 +1535,6 @@ class TechnicalFitter:
         # ---------------------------
         run_on_cpu = self.model.device.type != "cpu"
         if run_on_cpu:
-            print("[INFO] Running Predictive on CPU to reduce GPU memory pressure...")
             guide_cellline.to("cpu")
             self.model.device = torch.device("cpu")
     
@@ -1667,10 +1596,6 @@ class TechnicalFitter:
         keep_sites = kwargs.get("keep_sites", default_keep_sites)
 
         if minibatch_size is not None:
-            print(f"[INFO] Running Predictive in minibatches of {minibatch_size} (parallel={use_parallel})...")
-            print(f"[MEMORY] Observations will be calculated (for likelihood) but not saved (via keep_sites filter)")
-            # Note: Temporary [S, N, T] tensors still created during forward pass,
-            # but they're not saved in output (filtered by keep_sites)
             predictive_technical = pyro.infer.Predictive(
                 self._model_technical, guide=guide_cellline, num_samples=minibatch_size,
                 parallel=use_parallel
@@ -1719,10 +1644,6 @@ class TechnicalFitter:
                         torch.cuda.empty_cache()
                     gc.collect()
         else:
-            print(f"[INFO] Running Predictive in full batch mode (parallel={use_parallel})...")
-            print(f"[MEMORY] Observations will be calculated (for likelihood) but not saved (via keep_sites filter)")
-            # Note: Temporary [S, N, T] tensors still created during forward pass,
-            # but they're not saved in output (filtered by keep_sites)
             predictive_technical = pyro.infer.Predictive(
                 self._model_technical, guide=guide_cellline, num_samples=nsamples,
                 parallel=use_parallel
@@ -1735,7 +1656,6 @@ class TechnicalFitter:
     
         if run_on_cpu:
             self.model.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            print("[INFO] Reset self.model.device to:", self.model.device)
     
         for k, v in posterior_samples.items():
             posterior_samples[k] = v.cpu()
