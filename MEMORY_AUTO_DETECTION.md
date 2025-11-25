@@ -87,11 +87,11 @@ counts [N, T] = [21761, 31467]         ~2.55 GB
    else:
        safety_factor = 0.35  # 35% for shared nodes (conservative)
 
-   # Step 2: Check if parallel execution fits
+   # Step 2: Check if parallel execution fits (worker overhead)
    if parallel_worker_memory > usable_gb * safety_factor:
        parallel = False  # Sequential is safer
    else:
-       parallel = True   # Parallel is safe
+       parallel = True   # Parallel OK for now
 
    # Step 3: CRITICAL - Check if OUTPUT TENSOR fits in memory
    # output_tensor_per_sample = N × T × 4 bytes
@@ -105,9 +105,20 @@ counts [N, T] = [21761, 31467]         ~2.55 GB
    else:
        # MUST batch to avoid OOM
        minibatch_size = min(100, max(10, max_samples_at_once))
+
+   # Step 4: CRITICAL - If minibatching, DISABLE parallel!
+   # Parallel + minibatching creates memory spike during concatenation:
+   # - Worker outputs: (minibatch_size / n_workers) × n_workers = minibatch_size tensors
+   # - Final output: minibatch_size tensor
+   # During concatenation, BOTH exist → 2× memory spike!
+   if minibatch_size is not None and parallel:
+       parallel = False  # Force sequential to avoid spike
    ```
 
-   **Key insight**: The output tensor `[S, N, T]` is often the limiting factor, not the parameters! For large datasets, even S=100 samples can create a 250 GB output tensor.
+   **Key insights**:
+   1. The output tensor `[S, N, T]` is often the limiting factor, not the parameters!
+   2. **Parallel + minibatching = memory spike**: During concatenation, you have both worker outputs AND final output in memory (2× the batch size)
+   3. If we're already minibatching (memory constrained), sequential is safer
 
 ## Usage
 
@@ -130,13 +141,14 @@ model.fit_technical(
 # [MEMORY] Output per sample [N, T]: 2.47 GB
 # [MEMORY] Estimated with parallel=True (32 workers): 87.4 GB
 # [MEMORY] Parallel execution fits within safe limit
-# [MEMORY] Safe memory limit: 356.2 GB (was 178.1 GB with 35% safety factor)
+# [MEMORY] Safe memory limit: 356.2 GB
 # [MEMORY] Available for output tensors: 353.7 GB
 # [MEMORY] Max samples that fit: 143
+# [MEMORY] Disabling parallel=True for minibatching (avoids concatenation spike)
 # [MEMORY] Auto-setting minibatch_size=100 (capped at 100)
 # [MEMORY] This will require 10 batches
-# [MEMORY] Estimated memory per batch: 249.5 GB
-# [INFO] Running Predictive in minibatches of 100 (parallel=True)...
+# [MEMORY] Estimated memory per batch (sequential): 249.5 GB
+# [INFO] Running Predictive in minibatches of 100 (parallel=False)...
 ```
 
 ### Manual Override (if needed)
@@ -223,12 +235,17 @@ Runtime: ~2-3x longer but completes successfully
 
 ## Performance Impact
 
-- **With parallel=True**: Fastest, but high memory (32 × data size)
-- **With parallel=False + batching**: Slower, but memory-efficient
-- **Rule of thumb**:
-  - Small data (<1M cells × features): parallel=True, no batching
-  - Medium data (1-10M): parallel=True with batching
-  - Large data (>10M): parallel=False with batching
+- **Full batch, parallel=True**: Fastest, but needs lots of memory
+- **Full batch, parallel=False**: Moderate speed, moderate memory
+- **Minibatching, parallel=False**: Slowest, but most memory-efficient
+- **Minibatching, parallel=True**: ❌ **NEVER** - causes OOM from concatenation spike!
+
+**Rule of thumb**:
+- Small data (<1M cells × features): Full batch, parallel=True
+- Medium data (1-10M): Full batch, parallel=False OR minibatch, parallel=False
+- Large data (>10M): Minibatch, parallel=False (automatic)
+
+**Current behavior**: If minibatching is required, parallel is **automatically disabled** to prevent the concatenation memory spike.
 
 ## Troubleshooting
 
@@ -364,10 +381,22 @@ Potential improvements:
 - Memory estimation was missing this critical component
 - Solution: Calculate `output_tensor_per_sample_gb = (N × T) × 4 bytes`
 - Force minibatching when output tensor exceeds available memory
-- Final result: `minibatch_size=71` → 15 batches × 177.8 GB each ✓
+- Result: `minibatch_size=100, parallel=True` → kernel death (still OOM!)
+
+**Fix 6 (Parallel + Minibatching Spike)**:
+- **New issue**: Kernel died with minibatch_size=100, parallel=True
+- Memory spike during parallel concatenation:
+  - Worker outputs: 32 × (100/32) × 2.34 GB = 234 GB
+  - Final concatenated: 100 × 2.34 GB = 234 GB
+  - **During concat: BOTH exist** = 468 GB + 75 GB (input copies) = **543 GB > 496 GB!**
+- Solution: **Disable parallel when minibatching**
+- If we're memory-constrained enough to need batching, sequential is safer
+- Result: `minibatch_size=100, parallel=False` → 249.5 GB per batch ✓
 
 **Key Lessons**:
 1. On HPC clusters, always use SLURM variables for memory limits
 2. The Predictive output tensor `[S, N, T]` is often the memory bottleneck
 3. Fancy indexing creates huge intermediate tensors - use `torch.gather()` instead
-4. Safety factor should be conservative (35%) on shared nodes due to system overhead
+4. **NEVER use parallel=True with minibatching** - creates 2× memory spike during concatenation
+5. Safety factor should be 70% for SLURM (dedicated), 35% for shared nodes
+6. If minibatching is needed, you're already memory-constrained → sequential is safer

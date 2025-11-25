@@ -204,6 +204,12 @@ class TechnicalFitter:
             return None, use_parallel
         else:
             # Need to batch - output tensor is too large
+            # CRITICAL: Disable parallel when minibatching!
+            # Parallel creates memory spike during concatenation (2× output tensor size)
+            if use_parallel:
+                print(f"[MEMORY] Disabling parallel=True for minibatching (avoids concatenation spike)")
+                use_parallel = False
+
             if max_samples_at_once < 10:
                 # Very constrained - use minimum viable batch
                 recommended_batch = max(1, max_samples_at_once)
@@ -213,7 +219,7 @@ class TechnicalFitter:
 
             print(f"[MEMORY] Auto-setting minibatch_size={recommended_batch}")
             print(f"[MEMORY] This will require {int(np.ceil(nsamples / recommended_batch))} batches")
-            print(f"[MEMORY] Estimated memory per batch: {(input_data_gb + recommended_batch * output_tensor_per_sample_gb):.1f} GB")
+            print(f"[MEMORY] Estimated memory per batch (sequential): {(input_data_gb + recommended_batch * output_tensor_per_sample_gb):.1f} GB")
             return recommended_batch, use_parallel
 
     def _model_technical(
