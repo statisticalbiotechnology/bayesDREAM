@@ -1859,9 +1859,15 @@ class TechnicalFitter:
         # ----------------------------------------
         # Feature metadata flags
         # ----------------------------------------
-        # For primary modality fitted with original counts, store metadata in base class
-        if modality_name == self.model.primary_modality and hasattr(self.model, 'counts') and isinstance(self.model.counts, pd.DataFrame):
-            # Create a metadata DataFrame for all features in original counts
+        # Determine where masks were computed from (based on counts_to_fit source)
+        # If we used self.model.counts, masks correspond to those features
+        # If we used modality.counts, masks correspond to modality features
+        used_original_counts = (modality_name == self.model.primary_modality and
+                                hasattr(self.model, 'counts') and
+                                isinstance(self.model.counts, pd.DataFrame))
+
+        if used_original_counts:
+            # Masks are for original counts features - store in base class
             if not hasattr(self.model, 'counts_meta'):
                 self.model.counts_meta = pd.DataFrame(index=self.model.counts.index)
             self.model.counts_meta['ntc_zero_count']           = zero_count_mask
@@ -1870,12 +1876,19 @@ class TechnicalFitter:
             self.model.counts_meta['ntc_excluded_from_fit']    = needs_exclusion_mask
             self.model.counts_meta['technical_correction_applied'] = ~needs_exclusion_mask
         else:
-            # Store in modality metadata
-            modality.feature_meta['ntc_zero_count']           = zero_count_mask
-            modality.feature_meta['ntc_zero_std']             = zero_std_mask
-            modality.feature_meta['ntc_single_category']      = only_one_category_mask
-            modality.feature_meta['ntc_excluded_from_fit']    = needs_exclusion_mask
-            modality.feature_meta['technical_correction_applied'] = ~needs_exclusion_mask
+            # Masks are for modality features - store in modality metadata
+            # Verify masks match modality feature count
+            if len(zero_count_mask) != len(modality.feature_meta):
+                raise ValueError(
+                    f"Mask length mismatch: masks have {len(zero_count_mask)} elements "
+                    f"but modality.feature_meta has {len(modality.feature_meta)} rows. "
+                    f"This likely means counts_to_fit and modality.counts have different feature counts."
+                )
+            modality.feature_meta['ntc_zero_count']           = zero_count_mask.tolist()
+            modality.feature_meta['ntc_zero_std']             = zero_std_mask.tolist()
+            modality.feature_meta['ntc_single_category']      = only_one_category_mask.tolist()
+            modality.feature_meta['ntc_excluded_from_fit']    = needs_exclusion_mask.tolist()
+            modality.feature_meta['technical_correction_applied'] = (~needs_exclusion_mask).tolist()
     
         # ----------------------------------------
         # Persist results at modality level
