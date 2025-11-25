@@ -536,76 +536,75 @@ class TechnicalFitter:
         # --------------------------------
         # Call distribution-specific sampler
         # --------------------------------
-        # CRITICAL: Skip observation sampling during Predictive to save memory!
-        # During Predictive, we only need parameter posteriors (alpha, mu, phi, etc.)
-        # Observation sampling creates huge [S, N, T] tensors we don't need
-        if not skip_obs_sampling:
-            from .distributions import get_observation_sampler
-            observation_sampler = get_observation_sampler(distribution, 'trans')
+        # Note: Observations ARE sampled (needed for likelihood evaluation)
+        # This creates temporary [S, N, T] tensors during forward pass
+        # But they're not saved in output (filtered by keep_sites in fit_technical)
+        from .distributions import get_observation_sampler
+        observation_sampler = get_observation_sampler(distribution, 'trans')
 
-            if distribution == 'negbinom':
-                observation_sampler(
-                    y_obs_tensor=y_obs_ntc_tensor,           # [N, T]
-                    mu_y=mu_y,                               # [T]
-                    phi_y_used=phi_y.unsqueeze(-2),          # [1, T]
-                    alpha_y_full=alpha_full_mul,             # [C, T]
-                    groups_tensor=groups_ntc_tensor,
-                    sum_factor_tensor=sum_factor_ntc_tensor,
-                    N=N, T=T, C=C
-                )
+        if distribution == 'negbinom':
+            observation_sampler(
+                y_obs_tensor=y_obs_ntc_tensor,           # [N, T]
+                mu_y=mu_y,                               # [T]
+                phi_y_used=phi_y.unsqueeze(-2),          # [1, T]
+                alpha_y_full=alpha_full_mul,             # [C, T]
+                groups_tensor=groups_ntc_tensor,
+                sum_factor_tensor=sum_factor_ntc_tensor,
+                N=N, T=T, C=C
+            )
 
-            elif distribution == 'normal':
-                observation_sampler(
-                    y_obs_tensor=y_obs_ntc_tensor,           # [N, T]
-                    mu_y=mu_y,                               # [T]
-                    sigma_y=sigma_y,                         # [T]
-                    alpha_y_full=alpha_full_add,             # [C, T]
-                    groups_tensor=groups_ntc_tensor,
-                    N=N, T=T, C=C
-                )
+        elif distribution == 'normal':
+            observation_sampler(
+                y_obs_tensor=y_obs_ntc_tensor,           # [N, T]
+                mu_y=mu_y,                               # [T]
+                sigma_y=sigma_y,                         # [T]
+                alpha_y_full=alpha_full_add,             # [C, T]
+                groups_tensor=groups_ntc_tensor,
+                N=N, T=T, C=C
+            )
 
-            elif distribution == 'studentt':
-                # Degrees of freedom (nu) - two options:
-                # Option 1: Fixed value (simpler, faster)
-                nu_y = self._t(3.0)
-                # Option 2: Sample per-feature (more flexible, slower)
-                # with f_plate:
-                #     nu_y = pyro.sample("nu_y", dist.Gamma(self._t(10.0), self._t(2.0)))  # mean~5, ensures df>2
+        elif distribution == 'studentt':
+            # Degrees of freedom (nu) - two options:
+            # Option 1: Fixed value (simpler, faster)
+            nu_y = self._t(3.0)
+            # Option 2: Sample per-feature (more flexible, slower)
+            # with f_plate:
+            #     nu_y = pyro.sample("nu_y", dist.Gamma(self._t(10.0), self._t(2.0)))  # mean~5, ensures df>2
 
-                observation_sampler(
-                    y_obs_tensor=y_obs_ntc_tensor,           # [N, T]
-                    mu_y=mu_y,                               # [T]
-                    sigma_y=sigma_y,                         # [T]
-                    nu_y=nu_y,                               # scalar or [T]
-                    alpha_y_full=alpha_full_add,             # [C, T]
-                    groups_tensor=groups_ntc_tensor,
-                    N=N, T=T, C=C
-                )
+            observation_sampler(
+                y_obs_tensor=y_obs_ntc_tensor,           # [N, T]
+                mu_y=mu_y,                               # [T]
+                sigma_y=sigma_y,                         # [T]
+                nu_y=nu_y,                               # scalar or [T]
+                alpha_y_full=alpha_full_add,             # [C, T]
+                groups_tensor=groups_ntc_tensor,
+                N=N, T=T, C=C
+            )
 
-            elif distribution == 'binomial':
-                observation_sampler(
-                    y_obs_tensor=y_obs_ntc_tensor,           # [N, T]
-                    denominator_tensor=denominator_ntc_tensor,
-                    mu_y=mu_y,                               # [T] in [0,1]
-                    alpha_y_full=alpha_full_add,             # [C, T] (add on logit)
-                    groups_tensor=groups_ntc_tensor,
-                    N=N, T=T, C=C
-                )
+        elif distribution == 'binomial':
+            observation_sampler(
+                y_obs_tensor=y_obs_ntc_tensor,           # [N, T]
+                denominator_tensor=denominator_ntc_tensor,
+                mu_y=mu_y,                               # [T] in [0,1]
+                alpha_y_full=alpha_full_add,             # [C, T] (add on logit)
+                groups_tensor=groups_ntc_tensor,
+                N=N, T=T, C=C
+            )
 
-            elif distribution == 'multinomial':
-                # mu_y is [T, K] baseline; expand to [N, T, K]
-                #mu_y_multi = mu_y.unsqueeze(0).expand(N, T, K)
-                observation_sampler(
-                    y_obs_tensor=y_obs_ntc_tensor,
-                    #mu_y=mu_y_multi,
-                    mu_y=mu_y,
-                    alpha_y_full=alpha_full_add,     # <— ADD THIS
-                    groups_tensor=groups_ntc_tensor, # <— ADD THIS
-                    N=N, T=T, K=K, C=C
-                )
+        elif distribution == 'multinomial':
+            # mu_y is [T, K] baseline; expand to [N, T, K]
+            #mu_y_multi = mu_y.unsqueeze(0).expand(N, T, K)
+            observation_sampler(
+                y_obs_tensor=y_obs_ntc_tensor,
+                #mu_y=mu_y_multi,
+                mu_y=mu_y,
+                alpha_y_full=alpha_full_add,     # <— ADD THIS
+                groups_tensor=groups_ntc_tensor, # <— ADD THIS
+                N=N, T=T, K=K, C=C
+            )
 
-            else:
-                raise ValueError(f"Unknown distribution: {distribution}")
+        else:
+            raise ValueError(f"Unknown distribution: {distribution}")
     
     def set_technical_groups(self, covariates: list[str]):
         if not covariates:
