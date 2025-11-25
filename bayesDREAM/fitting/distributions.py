@@ -93,8 +93,15 @@ def sample_negbinom_trans(
 
         elif alpha_y_full.dim() == 3:
             # [S, C, T] -> index groups along dim=1 -> [S, N, T]
+            # CRITICAL: Use gather() to avoid creating huge intermediate tensors
             S = alpha_y_full.size(0)
-            alpha_y_used = alpha_y_full[:, groups_tensor, :]  # [S, N, T]
+
+            # Create index tensor for gather: [S, N, T] filled with group indices
+            # groups_tensor: [N] with values in [0, C-1]
+            groups_expanded = groups_tensor.view(1, N, 1).expand(S, N, T)  # [S, N, T]
+
+            # Use gather on dim=1 (the C dimension) to select correct group per cell
+            alpha_y_used = torch.gather(alpha_y_full, dim=1, index=groups_expanded)  # [S, N, T]
 
             # Broadcast mu_y to [S, N, T] if needed
             if mu_y.dim() == 1:  # [T]
@@ -235,8 +242,16 @@ def sample_multinomial_trans(
             probs = _probs_from_logits(safe_log_mu, alpha_used)        # [N, T, K]
         elif alpha_y_full.dim() == 4:
             # [S, C, T, K] -> index groups along dim=1 -> [S, N, T, K]
+            # CRITICAL: Use gather() to avoid creating huge intermediate tensors
             S = alpha_y_full.size(0)
-            alpha_used = alpha_y_full[:, groups_tensor, :, :]          # [S, N, T, K]
+
+            # Create index tensor for gather: [S, N, T, K] filled with group indices
+            # groups_tensor: [N] with values in [0, C-1]
+            groups_expanded = groups_tensor.view(1, N, 1, 1).expand(S, N, T, K)  # [S, N, T, K]
+
+            # Use gather on dim=1 (the C dimension) to select correct group per cell
+            alpha_used = torch.gather(alpha_y_full, dim=1, index=groups_expanded)  # [S, N, T, K]
+
             base_logits_S = safe_log_mu.unsqueeze(0).expand(S, -1, -1, -1)
             probs = _probs_from_logits(base_logits_S, alpha_used)      # [S, N, T, K]
         else:
