@@ -230,36 +230,26 @@ class TransFitter:
                 #eff_Ka_sigma   = alpha * Ka_sigma    + epsilon_tensor
 
                 # Vmax_a and K_a: Distribution-specific priors
-                if distribution == 'multinomial' and K is not None:
-                    # For multinomial, each of K-1 categories gets its own Vmax and K
-                    K_minus_1 = K - 1
-                    with pyro.plate("category_plate_vmax", K_minus_1, dim=-2):
-                        # Vmax for probability distributions should be in [0, 1]
-                        # Use Vmax_prior_mean which is [T] (averaged across categories)
-                        Vmax_mean_clamped = Vmax_prior_mean.clamp(min=0.01, max=0.99)
-                        concentration_vmax = self._t(10.0)
-                        alpha_vmax = Vmax_mean_clamped.unsqueeze(-2) * concentration_vmax  # [1, T]
-                        beta_vmax = (1 - Vmax_mean_clamped.unsqueeze(-2)) * concentration_vmax  # [1, T]
-                        Vmax_a = pyro.sample("Vmax_a", dist.Beta(alpha_vmax, beta_vmax))  # [K-1, T]
-
-                        # K_max_tensor and K_sigma are scalars - broadcast automatically
-                        K_a = pyro.sample("K_a", dist.Gamma(
-                            ((K_max_tensor/2) ** 2) / (K_sigma ** 2),
-                            (K_max_tensor/2) / (K_sigma ** 2)
-                        ))  # [K-1, T]
-
-                elif distribution == 'binomial':
-                    # For binomial, Vmax should be in [0, 1]
-                    Vmax_mean_clamped = Vmax_mean_tensor.clamp(min=0.01, max=0.99)
-                    concentration_vmax = self._t(10.0)
-                    alpha_vmax = Vmax_mean_clamped * concentration_vmax
-                    beta_vmax = (1 - Vmax_mean_clamped) * concentration_vmax
-                    Vmax_a = pyro.sample("Vmax_a", dist.Beta(alpha_vmax, beta_vmax))
-                    K_a = pyro.sample("K_a", dist.Gamma(((K_max_tensor/2) ** 2) / (K_sigma ** 2), (K_max_tensor/2) / (K_sigma ** 2)))
+                if distribution in ['binomial', 'multinomial']:
+                    # SIMPLIFIED: For bounded distributions, fix Vmax=1.0 (constant, not learned)
+                    # This lets alpha do all the scaling directly: y = A + alpha * Hill(x; Vmax=1)
+                    # Hill output is in [0,1], so alpha directly represents the amplitude
+                    if distribution == 'multinomial' and K is not None:
+                        K_minus_1 = K - 1
+                        with pyro.plate("category_plate_vmax", K_minus_1, dim=-2):
+                            Vmax_a = self._t(1.0).expand(K_minus_1, T)  # [K-1, T] all ones
+                            K_a = pyro.sample("K_a", dist.Gamma(
+                                ((K_max_tensor/2) ** 2) / (K_sigma ** 2),
+                                (K_max_tensor/2) / (K_sigma ** 2)
+                            ))  # [K-1, T]
+                    else:
+                        Vmax_a = self._t(1.0).expand(T)  # [T] all ones
+                        K_a = pyro.sample("K_a", dist.Gamma(((K_max_tensor/2) ** 2) / (K_sigma ** 2), (K_max_tensor/2) / (K_sigma ** 2)))
 
                 else:
-                    # For count/continuous distributions, use Gamma prior
-                    Vmax_a = pyro.sample("Vmax_a", dist.Gamma((Vmax_mean_tensor ** 2) / (Vmax_sigma ** 2), Vmax_mean_tensor / (Vmax_sigma ** 2)))
+                    # For negbinom/normal: learn Vmax (unbounded, so no constraint issues)
+                    # Vmax represents the amplitude of the dose-response
+                    Vmax_a = pyro.sample("Vmax_a", dist.Gamma((Vmax_prior_mean ** 2) / (Vmax_sigma ** 2), Vmax_prior_mean / (Vmax_sigma ** 2)))
                     K_a = pyro.sample("K_a", dist.Gamma(((K_max_tensor/2) ** 2) / (K_sigma ** 2), (K_max_tensor/2) / (K_sigma ** 2)))
 
                 # Sample all required parameters (additive_hill and nested_hill need second set)
@@ -291,23 +281,23 @@ class TransFitter:
                         )
 
                     # Vmax_b and K_b: Distribution-specific priors
-                    if distribution == 'multinomial' and K is not None:
-                        K_minus_1 = K - 1
-                        with pyro.plate("category_plate_vmax_b", K_minus_1, dim=-2):
-                            # Reuse alpha_vmax and beta_vmax from Vmax_a (same prior mean)
-                            Vmax_b = pyro.sample("Vmax_b", dist.Beta(alpha_vmax, beta_vmax))  # [K-1, T]
-                            # K_max_tensor and K_sigma are scalars - broadcast automatically
-                            K_b = pyro.sample("K_b", dist.Gamma(
-                                ((K_max_tensor/2) ** 2) / (K_sigma ** 2),
-                                (K_max_tensor/2) / (K_sigma ** 2)
-                            ))  # [K-1, T]
-
-                    elif distribution == 'binomial':
-                        Vmax_b = pyro.sample("Vmax_b", dist.Beta(alpha_vmax, beta_vmax))
-                        K_b = pyro.sample("K_b", dist.Gamma(((K_max_tensor/2) ** 2) / (K_sigma ** 2), (K_max_tensor/2) / (K_sigma ** 2)))
+                    if distribution in ['binomial', 'multinomial']:
+                        # SIMPLIFIED: Fix Vmax=1.0 for bounded distributions
+                        if distribution == 'multinomial' and K is not None:
+                            K_minus_1 = K - 1
+                            with pyro.plate("category_plate_vmax_b", K_minus_1, dim=-2):
+                                Vmax_b = self._t(1.0).expand(K_minus_1, T)  # [K-1, T] all ones
+                                K_b = pyro.sample("K_b", dist.Gamma(
+                                    ((K_max_tensor/2) ** 2) / (K_sigma ** 2),
+                                    (K_max_tensor/2) / (K_sigma ** 2)
+                                ))  # [K-1, T]
+                        else:
+                            Vmax_b = self._t(1.0).expand(T)  # [T] all ones
+                            K_b = pyro.sample("K_b", dist.Gamma(((K_max_tensor/2) ** 2) / (K_sigma ** 2), (K_max_tensor/2) / (K_sigma ** 2)))
 
                     else:
-                        Vmax_b = pyro.sample("Vmax_b", dist.Gamma((Vmax_mean_tensor ** 2) / (Vmax_sigma ** 2), Vmax_mean_tensor / (Vmax_sigma ** 2)))
+                        # For negbinom/normal: learn Vmax_b (unbounded, so no constraint issues)
+                        Vmax_b = pyro.sample("Vmax_b", dist.Gamma((Vmax_prior_mean ** 2) / (Vmax_sigma ** 2), Vmax_prior_mean / (Vmax_sigma ** 2)))
                         K_b = pyro.sample("K_b", dist.Gamma(((K_max_tensor/2) ** 2) / (K_sigma ** 2), (K_max_tensor/2) / (K_sigma ** 2)))
                 
                 # Compute Hill function(s)
@@ -885,6 +875,17 @@ class TransFitter:
             torch.full_like(Vmax_mean_tensor, 1.0)
         )
 
+        # Convert Vmax to amplitude (max - min) for distributions that learn Vmax
+        # This ensures y = A + alpha*Vmax*Hill() doesn't overshoot the empirical maximum
+        # For binomial/multinomial: Vmax is fixed at 1.0 anyway (see line 240/246), so skip
+        if distribution in ['negbinom', 'normal', 'studentt']:
+            print(f"[INFO] Converting Vmax from absolute maximum to amplitude for {distribution} distribution")
+            print(f"  Original Vmax range: [{Vmax_mean_tensor.min().item():.4f}, {Vmax_mean_tensor.max().item():.4f}]")
+            print(f"  Amean range: [{Amean_tensor.min().item():.4f}, {Amean_tensor.max().item():.4f}]")
+            Vmax_mean_tensor = Vmax_mean_tensor - Amean_tensor
+            Vmax_mean_tensor = Vmax_mean_tensor.clamp_min(epsilon_tensor)  # Ensure positive
+            print(f"  Amplitude range: [{Vmax_mean_tensor.min().item():.4f}, {Vmax_mean_tensor.max().item():.4f}]")
+
         assert self.model.x_true.device == self.model.device
         if alpha_y_prefit is not None:
             assert alpha_y_prefit.device == self.model.device
@@ -974,8 +975,8 @@ class TransFitter:
             svi   = pyro.infer.SVI(self._model_y, guide_y, optimizer, pyro.infer.Trace_ELBO())
         else:
             guide_y = pyro.infer.autoguide.AutoNormalMessenger(self._model_y)
-            optimizer = pyro.optim.Adam({"lr": lr})
-            svi = pyro.infer.SVI(self._model_y, guide_y, optimizer, 
+            optimizer = pyro.optim.ClippedAdam({"lr": lr, "clip_norm": 10.0})
+            svi = pyro.infer.SVI(self._model_y, guide_y, optimizer,
                                  loss=pyro.infer.Trace_ELBO())
         
         for name, value in pyro.get_param_store().items():

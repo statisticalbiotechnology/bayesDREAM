@@ -583,8 +583,8 @@ class CisFitter:
             return pyro.infer.autoguide.initialization.init_to_median(site)
         
         guide_x = pyro.infer.autoguide.AutoNormalMessenger(self._model_x, init_loc_fn=init_loc_fn)
-        optimizer = pyro.optim.Adam({"lr": lr})
-        svi = pyro.infer.SVI(self._model_x, guide_x, optimizer, 
+        optimizer = pyro.optim.ClippedAdam({"lr": lr, "clip_norm": 10.0})
+        svi = pyro.infer.SVI(self._model_x, guide_x, optimizer,
                              loss=pyro.infer.Trace_ELBO())
 
         losses = []

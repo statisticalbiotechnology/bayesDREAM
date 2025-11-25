@@ -100,18 +100,41 @@ class TechnicalFitter:
 
         # Check for SLURM allocation (more accurate on HPC)
         slurm_mem_gb = None
+
+        # Try SLURM_MEM_PER_NODE first (older SLURM versions)
         if 'SLURM_MEM_PER_NODE' in os.environ:
             try:
                 slurm_mem_mb = int(os.environ['SLURM_MEM_PER_NODE'])
                 slurm_mem_gb = slurm_mem_mb / 1024
-                print(f"[MEMORY] SLURM allocation: {slurm_mem_gb:.1f} GB per node")
+                print(f"[MEMORY] SLURM allocation (MEM_PER_NODE): {slurm_mem_gb:.1f} GB")
+            except (ValueError, KeyError):
+                pass
+
+        # Try SLURM_MEM_PER_CPU * SLURM_CPUS_ON_NODE (more common)
+        if slurm_mem_gb is None and 'SLURM_MEM_PER_CPU' in os.environ:
+            try:
+                mem_per_cpu_mb = int(os.environ['SLURM_MEM_PER_CPU'])
+
+                # Try different CPU count variables
+                n_cpus = None
+                if 'SLURM_CPUS_ON_NODE' in os.environ:
+                    n_cpus = int(os.environ['SLURM_CPUS_ON_NODE'])
+                elif 'SLURM_CPUS_PER_TASK' in os.environ:
+                    n_cpus = int(os.environ['SLURM_CPUS_PER_TASK'])
+                elif 'SLURM_JOB_CPUS_PER_NODE' in os.environ:
+                    n_cpus = int(os.environ['SLURM_JOB_CPUS_PER_NODE'])
+
+                if n_cpus is not None:
+                    slurm_mem_gb = (mem_per_cpu_mb * n_cpus) / 1024
+                    print(f"[MEMORY] SLURM allocation: {n_cpus} CPUs × {mem_per_cpu_mb} MB = {slurm_mem_gb:.1f} GB")
             except (ValueError, KeyError):
                 pass
 
         # Use SLURM allocation if available, otherwise use available memory
         if slurm_mem_gb is not None:
-            usable_gb = min(slurm_mem_gb, available_gb)
-            print(f"[MEMORY] Using conservative estimate: {usable_gb:.1f} GB (from SLURM allocation)")
+            usable_gb = slurm_mem_gb  # Use SLURM allocation directly (it's our limit)
+            print(f"[MEMORY] Using SLURM allocation limit: {usable_gb:.1f} GB")
+            print(f"[MEMORY] (psutil reports {available_gb:.1f} GB available, but that may be the full node)")
         else:
             usable_gb = available_gb
             print(f"[MEMORY] Available CPU RAM: {available_gb:.1f} GB / {total_gb:.1f} GB total")
@@ -123,6 +146,14 @@ class TechnicalFitter:
 
         # Input data (counts matrix, sum factors)
         input_data_gb = (N * T + N) * 4 / (1024**3)
+
+        # CRITICAL: Output tensor from Predictive sampling [S, N, T]
+        # This is the huge tensor that causes OOM!
+        output_tensor_per_sample_gb = (N * T) * 4 / (1024**3)
+
+        print(f"[MEMORY] Input data: {input_data_gb:.2f} GB")
+        print(f"[MEMORY] Params per sample: {params_per_sample_gb:.2f} GB")
+        print(f"[MEMORY] Output per sample [N, T]: {output_tensor_per_sample_gb:.2f} GB")
 
         # Estimate number of parallel workers (defaults to CPU count)
         n_workers = min(multiprocessing.cpu_count(), 32)  # Cap at 32
@@ -141,38 +172,38 @@ class TechnicalFitter:
             print(f"[MEMORY] Parallel execution would exceed safe limit ({usable_gb * safety_factor:.1f} GB)")
             print(f"[MEMORY] Will use sequential execution (parallel=False)")
             use_parallel = False
-
-            # For sequential: estimate how many samples fit in memory
-            safe_memory_gb = usable_gb * safety_factor
-            available_for_samples_gb = safe_memory_gb - input_data_gb
-
-            # How many samples can we fit?
-            max_samples_at_once = int(available_for_samples_gb / params_per_sample_gb)
-
-            if max_samples_at_once >= nsamples:
-                print(f"[MEMORY] All {nsamples} samples fit in memory (sequential mode)")
-                return None, False
-            else:
-                # Need to batch
-                recommended_batch = max(10, min(100, max_samples_at_once))
-                print(f"[MEMORY] Auto-setting minibatch_size={recommended_batch} (sequential mode)")
-                print(f"[MEMORY] This will require {int(np.ceil(nsamples / recommended_batch))} batches")
-                return recommended_batch, False
         else:
             print(f"[MEMORY] Parallel execution fits within safe limit")
+            use_parallel = True
 
-            # Even with parallel, check if we should batch the samples
-            total_params_gb = nsamples * params_per_sample_gb
-            if total_params_gb > usable_gb * safety_factor * 0.3:  # Parameters shouldn't use >30% of safe memory
-                # Recommend batching
-                safe_param_memory = usable_gb * safety_factor * 0.3
-                batch_size = int(safe_param_memory / params_per_sample_gb)
-                batch_size = max(10, min(100, batch_size))
-                print(f"[MEMORY] Even with parallel, recommend batching: minibatch_size={batch_size}")
-                return batch_size, True
+        # Now check if we need to batch based on OUTPUT tensor size
+        # This is the critical check that was missing!
+        safe_memory_gb = usable_gb * safety_factor
+        available_for_output_gb = safe_memory_gb - input_data_gb
+
+        # How many samples can we fit given the output tensor?
+        max_samples_at_once = int(available_for_output_gb / output_tensor_per_sample_gb)
+
+        print(f"[MEMORY] Safe memory limit: {safe_memory_gb:.1f} GB")
+        print(f"[MEMORY] Available for output tensors: {available_for_output_gb:.1f} GB")
+        print(f"[MEMORY] Max samples that fit: {max_samples_at_once}")
+
+        if max_samples_at_once >= nsamples:
+            print(f"[MEMORY] All {nsamples} samples fit in memory")
+            return None, use_parallel
+        else:
+            # Need to batch - output tensor is too large
+            if max_samples_at_once < 10:
+                # Very constrained - use minimum viable batch
+                recommended_batch = max(1, max_samples_at_once)
+                print(f"[WARNING] Memory very constrained! Can only fit {recommended_batch} samples at once")
             else:
-                print(f"[MEMORY] Full batch ({nsamples} samples) should fit")
-                return None, True
+                recommended_batch = max(10, min(100, max_samples_at_once))
+
+            print(f"[MEMORY] Auto-setting minibatch_size={recommended_batch}")
+            print(f"[MEMORY] This will require {int(np.ceil(nsamples / recommended_batch))} batches")
+            print(f"[MEMORY] Estimated memory per batch: {(input_data_gb + recommended_batch * output_tensor_per_sample_gb):.1f} GB")
+            return recommended_batch, use_parallel
 
     def _model_technical(
         self,
