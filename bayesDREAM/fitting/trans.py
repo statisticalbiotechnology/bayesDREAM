@@ -1229,6 +1229,25 @@ class TransFitter:
             posterior_samples_y[k] = self._to_cpu(v)
 
         # ----------------------------------------
+        # Add fixed Vmax for binomial/multinomial (not learned, so not in posterior)
+        # ----------------------------------------
+        if function_type in ['single_hill', 'additive_hill', 'nested_hill']:
+            if distribution in ['binomial', 'multinomial']:
+                # For binomial/multinomial, Vmax was fixed at 1.0 (not sampled)
+                # Add it to posterior_samples for plotting compatibility
+                if 'K_a' in posterior_samples_y:
+                    # Match shape of K_a: [S, T] for binomial, [S, K-1, T] for multinomial
+                    Vmax_a_shape = posterior_samples_y['K_a'].shape
+                    posterior_samples_y['Vmax_a'] = torch.ones(Vmax_a_shape, dtype=torch.float32)
+                    print(f"[INFO] Added Vmax_a=1.0 (constant) to posterior_samples with shape {Vmax_a_shape}")
+
+                if function_type in ['additive_hill', 'nested_hill'] and 'K_b' in posterior_samples_y:
+                    # Same for Vmax_b in additive/nested Hill
+                    Vmax_b_shape = posterior_samples_y['K_b'].shape
+                    posterior_samples_y['Vmax_b'] = torch.ones(Vmax_b_shape, dtype=torch.float32)
+                    print(f"[INFO] Added Vmax_b=1.0 (constant) to posterior_samples with shape {Vmax_b_shape}")
+
+        # ----------------------------------------
         # Store nmin/nmax and check boundaries
         # ----------------------------------------
         posterior_samples_y['nmin'] = self._to_cpu(nmin)
