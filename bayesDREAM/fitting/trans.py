@@ -142,36 +142,81 @@ class TransFitter:
 
             weight = o_y / (o_y + (beta_o_beta_tensor / beta_o_alpha_tensor)).clamp_min(epsilon_tensor)
 
-            # For multinomial, reduce category dimension to get per-feature baseline
-            if distribution == 'multinomial' and Amean_tensor.ndim > 1:
-                Amean_for_A = Amean_tensor.mean(dim=-1)  # [T, K] -> [T]
-                Vmax_for_A = Vmax_mean_tensor.mean(dim=-1)  # [T, K] -> [T]
-            else:
-                Amean_for_A = Amean_tensor
-                Vmax_for_A = Vmax_mean_tensor
-
-            Amean_adjusted = ((1 - weight) * Amean_for_A) + (weight * Vmax_for_A) + epsilon_tensor
+            # For multinomial, Amean_tensor and Vmax_mean_tensor are already [T, K] shaped
+            # For binomial, they are [T] shaped
+            # We keep them in their native shape for per-category priors in multinomial
 
             # Baseline parameter A depends on distribution:
             # - normal/studentt: can be negative (natural value space)
             # - negbinom: positive count
-            # - binomial/multinomial: probability in [0,1]
+            # - binomial/multinomial: probability in [0,1], using NEW reparameterization
             if distribution in ['normal', 'studentt']:
+                # For continuous distributions: average of min and max
+                Amean_for_A = Amean_tensor  # [T]
+                Vmax_for_A = Vmax_mean_tensor  # [T]
+                Amean_adjusted = ((1 - weight) * Amean_for_A) + (weight * Vmax_for_A) + epsilon_tensor
                 # Use Normal distribution to allow negative baseline values
                 A = pyro.sample("A", dist.Normal(Amean_adjusted, Amean_adjusted.abs()))
+
             elif distribution in ['binomial', 'multinomial']:
-                # For probability distributions, A should be in [0, 1]
-                # Use Beta distribution to constrain to [0,1]
-                # Transform Amean to Beta parameters
-                Amean_clamped = Amean_adjusted.clamp(min=0.01, max=0.99)
-                # Use concentration parameters that give mean = Amean_clamped with moderate variance
-                # alpha = mean * concentration, beta = (1-mean) * concentration
-                concentration = self._t(10.0)  # Higher = tighter around mean
-                alpha_beta = Amean_clamped * concentration
-                beta_beta = (1 - Amean_clamped) * concentration
-                A = pyro.sample("A", dist.Beta(alpha_beta, beta_beta))
+                # NEW REPARAMETERIZATION for binomial/multinomial:
+                # Instead of sampling A and Vmax separately, we sample:
+                #   A ~ Beta (minimum value)
+                #   upper_limit ~ Beta (maximum value)
+                #   Vmax_sum = upper_limit - A (total amplitude)
+                # This ensures 0 <= A <= upper_limit <= 1 automatically
+
+                # Amean_tensor: [T] for binomial, [T, K] for multinomial
+                # Vmax_mean_tensor: [T] for binomial, [T, K] for multinomial
+
+                # Clamp to valid Beta range
+                Amean_clamped = Amean_tensor.clamp(min=0.01, max=0.99)
+                Vmax_clamped = Vmax_mean_tensor.clamp(min=0.01, max=0.99)
+
+                # Use data-driven concentration (from mean_within_guide_var)
+                # Higher variance -> lower concentration -> wider distribution
+                # We'll compute this from Vmax_alpha_tensor for now (will be passed as data-driven later)
+                concentration_A = self._t(10.0)  # Could make this data-driven too
+                concentration_upper = self._t(10.0)
+
+                # Beta parameters for A (minimum)
+                alpha_A = Amean_clamped * concentration_A
+                beta_A = (1 - Amean_clamped) * concentration_A
+
+                # Beta parameters for upper_limit (maximum)
+                alpha_upper = Vmax_clamped * concentration_upper
+                beta_upper = (1 - Vmax_clamped) * concentration_upper
+
+                # Sample A and upper_limit
+                if distribution == 'multinomial' and Amean_tensor.ndim > 1:
+                    # For multinomial: sample per-category [T, K]
+                    # We need to sample K values per feature
+                    K_dim = Amean_tensor.shape[-1]
+                    with pyro.plate("category_plate_A", K_dim, dim=-1):
+                        A = pyro.sample("A", dist.Beta(alpha_A, beta_A))  # [T, K]
+                        upper_limit = pyro.sample("upper_limit", dist.Beta(alpha_upper, beta_upper))  # [T, K]
+                else:
+                    # For binomial: sample per-feature [T]
+                    A = pyro.sample("A", dist.Beta(alpha_A, beta_A))  # [T]
+                    upper_limit = pyro.sample("upper_limit", dist.Beta(alpha_upper, beta_upper))  # [T]
+
+                # Ensure upper_limit >= A (if not, swap them or add constraint)
+                # Since both are sampled independently, we need to enforce this
+                A_final = torch.minimum(A, upper_limit)
+                upper_limit_final = torch.maximum(A, upper_limit)
+
+                # Compute Vmax_sum (total amplitude available for Hills)
+                Vmax_sum = (upper_limit_final - A_final).clamp_min(epsilon_tensor)
+
+                # Store for use in Hill computation later
+                A = pyro.deterministic("A_final", A_final)
+                # Note: we'll use Vmax_sum instead of Vmax_a/Vmax_b directly
+
             else:
                 # For negbinom: A must be positive count
+                Amean_for_A = Amean_tensor  # [T]
+                Vmax_for_A = Vmax_mean_tensor  # [T]
+                Amean_adjusted = ((1 - weight) * Amean_for_A) + (weight * Vmax_for_A) + epsilon_tensor
                 A = pyro.sample("A", dist.Exponential(1 / Amean_adjusted))
 
             if use_alpha:
@@ -231,53 +276,34 @@ class TransFitter:
 
                 # Vmax_a and K_a: Distribution-specific priors
                 if distribution in ['binomial', 'multinomial']:
-                    # For bounded distributions [0,1], learn Vmax from Beta distribution
-                    # Vmax represents the maximum probability in the dose-response curve
-                    # Use data-driven priors: mean from observations, variance from Vmax_alpha_tensor
+                    # NEW: Use Vmax_sum from reparameterization (already computed above)
+                    # Vmax_sum = upper_limit - A is the total amplitude
+                    # y = A + Vmax_sum * (alpha * Hill_a + beta * Hill_b)
+                    # Both Hills use Vmax=1 (output [0,1]) and are scaled by Vmax_sum
 
-                    # Clamp mean to avoid boundary issues (Beta undefined at 0 or 1)
-                    Vmax_mean_clamped = Vmax_prior_mean.clamp(min=0.01, max=0.99)
+                    # Store Vmax_sum for use in Hill computation
+                    # Note: Hills will be computed with Vmax=1, and we'll scale by Vmax_sum later
+                    Vmax_a = pyro.deterministic("Vmax_sum", Vmax_sum)  # [T] or [T, K]
 
-                    # Compute target variance from Vmax_alpha_tensor (same formula as Gamma)
-                    # Higher Vmax_alpha_tensor → lower variance → tighter around mean
-                    Vmax_sigma = (Vmax_prior_mean / torch.sqrt(Vmax_alpha_tensor)) + epsilon_tensor
+                    # Sample K_a using data-driven variance
+                    # K_mean from x_true guide means, K_sigma from between-guide variance
+                    K_mean = (K_mean_tensor / 2.0).clamp_min(epsilon_tensor)
+                    K_std  = torch.sqrt(K_var_tensor + epsilon_tensor)
 
-                    # For Beta: variance = μ(1-μ) / (concentration + 1)
-                    # Solve for concentration: concentration = μ(1-μ) / σ² - 1
-                    mu_times_one_minus_mu = Vmax_mean_clamped * (1 - Vmax_mean_clamped)
-                    concentration_from_variance = (mu_times_one_minus_mu / (Vmax_sigma ** 2)) - 1
-
-                    # CRITICAL: Ensure concentration is large enough that BOTH alpha and beta > 1
-                    # Need: α = μ*c > 1 and β = (1-μ)*c > 1 → c > 1/min(μ, 1-μ)
-                    min_mu_or_one_minus_mu = torch.minimum(Vmax_mean_clamped, 1 - Vmax_mean_clamped)
-                    min_concentration = (1.0 / min_mu_or_one_minus_mu) + epsilon_tensor
-                    concentration = torch.maximum(concentration_from_variance, min_concentration)
-
-                    # Beta distribution parameters (both will be > 1 by construction)
-                    alpha_vmax = Vmax_mean_clamped * concentration
-                    beta_vmax = (1 - Vmax_mean_clamped) * concentration
+                    ratio        = (K_std / K_mean).clamp_min(self._t(1e-6))
+                    K_log_sigma2 = torch.log1p(ratio ** 2)
+                    K_log_sigma  = torch.sqrt(K_log_sigma2)
+                    K_log_mu     = torch.log(K_mean) - 0.5 * K_log_sigma2
 
                     if distribution == 'multinomial' and K is not None:
-                        K_minus_1 = K - 1
-                        with pyro.plate("category_plate_vmax", K_minus_1, dim=-2):
-                            Vmax_a = pyro.sample("Vmax_a", dist.Beta(alpha_vmax, beta_vmax))  # [K-1, T]
-                            K_a = pyro.sample("K_a", dist.Gamma(
-                                ((K_max_tensor/2) ** 2) / (K_sigma ** 2),
-                                (K_max_tensor/2) / (K_sigma ** 2)
-                            ))  # [K-1, T]
+                        # For multinomial: K parameters are per-category
+                        K_dim = K  # Number of categories
+                        with pyro.plate("category_plate_K_a", K_dim, dim=-1):
+                            log_K_a = pyro.sample("log_K_a", dist.Normal(K_log_mu, K_log_sigma))  # [T, K]
+                            K_a = pyro.deterministic("K_a", torch.exp(log_K_a))  # [T, K]
                     else:
-                        Vmax_a = pyro.sample("Vmax_a", dist.Beta(alpha_vmax, beta_vmax))  # [T]
-                        # --- log-normal style prior using K_sigma ---
-                        K_mean = (K_max_tensor / 2.0).clamp_min(epsilon_tensor)
-                        K_std  = K_sigma
-
-                        ratio        = (K_std / K_mean).clamp_min(self._t(1e-6))
-                        K_log_sigma2 = torch.log1p(ratio ** 2)
-                        K_log_sigma  = torch.sqrt(K_log_sigma2)
-                        K_log_mu     = torch.log(K_mean) - 0.5 * K_log_sigma2
-
+                        # For binomial: K parameters are per-feature [T]
                         log_K_a = pyro.sample("log_K_a", dist.Normal(K_log_mu, K_log_sigma))
-                        #K_a = torch.exp(log_K_a).clamp(min=epsilon_tensor, max=K_max_tensor * 10.0)
                         K_a = pyro.deterministic("K_a", torch.exp(log_K_a))
 
                 else:
@@ -316,31 +342,27 @@ class TransFitter:
 
                     # Vmax_b and K_b: Distribution-specific priors
                     if distribution in ['binomial', 'multinomial']:
-                        # For bounded distributions [0,1], learn Vmax_b from Beta distribution
-                        # Same approach as Vmax_a but for the second Hill function (in additive/nested)
-                        # Use same Beta parameters as Vmax_a (shared data-driven priors)
-                        # alpha_vmax and beta_vmax were already computed above
+                        # NEW: For additive_hill, SAME Vmax_sum multiplies both Hills
+                        # y = A + Vmax_sum * (alpha * Hill_a + beta * Hill_b)
+                        # Vmax_b = Vmax_sum (same as Vmax_a)
+                        Vmax_b = Vmax_sum  # No need to pyro.deterministic again, already done above
+
+                        # Sample K_b using same approach as K_a
+                        K_mean = (K_mean_tensor / 2.0).clamp_min(epsilon_tensor)
+                        K_std  = torch.sqrt(K_var_tensor + epsilon_tensor)
+
+                        ratio        = (K_std / K_mean).clamp_min(self._t(1e-6))
+                        K_log_sigma2 = torch.log1p(ratio ** 2)
+                        K_log_sigma  = torch.sqrt(K_log_sigma2)
+                        K_log_mu     = torch.log(K_mean) - 0.5 * K_log_sigma2
 
                         if distribution == 'multinomial' and K is not None:
-                            K_minus_1 = K - 1
-                            with pyro.plate("category_plate_vmax_b", K_minus_1, dim=-2):
-                                Vmax_b = pyro.sample("Vmax_b", dist.Beta(alpha_vmax, beta_vmax))  # [K-1, T]
-                                K_b = pyro.sample("K_b", dist.Gamma(
-                                    ((K_max_tensor/2) ** 2) / (K_sigma ** 2),
-                                    (K_max_tensor/2) / (K_sigma ** 2)
-                                ))  # [K-1, T]
+                            K_dim = K
+                            with pyro.plate("category_plate_K_b", K_dim, dim=-1):
+                                log_K_b = pyro.sample("log_K_b", dist.Normal(K_log_mu, K_log_sigma))  # [T, K]
+                                K_b = pyro.deterministic("K_b", torch.exp(log_K_b))  # [T, K]
                         else:
-                            Vmax_b = pyro.sample("Vmax_b", dist.Beta(alpha_vmax, beta_vmax))  # [T]
-                            K_mean = (K_max_tensor / 2.0).clamp_min(epsilon_tensor)
-                            K_std  = K_sigma
-
-                            ratio        = (K_std / K_mean).clamp_min(self._t(1e-6))
-                            K_log_sigma2 = torch.log1p(ratio ** 2)
-                            K_log_sigma  = torch.sqrt(K_log_sigma2)
-                            K_log_mu     = torch.log(K_mean) - 0.5 * K_log_sigma2
-
                             log_K_b = pyro.sample("log_K_b", dist.Normal(K_log_mu, K_log_sigma))
-                            #K_b = torch.exp(log_K_b).clamp(min=epsilon_tensor, max=K_max_tensor * 10.0)
                             K_b = pyro.deterministic("K_b", torch.exp(log_K_b))
 
                     else:
@@ -353,83 +375,138 @@ class TransFitter:
                 # We compute: y = A + alpha * Hill + beta * Hill (for additive)
 
                 if distribution == 'multinomial' and K is not None:
-                    # For multinomial: compute K-1 independent Hill functions
-                    # Each category gets its own function with its own parameters
-                    # Parameters have shape [K-1, T], need output [N, K-1, T] -> transpose to [N, T, K-1]
-                    K_minus_1 = K - 1
-                    x_expanded = x_true.unsqueeze(-1).unsqueeze(-1)  # [N, 1, 1]
+                    # NEW FORMULATION for multinomial:
+                    # For multinomial, A and Vmax_sum have shape [T, K] (one per category)
+                    # Compute Hills with Vmax=1, then scale by Vmax_sum per category
+                    # y_k = A_k + Vmax_sum_k * (alpha * Hill_a_k + beta * Hill_b_k)
+
+                    K_dim = K
+                    x_expanded = x_true.unsqueeze(-1)  # [N, 1]
+
+                    # A and Vmax_sum are [T, K], need to expand to [N, T, K]
+                    A_expanded = A.unsqueeze(0)  # [1, T, K]
+                    Vmax_sum_expanded = Vmax_sum.unsqueeze(0)  # [1, T, K]
 
                     if function_type == 'single_hill':
-                        # Compute Hill for each category
-                        # Vmax_a, K_a, n_a have shape [K-1, T]
-                        # Add batch dimension: [1, K-1, T]
-                        Hilla = Hill_based_positive(x_expanded, Vmax=Vmax_a.unsqueeze(0), A=0,
-                                                   K=K_a.unsqueeze(0), n=n_a.unsqueeze(0),
-                                                   epsilon=epsilon_tensor)  # [N, K-1, T]
-                        # A is [T], alpha is [T] -> broadcast to [1, 1, T] and [1, 1, T]
-                        y_dose_response_kminus1_transposed = A.unsqueeze(0).unsqueeze(0) + (alpha.unsqueeze(0).unsqueeze(0) * Hilla)
-                        # Transpose to [N, T, K-1]
-                        y_dose_response_kminus1 = y_dose_response_kminus1_transposed.transpose(-1, -2)
+                        # K_a, n_a have shape [T, K]
+                        # Need to compute Hill for each category independently
+                        # Hills output [N, T, K]
+
+                        # Expand tensors for broadcasting
+                        K_a_expanded = K_a.unsqueeze(0)  # [1, T, K]
+                        n_a_expanded = n_a.unsqueeze(0)  # [1, T, K]
+
+                        # Compute per-category Hills with Vmax=1
+                        # x_expanded is [N, 1], need to broadcast across K categories
+                        Hilla_list = []
+                        for k in range(K):
+                            hill_k = Hill_based_positive(x_expanded, Vmax=self._t(1.0), A=0,
+                                                        K=K_a[:, k], n=n_a[:, k],  # [T]
+                                                        epsilon=epsilon_tensor)  # [N, T]
+                            Hilla_list.append(hill_k.unsqueeze(-1))  # [N, T, 1]
+                        Hilla = torch.cat(Hilla_list, dim=-1)  # [N, T, K]
+
+                        # Combine: y = A + Vmax_sum * alpha * Hill
+                        combined_hill = alpha.unsqueeze(0).unsqueeze(-1) * Hilla  # [1, T, 1] * [N, T, K] -> [N, T, K]
+                        combined_hill = torch.clamp(combined_hill, min=0.0, max=1.0)
+                        y_dose_response = A_expanded + Vmax_sum_expanded * combined_hill  # [N, T, K]
 
                     elif function_type == 'additive_hill':
-                        Hilla = Hill_based_positive(x_expanded, Vmax=Vmax_a.unsqueeze(0), A=0,
-                                                   K=K_a.unsqueeze(0), n=n_a.unsqueeze(0),
-                                                   epsilon=epsilon_tensor)  # [N, K-1, T]
-                        Hillb = Hill_based_positive(x_expanded, Vmax=Vmax_b.unsqueeze(0), A=0,
-                                                   K=K_b.unsqueeze(0), n=n_b.unsqueeze(0),
-                                                   epsilon=epsilon_tensor)  # [N, K-1, T]
-                        y_dose_response_kminus1_transposed = (A.unsqueeze(0).unsqueeze(0) +
-                                                              (alpha.unsqueeze(0).unsqueeze(0) * Hilla) +
-                                                              (beta.unsqueeze(0).unsqueeze(0) * Hillb))
-                        y_dose_response_kminus1 = y_dose_response_kminus1_transposed.transpose(-1, -2)
+                        # Compute per-category Hills
+                        Hilla_list = []
+                        Hillb_list = []
+                        for k in range(K):
+                            hill_a_k = Hill_based_positive(x_expanded, Vmax=self._t(1.0), A=0,
+                                                          K=K_a[:, k], n=n_a[:, k],  # [T]
+                                                          epsilon=epsilon_tensor)  # [N, T]
+                            hill_b_k = Hill_based_positive(x_expanded, Vmax=self._t(1.0), A=0,
+                                                          K=K_b[:, k], n=n_b[:, k],  # [T]
+                                                          epsilon=epsilon_tensor)  # [N, T]
+                            Hilla_list.append(hill_a_k.unsqueeze(-1))  # [N, T, 1]
+                            Hillb_list.append(hill_b_k.unsqueeze(-1))  # [N, T, 1]
+                        Hilla = torch.cat(Hilla_list, dim=-1)  # [N, T, K]
+                        Hillb = torch.cat(Hillb_list, dim=-1)  # [N, T, K]
+
+                        # Combine
+                        combined_hill = (alpha.unsqueeze(0).unsqueeze(-1) * Hilla +
+                                       beta.unsqueeze(0).unsqueeze(-1) * Hillb)  # [N, T, K]
+                        combined_hill = torch.clamp(combined_hill, min=0.0, max=1.0)
+                        y_dose_response = A_expanded + Vmax_sum_expanded * combined_hill  # [N, T, K]
 
                     elif function_type == 'nested_hill':
-                        Hilla = Hill_based_positive(x_expanded, Vmax=Vmax_a.unsqueeze(0), A=0,
-                                                   K=K_a.unsqueeze(0), n=n_a.unsqueeze(0),
-                                                   epsilon=epsilon_tensor)  # [N, K-1, T]
-                        Hillb = Hill_based_positive(Hilla, Vmax=Vmax_b.unsqueeze(0), A=0,
-                                                   K=K_b.unsqueeze(0), n=n_b.unsqueeze(0),
-                                                   epsilon=epsilon_tensor)  # [N, K-1, T]
-                        y_dose_response_kminus1_transposed = A.unsqueeze(0).unsqueeze(0) + (alpha.unsqueeze(0).unsqueeze(0) * Hillb)
-                        y_dose_response_kminus1 = y_dose_response_kminus1_transposed.transpose(-1, -2)
+                        # Compute per-category nested Hills
+                        Hillb_list = []
+                        for k in range(K):
+                            hill_a_k = Hill_based_positive(x_expanded, Vmax=self._t(1.0), A=0,
+                                                          K=K_a[:, k], n=n_a[:, k],
+                                                          epsilon=epsilon_tensor)  # [N, T]
+                            hill_b_k = Hill_based_positive(hill_a_k.unsqueeze(-1), Vmax=self._t(1.0), A=0,
+                                                          K=K_b[:, k], n=n_b[:, k],
+                                                          epsilon=epsilon_tensor)  # [N, T]
+                            Hillb_list.append(hill_b_k.unsqueeze(-1))  # [N, T, 1]
+                        Hillb = torch.cat(Hillb_list, dim=-1)  # [N, T, K]
 
-                    # Clamp K-1 probabilities to valid range
-                    y_dose_response_kminus1 = torch.clamp(y_dose_response_kminus1,
-                                                          min=epsilon_tensor, max=1.0 - epsilon_tensor)
+                        combined_hill = alpha.unsqueeze(0).unsqueeze(-1) * Hillb  # [N, T, K]
+                        combined_hill = torch.clamp(combined_hill, min=0.0, max=1.0)
+                        y_dose_response = A_expanded + Vmax_sum_expanded * combined_hill  # [N, T, K]
 
-                    # Ensure sum of K-1 probabilities doesn't exceed 1
-                    sum_kminus1 = y_dose_response_kminus1.sum(dim=-1, keepdim=True)  # [N, T, 1]
-                    # If sum > 1, rescale proportionally
-                    y_dose_response_kminus1 = torch.where(
-                        sum_kminus1 > (1.0 - epsilon_tensor),
-                        y_dose_response_kminus1 * (1.0 - epsilon_tensor) / sum_kminus1,
-                        y_dose_response_kminus1
-                    )
+                    # Normalize to ensure sum to 1 (required for multinomial)
+                    prob_sum = y_dose_response.sum(dim=-1, keepdim=True).clamp_min(epsilon_tensor)  # [N, T, 1]
+                    y_dose_response = y_dose_response / prob_sum  # [N, T, K]
 
-                    # Compute Kth category as residual: p_K = 1 - sum(p_1, ..., p_{K-1})
-                    p_K = 1.0 - y_dose_response_kminus1.sum(dim=-1, keepdim=True)  # [N, T, 1]
-                    p_K = torch.clamp(p_K, min=epsilon_tensor, max=1.0 - epsilon_tensor)
+                    # Clamp individual probabilities to valid range
+                    y_dose_response = torch.clamp(y_dose_response, min=epsilon_tensor, max=1.0 - epsilon_tensor)
 
-                    # Concatenate to get all K probabilities
-                    y_dose_response = torch.cat([y_dose_response_kminus1, p_K], dim=-1)  # [N, T, K]
+                    # Renormalize after clamping
+                    prob_sum = y_dose_response.sum(dim=-1, keepdim=True).clamp_min(epsilon_tensor)
+                    y_dose_response = y_dose_response / prob_sum  # [N, T, K]
 
                 else:
                     # For non-multinomial: standard Hill computation
-                    if function_type == 'single_hill':
-                        Hilla = Hill_based_positive(x_true.unsqueeze(-1), Vmax=Vmax_a, A=0, K=K_a, n=n_a, epsilon=epsilon_tensor)
-                        y_dose_response = A + (alpha * Hilla)
-                    elif function_type == 'additive_hill':
-                        Hilla = Hill_based_positive(x_true.unsqueeze(-1), Vmax=Vmax_a, A=0, K=K_a, n=n_a, epsilon=epsilon_tensor)
-                        Hillb = Hill_based_positive(x_true.unsqueeze(-1), Vmax=Vmax_b, A=0, K=K_b, n=n_b, epsilon=epsilon_tensor)
-                        y_dose_response = A + (alpha * Hilla) + (beta * Hillb)
-                    elif function_type == 'nested_hill':
-                        Hilla = Hill_based_positive(x_true.unsqueeze(-1), Vmax=Vmax_a, A=0, K=K_a, n=n_a, epsilon=epsilon_tensor)
-                        Hillb = Hill_based_positive(Hilla, Vmax=Vmax_b, A=0, K=K_b, n=n_b, epsilon=epsilon_tensor)
-                        y_dose_response = A + (alpha * Hillb)
+                    if distribution in ['binomial', 'multinomial']:
+                        # NEW FORMULATION for binomial:
+                        # Compute Hills with Vmax=1 (output [0, 1])
+                        # Then scale by Vmax_sum: y = A + Vmax_sum * (alpha * Hill_a + beta * Hill_b)
+                        # This naturally keeps y in [A, upper_limit] without explicit clamps
 
-                    # For binomial, clamp output to [0, 1] to ensure valid probabilities
-                    if distribution == 'binomial':
-                        y_dose_response = torch.clamp(y_dose_response, min=epsilon_tensor, max=1.0 - epsilon_tensor)
+                        if function_type == 'single_hill':
+                            Hilla = Hill_based_positive(x_true.unsqueeze(-1), Vmax=self._t(1.0), A=0, K=K_a, n=n_a, epsilon=epsilon_tensor)
+                            combined_hill = alpha * Hilla
+                            # Clamp combined_hill to [0, 1] to ensure y stays in [A, upper_limit]
+                            combined_hill = torch.clamp(combined_hill, min=0.0, max=1.0)
+                            y_dose_response = A + Vmax_sum * combined_hill
+
+                        elif function_type == 'additive_hill':
+                            Hilla = Hill_based_positive(x_true.unsqueeze(-1), Vmax=self._t(1.0), A=0, K=K_a, n=n_a, epsilon=epsilon_tensor)
+                            Hillb = Hill_based_positive(x_true.unsqueeze(-1), Vmax=self._t(1.0), A=0, K=K_b, n=n_b, epsilon=epsilon_tensor)
+                            combined_hill = alpha * Hilla + beta * Hillb
+                            # Clamp combined_hill to [0, 1] to ensure y stays in [A, upper_limit]
+                            combined_hill = torch.clamp(combined_hill, min=0.0, max=1.0)
+                            y_dose_response = A + Vmax_sum * combined_hill
+
+                        elif function_type == 'nested_hill':
+                            Hilla = Hill_based_positive(x_true.unsqueeze(-1), Vmax=self._t(1.0), A=0, K=K_a, n=n_a, epsilon=epsilon_tensor)
+                            Hillb = Hill_based_positive(Hilla, Vmax=self._t(1.0), A=0, K=K_b, n=n_b, epsilon=epsilon_tensor)
+                            combined_hill = alpha * Hillb
+                            # Clamp combined_hill to [0, 1] to ensure y stays in [A, upper_limit]
+                            combined_hill = torch.clamp(combined_hill, min=0.0, max=1.0)
+                            y_dose_response = A + Vmax_sum * combined_hill
+
+                        # NO clamp on y_dose_response - it's guaranteed to be in [A, upper_limit] ⊆ [0, 1]
+
+                    else:
+                        # For negbinom/normal/studentt: use standard formulation with learned Vmax_a/Vmax_b
+                        if function_type == 'single_hill':
+                            Hilla = Hill_based_positive(x_true.unsqueeze(-1), Vmax=Vmax_a, A=0, K=K_a, n=n_a, epsilon=epsilon_tensor)
+                            y_dose_response = A + (alpha * Hilla)
+                        elif function_type == 'additive_hill':
+                            Hilla = Hill_based_positive(x_true.unsqueeze(-1), Vmax=Vmax_a, A=0, K=K_a, n=n_a, epsilon=epsilon_tensor)
+                            Hillb = Hill_based_positive(x_true.unsqueeze(-1), Vmax=Vmax_b, A=0, K=K_b, n=n_b, epsilon=epsilon_tensor)
+                            y_dose_response = A + (alpha * Hilla) + (beta * Hillb)
+                        elif function_type == 'nested_hill':
+                            Hilla = Hill_based_positive(x_true.unsqueeze(-1), Vmax=Vmax_a, A=0, K=K_a, n=n_a, epsilon=epsilon_tensor)
+                            Hillb = Hill_based_positive(Hilla, Vmax=Vmax_b, A=0, K=K_b, n=n_b, epsilon=epsilon_tensor)
+                            y_dose_response = A + (alpha * Hillb)
 
             elif function_type == 'polynomial':
                 assert polynomial_degree is not None and polynomial_degree >= 1, \
@@ -903,45 +980,100 @@ class TransFitter:
         K_max_tensor = torch.max(torch.stack([torch.mean(x_true_mean[guides_tensor == g]) for g in torch.unique(guides_tensor)]))
 
         # Distribution-specific normalization for data-driven priors
+        # For building priors later:
+        y_obs_for_prior = None
+        
         if distribution == 'binomial' and denominator_tensor is not None:
-            # For binomial: normalize by denominator to get probabilities [0,1]
+            # Full probabilities for the likelihood
             y_obs_factored = y_obs_tensor / denominator_tensor.clamp_min(epsilon_tensor)
+
+            # For priors: only use entries where denominator >= 3
+            valid_mask = (denominator_tensor >= 3)
+            # Mark invalid entries as NaN so we can ignore them in means
+            y_obs_for_prior = torch.where(
+                valid_mask,
+                y_obs_factored,
+                torch.full_like(y_obs_factored, float('nan'))
+            )
+            print(f"[INFO] Binomial: using {valid_mask.float().mean().item()*100:.1f}% of entries with denominator >= 3 for priors")
+
         elif distribution == 'multinomial' and y_obs_tensor.ndim == 3:
-            # For multinomial: normalize by total across categories to get proportions [0,1]
-            # y_obs_tensor is [N, T, K], sum across K to get [N, T, 1]
-            total_counts = y_obs_tensor.sum(dim=-1, keepdim=True).clamp_min(epsilon_tensor)
-            y_obs_factored = y_obs_tensor / total_counts  # [N, T, K] with proportions in [0,1]
+            total_counts = y_obs_tensor.sum(dim=-1, keepdim=True).clamp_min(epsilon_tensor)  # [N, T, 1]
+            y_obs_factored = y_obs_tensor / total_counts  # [N, T, K]
+
+            # For priors: only use entries where total_counts >= 3
+            valid_mask = (total_counts >= 3)  # [N, T, 1]
+            y_obs_for_prior = torch.where(
+                valid_mask,
+                y_obs_factored,
+                torch.full_like(y_obs_factored, float('nan'))
+            )
+            print(f"[INFO] Multinomial: using {valid_mask.float().mean().item()*100:.1f}% of entries with total counts >= 3 for priors")
+        
         elif sum_factor_col is not None:
-            # For negbinom: normalize by sum factors to get expression per size factor
             y_obs_factored = y_obs_tensor / sum_factor_tensor.view(-1, 1)
+            y_obs_for_prior = y_obs_factored
         else:
-            # For other distributions: use raw values
             y_obs_factored = y_obs_tensor
+            y_obs_for_prior = y_obs_factored
 
-        Vmax_mean_tensor = torch.max(torch.stack([torch.mean(y_obs_factored[guides_tensor == g, :], dim=0) for g in torch.unique(guides_tensor)]), dim=0)[0]
-        Amean_tensor = torch.min(torch.stack([torch.mean(y_obs_factored[guides_tensor == g, :], dim=0) for g in torch.unique(guides_tensor)]), dim=0)[0]
 
-        Amean_tensor = torch.where(
-            torch.isfinite(Amean_tensor),
-            Amean_tensor.clamp_min(epsilon_tensor),
-            torch.full_like(Amean_tensor, 1.0)
-        )
-        Vmax_mean_tensor = torch.where(
-            torch.isfinite(Vmax_mean_tensor),
-            Vmax_mean_tensor.clamp_min(epsilon_tensor),
-            torch.full_like(Vmax_mean_tensor, 1.0)
-        )
+        unique_guides = torch.unique(guides_tensor)
 
-        # Convert Vmax to amplitude (max - min) for distributions that learn Vmax
-        # This ensures y = A + alpha*Vmax*Hill() doesn't overshoot the empirical maximum
-        # For binomial/multinomial: Vmax is in probability space [0,1], so no amplitude conversion needed
-        if distribution in ['negbinom', 'normal', 'studentt']:
-            print(f"[INFO] Converting Vmax from absolute maximum to amplitude for {distribution} distribution")
-            print(f"  Original Vmax range: [{Vmax_mean_tensor.min().item():.4f}, {Vmax_mean_tensor.max().item():.4f}]")
-            print(f"  Amean range: [{Amean_tensor.min().item():.4f}, {Amean_tensor.max().item():.4f}]")
-            Vmax_mean_tensor = Vmax_mean_tensor - Amean_tensor
-            Vmax_mean_tensor = Vmax_mean_tensor.clamp_min(epsilon_tensor)  # Ensure positive
-            print(f"  Amplitude range: [{Vmax_mean_tensor.min().item():.4f}, {Vmax_mean_tensor.max().item():.4f}]")
+        # nanmean and nanvar helpers (in case torch.nanmean/nanvar isn't available)
+        if hasattr(torch, "nanmean"):
+            def nanmean(x, dim):
+                return torch.nanmean(x, dim=dim)
+        else:
+            def nanmean(x, dim):
+                mask = ~torch.isnan(x)
+                num = torch.where(mask, x, torch.zeros_like(x)).sum(dim=dim)
+                den = mask.sum(dim=dim).clamp_min(1)
+                return num / den
+
+        if hasattr(torch, "nanvar"):
+            def nanvar(x, dim):
+                return torch.var(x, dim=dim)  # Note: torch.var ignores NaN in older versions
+        else:
+            def nanvar(x, dim):
+                mask = ~torch.isnan(x)
+                n = mask.sum(dim=dim).clamp_min(2)  # Need at least 2 values for variance
+                x_mean = nanmean(x, dim=dim)
+                # Expand mean to match x shape for broadcasting
+                if dim == 0:
+                    x_mean_expanded = x_mean.unsqueeze(0)
+                else:
+                    x_mean_expanded = x_mean
+                sq_diff = torch.where(mask, (x - x_mean_expanded) ** 2, torch.zeros_like(x))
+                return sq_diff.sum(dim=dim) / (n - 1)  # Unbiased variance
+
+        guide_means = []
+        guide_vars = []
+        for g in unique_guides:
+            vals_g = y_obs_for_prior[guides_tensor == g, ...]  # [Ng, T] or [Ng, T, K]
+            guide_means.append(nanmean(vals_g, dim=0))         # [T] or [T, K]
+            guide_vars.append(nanvar(vals_g, dim=0))           # [T] or [T, K]
+
+        guide_means = torch.stack(guide_means, dim=0)  # [G, T] or [G, T, K]
+        guide_vars = torch.stack(guide_vars, dim=0)    # [G, T] or [G, T, K]
+
+        # For A and Vmax: use min/max across guides for means
+        Vmax_mean_tensor = guide_means.max(dim=0).values  # [T] or [T, K]
+        Amean_tensor    = guide_means.min(dim=0).values   # [T] or [T, K]
+
+        # For variances: use mean variance across guides (average within-guide variability)
+        # This captures how much variability exists around each guide's mean
+        mean_within_guide_var = nanmean(guide_vars, dim=0)  # [T] or [T, K]
+
+        # For K: use variance of x_true across guides (between-guide variability)
+        K_mean_tensor = torch.max(torch.stack([torch.mean(x_true_mean[guides_tensor == g]) for g in torch.unique(guides_tensor)]))
+        K_vars = torch.stack([torch.mean(x_true_mean[guides_tensor == g]) for g in torch.unique(guides_tensor)])
+        K_var_tensor = torch.var(K_vars)
+
+        print("[DEBUG] Amean:", Amean_tensor.min().item(), Amean_tensor.max().item())
+        print("[DEBUG] Vmax_mean:", Vmax_mean_tensor.min().item(), Vmax_mean_tensor.max().item())
+        print("[DEBUG] Mean within-guide variance:", mean_within_guide_var.min().item(), mean_within_guide_var.max().item())
+        print("[DEBUG] K_var (between guides):", K_var_tensor.item())
 
         assert self.model.x_true.device == self.model.device
         if alpha_y_prefit is not None:

@@ -1862,33 +1862,46 @@ class TechnicalFitter:
         # Determine where masks were computed from (based on counts_to_fit source)
         # If we used self.model.counts, masks correspond to those features
         # If we used modality.counts, masks correspond to modality features
-        used_original_counts = (modality_name == self.model.primary_modality and
-                                hasattr(self.model, 'counts') and
-                                isinstance(self.model.counts, pd.DataFrame))
-
+        # Did we use self.model.counts as the source for counts_to_fit?
+        used_original_counts = (
+            modality_name == self.model.primary_modality
+            and hasattr(self.model, "counts")
+        )
+        
         if used_original_counts:
             # Masks are for original counts features - store in base class
-            if not hasattr(self.model, 'counts_meta'):
-                self.model.counts_meta = pd.DataFrame(index=self.model.counts.index)
-            self.model.counts_meta['ntc_zero_count']           = zero_count_mask
-            self.model.counts_meta['ntc_zero_std']             = zero_std_mask
-            self.model.counts_meta['ntc_single_category']      = only_one_category_mask
-            self.model.counts_meta['ntc_excluded_from_fit']    = needs_exclusion_mask
-            self.model.counts_meta['technical_correction_applied'] = ~needs_exclusion_mask
+            if isinstance(self.model.counts, pd.DataFrame):
+                index = self.model.counts.index
+            else:
+                # No natural index => just use a RangeIndex of the right length
+                index = pd.RangeIndex(len(zero_count_mask))
+        
+            if not hasattr(self.model, "counts_meta"):
+                self.model.counts_meta = pd.DataFrame(index=index)
+            elif len(self.model.counts_meta) != len(zero_count_mask):
+                # Realign counts_meta if needed
+                self.model.counts_meta = self.model.counts_meta.reindex(index)
+        
+            self.model.counts_meta["ntc_zero_count"]            = zero_count_mask
+            self.model.counts_meta["ntc_zero_std"]              = zero_std_mask
+            self.model.counts_meta["ntc_single_category"]       = only_one_category_mask
+            self.model.counts_meta["ntc_excluded_from_fit"]     = needs_exclusion_mask
+            self.model.counts_meta["technical_correction_applied"] = ~needs_exclusion_mask
+        
         else:
             # Masks are for modality features - store in modality metadata
-            # Verify masks match modality feature count
             if len(zero_count_mask) != len(modality.feature_meta):
                 raise ValueError(
                     f"Mask length mismatch: masks have {len(zero_count_mask)} elements "
                     f"but modality.feature_meta has {len(modality.feature_meta)} rows. "
                     f"This likely means counts_to_fit and modality.counts have different feature counts."
                 )
-            modality.feature_meta['ntc_zero_count']           = zero_count_mask.tolist()
-            modality.feature_meta['ntc_zero_std']             = zero_std_mask.tolist()
-            modality.feature_meta['ntc_single_category']      = only_one_category_mask.tolist()
-            modality.feature_meta['ntc_excluded_from_fit']    = needs_exclusion_mask.tolist()
-            modality.feature_meta['technical_correction_applied'] = (~needs_exclusion_mask).tolist()
+            modality.feature_meta["ntc_zero_count"]            = zero_count_mask.tolist()
+            modality.feature_meta["ntc_zero_std"]              = zero_std_mask.tolist()
+            modality.feature_meta["ntc_single_category"]       = only_one_category_mask.tolist()
+            modality.feature_meta["ntc_excluded_from_fit"]     = needs_exclusion_mask.tolist()
+            modality.feature_meta["technical_correction_applied"] = (~needs_exclusion_mask).tolist()
+
     
         # ----------------------------------------
         # Persist results at modality level
