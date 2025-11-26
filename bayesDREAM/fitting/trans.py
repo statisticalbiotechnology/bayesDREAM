@@ -934,7 +934,7 @@ class TransFitter:
 
         # Convert Vmax to amplitude (max - min) for distributions that learn Vmax
         # This ensures y = A + alpha*Vmax*Hill() doesn't overshoot the empirical maximum
-        # For binomial/multinomial: Vmax is fixed at 1.0 anyway (see line 240/246), so skip
+        # For binomial/multinomial: Vmax is in probability space [0,1], so no amplitude conversion needed
         if distribution in ['negbinom', 'normal', 'studentt']:
             print(f"[INFO] Converting Vmax from absolute maximum to amplitude for {distribution} distribution")
             print(f"  Original Vmax range: [{Vmax_mean_tensor.min().item():.4f}, {Vmax_mean_tensor.max().item():.4f}]")
