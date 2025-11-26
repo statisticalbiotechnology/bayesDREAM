@@ -231,28 +231,51 @@ class TransFitter:
 
                 # Vmax_a and K_a: Distribution-specific priors
                 if distribution in ['binomial', 'multinomial']:
-                    # SIMPLIFIED: For bounded distributions, fix Vmax=1.0 (constant, not learned)
-                    # This lets alpha do all the scaling directly: y = A + alpha * Hill(x; Vmax=1)
-                    # Hill output is in [0,1], so alpha directly represents the amplitude
+                    # For bounded distributions [0,1], learn Vmax from Beta distribution
+                    # Vmax represents the maximum probability in the dose-response curve
+                    # Use data-driven priors: mean from observations, variance from Vmax_alpha_tensor
+
+                    # Clamp mean to avoid boundary issues (Beta undefined at 0 or 1)
+                    Vmax_mean_clamped = Vmax_prior_mean.clamp(min=0.01, max=0.99)
+
+                    # Compute target variance from Vmax_alpha_tensor (same formula as Gamma)
+                    # Higher Vmax_alpha_tensor → lower variance → tighter around mean
+                    Vmax_sigma = (Vmax_prior_mean / torch.sqrt(Vmax_alpha_tensor)) + epsilon_tensor
+
+                    # For Beta: variance = μ(1-μ) / (concentration + 1)
+                    # Solve for concentration: concentration = μ(1-μ) / σ² - 1
+                    mu_times_one_minus_mu = Vmax_mean_clamped * (1 - Vmax_mean_clamped)
+                    concentration_from_variance = (mu_times_one_minus_mu / (Vmax_sigma ** 2)) - 1
+
+                    # CRITICAL: Ensure concentration is large enough that BOTH alpha and beta > 1
+                    # Need: α = μ*c > 1 and β = (1-μ)*c > 1 → c > 1/min(μ, 1-μ)
+                    min_mu_or_one_minus_mu = torch.minimum(Vmax_mean_clamped, 1 - Vmax_mean_clamped)
+                    min_concentration = (1.0 / min_mu_or_one_minus_mu) + epsilon_tensor
+                    concentration = torch.maximum(concentration_from_variance, min_concentration)
+
+                    # Beta distribution parameters (both will be > 1 by construction)
+                    alpha_vmax = Vmax_mean_clamped * concentration
+                    beta_vmax = (1 - Vmax_mean_clamped) * concentration
+
                     if distribution == 'multinomial' and K is not None:
                         K_minus_1 = K - 1
                         with pyro.plate("category_plate_vmax", K_minus_1, dim=-2):
-                            Vmax_a = self._t(1.0).expand(K_minus_1, T)  # [K-1, T] all ones
+                            Vmax_a = pyro.sample("Vmax_a", dist.Beta(alpha_vmax, beta_vmax))  # [K-1, T]
                             K_a = pyro.sample("K_a", dist.Gamma(
                                 ((K_max_tensor/2) ** 2) / (K_sigma ** 2),
                                 (K_max_tensor/2) / (K_sigma ** 2)
                             ))  # [K-1, T]
                     else:
-                        Vmax_a = self._t(1.0).expand(T)  # [T] all ones
+                        Vmax_a = pyro.sample("Vmax_a", dist.Beta(alpha_vmax, beta_vmax))  # [T]
                         # --- log-normal style prior using K_sigma ---
                         K_mean = (K_max_tensor / 2.0).clamp_min(epsilon_tensor)
                         K_std  = K_sigma
-            
+
                         ratio        = (K_std / K_mean).clamp_min(self._t(1e-6))
                         K_log_sigma2 = torch.log1p(ratio ** 2)
                         K_log_sigma  = torch.sqrt(K_log_sigma2)
                         K_log_mu     = torch.log(K_mean) - 0.5 * K_log_sigma2
-            
+
                         log_K_a = pyro.sample("log_K_a", dist.Normal(K_log_mu, K_log_sigma))
                         #K_a = torch.exp(log_K_a).clamp(min=epsilon_tensor, max=K_max_tensor * 10.0)
                         K_a = pyro.deterministic("K_a", torch.exp(log_K_a))
@@ -293,28 +316,32 @@ class TransFitter:
 
                     # Vmax_b and K_b: Distribution-specific priors
                     if distribution in ['binomial', 'multinomial']:
-                        # SIMPLIFIED: Fix Vmax=1.0 for bounded distributions
+                        # For bounded distributions [0,1], learn Vmax_b from Beta distribution
+                        # Same approach as Vmax_a but for the second Hill function (in additive/nested)
+                        # Use same Beta parameters as Vmax_a (shared data-driven priors)
+                        # alpha_vmax and beta_vmax were already computed above
+
                         if distribution == 'multinomial' and K is not None:
                             K_minus_1 = K - 1
                             with pyro.plate("category_plate_vmax_b", K_minus_1, dim=-2):
-                                Vmax_b = self._t(1.0).expand(K_minus_1, T)  # [K-1, T] all ones
+                                Vmax_b = pyro.sample("Vmax_b", dist.Beta(alpha_vmax, beta_vmax))  # [K-1, T]
                                 K_b = pyro.sample("K_b", dist.Gamma(
                                     ((K_max_tensor/2) ** 2) / (K_sigma ** 2),
                                     (K_max_tensor/2) / (K_sigma ** 2)
                                 ))  # [K-1, T]
                         else:
-                            Vmax_b = self._t(1.0).expand(T)  # [T] all ones
+                            Vmax_b = pyro.sample("Vmax_b", dist.Beta(alpha_vmax, beta_vmax))  # [T]
                             K_mean = (K_max_tensor / 2.0).clamp_min(epsilon_tensor)
                             K_std  = K_sigma
-            
+
                             ratio        = (K_std / K_mean).clamp_min(self._t(1e-6))
                             K_log_sigma2 = torch.log1p(ratio ** 2)
                             K_log_sigma  = torch.sqrt(K_log_sigma2)
                             K_log_mu     = torch.log(K_mean) - 0.5 * K_log_sigma2
-            
+
                             log_K_b = pyro.sample("log_K_b", dist.Normal(K_log_mu, K_log_sigma))
                             #K_b = torch.exp(log_K_b).clamp(min=epsilon_tensor, max=K_max_tensor * 10.0)
-                            K_b = pyro.deterministic("K_a", torch.exp(log_K_b))
+                            K_b = pyro.deterministic("K_b", torch.exp(log_K_b))
 
                     else:
                         # For negbinom/normal: learn Vmax_b (unbounded, so no constraint issues)
@@ -1227,25 +1254,6 @@ class TransFitter:
 
         for k, v in posterior_samples_y.items():
             posterior_samples_y[k] = self._to_cpu(v)
-
-        # ----------------------------------------
-        # Add fixed Vmax for binomial/multinomial (not learned, so not in posterior)
-        # ----------------------------------------
-        if function_type in ['single_hill', 'additive_hill', 'nested_hill']:
-            if distribution in ['binomial', 'multinomial']:
-                # For binomial/multinomial, Vmax was fixed at 1.0 (not sampled)
-                # Add it to posterior_samples for plotting compatibility
-                if 'K_a' in posterior_samples_y:
-                    # Match shape of K_a: [S, T] for binomial, [S, K-1, T] for multinomial
-                    Vmax_a_shape = posterior_samples_y['K_a'].shape
-                    posterior_samples_y['Vmax_a'] = torch.ones(Vmax_a_shape, dtype=torch.float32)
-                    print(f"[INFO] Added Vmax_a=1.0 (constant) to posterior_samples with shape {Vmax_a_shape}")
-
-                if function_type in ['additive_hill', 'nested_hill'] and 'K_b' in posterior_samples_y:
-                    # Same for Vmax_b in additive/nested Hill
-                    Vmax_b_shape = posterior_samples_y['K_b'].shape
-                    posterior_samples_y['Vmax_b'] = torch.ones(Vmax_b_shape, dtype=torch.float32)
-                    print(f"[INFO] Added Vmax_b=1.0 (constant) to posterior_samples with shape {Vmax_b_shape}")
 
         # ----------------------------------------
         # Store nmin/nmax and check boundaries
