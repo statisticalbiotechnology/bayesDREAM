@@ -244,7 +244,18 @@ class TransFitter:
                             ))  # [K-1, T]
                     else:
                         Vmax_a = self._t(1.0).expand(T)  # [T] all ones
-                        K_a = pyro.sample("K_a", dist.Gamma(((K_max_tensor/2) ** 2) / (K_sigma ** 2), (K_max_tensor/2) / (K_sigma ** 2)))
+                        # --- log-normal style prior using K_sigma ---
+                        K_mean = (K_max_tensor / 2.0).clamp_min(epsilon_tensor)
+                        K_std  = K_sigma
+            
+                        ratio        = (K_std / K_mean).clamp_min(self._t(1e-6))
+                        K_log_sigma2 = torch.log1p(ratio ** 2)
+                        K_log_sigma  = torch.sqrt(K_log_sigma2)
+                        K_log_mu     = torch.log(K_mean) - 0.5 * K_log_sigma2
+            
+                        log_K_a = pyro.sample("log_K_a", dist.Normal(K_log_mu, K_log_sigma))
+                        #K_a = torch.exp(log_K_a).clamp(min=epsilon_tensor, max=K_max_tensor * 10.0)
+                        K_a = pyro.deterministic("K_a", torch.exp(log_K_a))
 
                 else:
                     # For negbinom/normal: learn Vmax (unbounded, so no constraint issues)
@@ -293,7 +304,17 @@ class TransFitter:
                                 ))  # [K-1, T]
                         else:
                             Vmax_b = self._t(1.0).expand(T)  # [T] all ones
-                            K_b = pyro.sample("K_b", dist.Gamma(((K_max_tensor/2) ** 2) / (K_sigma ** 2), (K_max_tensor/2) / (K_sigma ** 2)))
+                            K_mean = (K_max_tensor / 2.0).clamp_min(epsilon_tensor)
+                            K_std  = K_sigma
+            
+                            ratio        = (K_std / K_mean).clamp_min(self._t(1e-6))
+                            K_log_sigma2 = torch.log1p(ratio ** 2)
+                            K_log_sigma  = torch.sqrt(K_log_sigma2)
+                            K_log_mu     = torch.log(K_mean) - 0.5 * K_log_sigma2
+            
+                            log_K_b = pyro.sample("log_K_b", dist.Normal(K_log_mu, K_log_sigma))
+                            #K_b = torch.exp(log_K_b).clamp(min=epsilon_tensor, max=K_max_tensor * 10.0)
+                            K_b = pyro.deterministic("K_a", torch.exp(log_K_b))
 
                     else:
                         # For negbinom/normal: learn Vmax_b (unbounded, so no constraint issues)
@@ -609,7 +630,7 @@ class TransFitter:
         sum_factor_col: str = None,
         function_type: str = 'single_hill',  # or 'additive', 'nested'
         polynomial_degree: int = 6,
-        lr: float = 1e-3,
+        lr: float = None,
         niters: int = None,
         nsamples: int = 1000,
         alpha_ewma: float = 0.05,
@@ -693,6 +714,15 @@ class TransFitter:
             else:
                 niters = 100_000
                 print(f"[INFO] Using default niters=100,000 for distribution '{distribution}' and function_type '{function_type}'")
+        
+        #if lr is None:
+        #    # Default: 100,000 unless multinomial OR polynomial function, then 200,000
+        #    if distribution in ['binomial', 'multinomial']:
+        #        lr = 1e-4
+        #        print(f"[INFO] Using default niters=200,000 for distribution '{distribution}'")
+        #    else:
+        #        lr = 1e-3
+        #        print(f"[INFO] Using default lr=1e-3 for distribution '{distribution}'")
 
         # Check that technical fit has been done for this modality
         if modality.alpha_y_prefit is None and 'technical_group_code' in self.model.meta.columns:
@@ -937,47 +967,41 @@ class TransFitter:
                 K=K,
                 D=D,
             )
-
-            # 1) Create the base torch optimizer (with gradient clipping built in)
-            base_optimizer = torch.optim.Adam(
-                guide_y.parameters(),
-                lr=1e-3,                   # initial lr (this will be overridden by the scheduler)
-                betas=(0.9, 0.999),
-            )
-            
-            # 2) Wrap it in PyroLRScheduler by passing the constructor + kwargs
-            optimizer = pyro.optim.PyroLRScheduler(
-                # 1) Which scheduler class?
-                scheduler_constructor=OneCycleLR,
-            
-                # 2) Build optim_args with the optimizer *class* + its init args,
-                #    then your scheduler’s own kwargs.
-                optim_args={
-                    # -- for your torch optimizer --
-                    "optimizer": torch.optim.Adam,
-                    "optim_args": {
-                        "lr":     1e-3,          # placeholder, overridden by scheduler
-                        "betas": (0.9, 0.999),
-                    },
-                    # -- for OneCycleLR itself --
-                    "max_lr":          1e-2,
-                    "total_steps":     niters,
-                    "pct_start":       0.1,
-                    "div_factor":      25.0,
-                    "final_div_factor":1e4,
-                },
-            
-                # 3) (Optional) still want gradient clipping?
-                clip_args={"clip_norm": 5}
-            )
-
-            #svi   = pyro.infer.SVI(self._model_y, guide_y, optimizer, pyro.infer.Trace_ELBO(num_particles=5, vectorize_particles=True))
-            svi   = pyro.infer.SVI(self._model_y, guide_y, optimizer, pyro.infer.Trace_ELBO())
         else:
             guide_y = pyro.infer.autoguide.AutoNormalMessenger(self._model_y)
-            optimizer = pyro.optim.ClippedAdam({"lr": lr, "clip_norm": 10.0})
-            svi = pyro.infer.SVI(self._model_y, guide_y, optimizer,
-                                 loss=pyro.infer.Trace_ELBO())
+
+        # -------------------------------
+        # Shared OneCycleLR scheduler for ALL function types
+        # -------------------------------
+        # Use lr if the user passed it, otherwise default to 1e-3
+        base_lr = 1e-3 if lr is None else lr
+        
+        optimizer = pyro.optim.PyroLRScheduler(
+            scheduler_constructor=OneCycleLR,
+            optim_args={
+                # underlying torch optimizer
+                "optimizer": torch.optim.Adam,
+                "optim_args": {
+                    "lr": base_lr,      # initial lr (OneCycle will move it)
+                    "betas": (0.9, 0.999),
+                },
+                # OneCycleLR hyperparameters
+                "max_lr":          base_lr * 10,  # was 1e-2 when base_lr=1e-3
+                "total_steps":     niters,
+                "pct_start":       0.1,
+                "div_factor":      25.0,
+                "final_div_factor": 1e4,
+            },
+            clip_args={"clip_norm": 5},  # same clipping everywhere
+        )
+        
+        svi = pyro.infer.SVI(
+            self._model_y,
+            guide_y,
+            optimizer,
+            loss=pyro.infer.Trace_ELBO()
+        )
+
         
         for name, value in pyro.get_param_store().items():
             if "poly_coeff" in name and "loc" in name:
