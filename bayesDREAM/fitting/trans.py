@@ -1016,7 +1016,7 @@ class TransFitter:
         # Distribution-specific normalization for data-driven priors
         # For building priors later:
         y_obs_for_prior = None
-        
+
         if distribution == 'binomial' and denominator_tensor is not None:
             # Full probabilities for the likelihood
             y_obs_factored = y_obs_tensor / denominator_tensor.clamp_min(epsilon_tensor)
@@ -1043,7 +1043,7 @@ class TransFitter:
                 torch.full_like(y_obs_factored, float('nan'))
             )
             print(f"[INFO] Multinomial: using {valid_mask.float().mean().item()*100:.1f}% of entries with total counts >= 3 for priors")
-        
+
         elif sum_factor_col is not None:
             y_obs_factored = y_obs_tensor / sum_factor_tensor.view(-1, 1)
             y_obs_for_prior = y_obs_factored
@@ -1051,6 +1051,82 @@ class TransFitter:
             y_obs_factored = y_obs_tensor
             y_obs_for_prior = y_obs_factored
 
+        # ===================================================================
+        # CORRECT FOR TECHNICAL EFFECTS BEFORE COMPUTING PRIORS
+        # ===================================================================
+        # The observed data includes technical batch effects. To compute unbiased
+        # priors for A and Vmax (baseline parameters), we need to remove these effects
+        # using the inverse transformation.
+        if alpha_y_prefit is not None and groups_tensor is not None:
+            print(f"[INFO] Correcting for technical effects before computing priors (distribution: {distribution})")
+
+            if distribution == 'negbinom':
+                # Technical effect: multiplicative (mu_corrected = mu * alpha_y_mult)
+                # Inverse: divide by alpha_y_mult to get baseline
+                # alpha_y_prefit for negbinom is multiplicative (from fit_technical)
+                alpha_y_mult_expanded = alpha_y_prefit[groups_tensor, :]  # [N, T]
+                y_obs_for_prior = y_obs_for_prior / alpha_y_mult_expanded.clamp_min(epsilon_tensor)
+                print(f"[INFO] negbinom: Applied inverse multiplicative correction (divide by alpha_y_mult)")
+
+            elif distribution in ['normal', 'studentt']:
+                # Technical effect: additive (mu_corrected = mu + alpha_y_add)
+                # Inverse: subtract alpha_y_add to get baseline
+                # alpha_y_prefit for normal/studentt is additive (from fit_technical)
+                alpha_y_add_expanded = alpha_y_prefit[groups_tensor, :]  # [N, T]
+                y_obs_for_prior = y_obs_for_prior - alpha_y_add_expanded
+                print(f"[INFO] {distribution}: Applied inverse additive correction (subtract alpha_y_add)")
+
+            elif distribution == 'binomial':
+                # Technical effect: logit scale (logit(p_corrected) = logit(p) + alpha_y_add)
+                # Inverse: logit(p_baseline) = logit(p_observed) - alpha_y_add
+                # Then: p_baseline = sigmoid(logit(p_baseline))
+                alpha_y_add_expanded = alpha_y_prefit[groups_tensor, :]  # [N, T]
+
+                # Convert observed proportions to logit scale
+                p_obs_clamped = torch.clamp(y_obs_for_prior, min=epsilon_tensor, max=1.0 - epsilon_tensor)
+                logit_obs = torch.log(p_obs_clamped) - torch.log(1.0 - p_obs_clamped)
+
+                # Apply inverse correction on logit scale
+                logit_baseline = logit_obs - alpha_y_add_expanded
+
+                # Convert back to probability scale
+                y_obs_for_prior = torch.sigmoid(logit_baseline)
+                print(f"[INFO] binomial: Applied inverse logit correction (subtract alpha_y_add on logit scale)")
+
+            elif distribution == 'multinomial':
+                # Technical effect: log scale (log(probs_corrected) = log(probs) + alpha_y_add)
+                # Inverse: log(probs_baseline) = log(probs_observed) - alpha_y_add
+                # Then: probs_baseline = exp(log_probs_baseline) / sum(exp(...))
+                alpha_y_add_expanded = alpha_y_prefit[groups_tensor, :, :]  # [N, T, K]
+
+                # Convert observed proportions to log scale
+                p_obs_clamped = torch.clamp(y_obs_for_prior, min=epsilon_tensor)
+                log_probs_obs = torch.log(p_obs_clamped)
+
+                # Apply inverse correction on log scale
+                log_probs_baseline = log_probs_obs - alpha_y_add_expanded
+
+                # Normalize (softmax) to get valid probabilities
+                y_obs_for_prior = torch.softmax(log_probs_baseline, dim=-1)
+                print(f"[INFO] multinomial: Applied inverse log correction (subtract alpha_y_add on log scale)")
+
+            # Handle any NaN or invalid values that may result from correction
+            # (e.g., if correction pushes values outside valid range)
+            if not torch.isfinite(y_obs_for_prior).all():
+                n_invalid = (~torch.isfinite(y_obs_for_prior)).sum().item()
+                n_total = y_obs_for_prior.numel()
+                print(f"[WARNING] Technical correction produced {n_invalid}/{n_total} "
+                      f"({100*n_invalid/n_total:.2f}%) non-finite values. "
+                      f"These will be excluded from prior computation.")
+                # Mark invalid values as NaN so they're excluded by nanmean/nanvar
+                y_obs_for_prior = torch.where(
+                    torch.isfinite(y_obs_for_prior),
+                    y_obs_for_prior,
+                    torch.full_like(y_obs_for_prior, float('nan'))
+                )
+        else:
+            if alpha_y_prefit is not None:
+                print(f"[INFO] alpha_y_prefit provided but groups_tensor is None - skipping technical correction")
 
         unique_guides = torch.unique(guides_tensor)
 
