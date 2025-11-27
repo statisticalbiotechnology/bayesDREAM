@@ -135,6 +135,12 @@ class ModelLoader:
                         'n_features': loaded_data.get('n_features'),
                         'feature_meta': feature_meta_df
                     }
+
+                    # Load loss_technical if present
+                    if loaded_data.get('loss_technical') is not None:
+                        mod.loss_technical = loaded_data['loss_technical']
+                        print(f"[LOAD] {mod_name}.loss_technical ({len(mod.loss_technical)} iterations) ← {posterior_path}")
+
                     print(f"[LOAD] {mod_name}.posterior_samples_technical ({loaded_data.get('n_features')} features) ← {posterior_path}")
                 else:
                     # Old format (backward compatibility)
@@ -214,6 +220,12 @@ class ModelLoader:
                     'modality_name': loaded_data.get('modality_name'),
                     'feature_meta': feature_meta_df
                 }
+
+                # Load loss_x if present
+                if loaded_data.get('loss_x') is not None:
+                    self.model.loss_x = loaded_data['loss_x']
+                    print(f"[LOAD] loss_x ({len(self.model.loss_x)} iterations) ← {posterior_path}")
+
                 print(f"[LOAD] posterior_samples_cis (cis_gene: {loaded_data.get('cis_gene')}) ← {posterior_path}")
             else:
                 # Old format (backward compatibility)
@@ -289,6 +301,12 @@ class ModelLoader:
                         'cis_gene': loaded_data.get('cis_gene'),
                         'feature_meta': feature_meta_df
                     }
+
+                    # Load losses_trans if present
+                    if loaded_data.get('losses_trans') is not None:
+                        self.model.losses_trans = loaded_data['losses_trans']
+                        print(f"[LOAD] losses_trans ({len(self.model.losses_trans)} iterations) ← {posterior_path}")
+
                     print(f"[LOAD] posterior_samples_trans (modality: {loaded_data.get('modality_name')}, {loaded_data.get('n_features')} features) ← {posterior_path}")
                 else:
                     # Old format (backward compatibility)
@@ -320,6 +338,12 @@ class ModelLoader:
                         'cis_gene': loaded_data.get('cis_gene'),
                         'feature_meta': feature_meta_df
                     }
+
+                    # Load losses_trans if present
+                    if loaded_data.get('losses_trans') is not None:
+                        self.model.modalities[mod_name].losses_trans = loaded_data['losses_trans']
+                        print(f"[LOAD] {mod_name}.losses_trans ({len(self.model.modalities[mod_name].losses_trans)} iterations) ← {mod_path}")
+
                     print(f"[LOAD] {mod_name}.posterior_samples_trans (distribution: {loaded_data.get('distribution')}, {loaded_data.get('n_features')} features) ← {mod_path}")
                 else:
                     # Old format (backward compatibility)

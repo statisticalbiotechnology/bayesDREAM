@@ -36,18 +36,11 @@ def _compute_data_driven_priors(model, modality, distribution, epsilon=1e-6):
     mu_x_sd_tensor : torch.Tensor
         Feature-specific prior standard deviations [T] or [T, D]
     """
-    # Get counts - use original if primary modality with cis gene
-    if modality.name == model.primary_modality and hasattr(model, 'counts'):
-        if isinstance(model.counts, pd.DataFrame):
-            counts = model.counts.values
-            cell_names = model.counts.columns.tolist()
-        else:
-            counts = model.counts
-            cell_names = model.meta['cell'].values[:counts.shape[modality.cells_axis]]
-    else:
-        counts = modality.counts
-        cell_names = modality.cell_names if modality.cell_names is not None else \
-                     model.meta['cell'].values[:counts.shape[modality.cells_axis]]
+    # Always use modality.counts for consistency
+    # (model.counts might be subset to cis gene only, but modality has all features)
+    counts = modality.counts
+    cell_names = modality.cell_names if modality.cell_names is not None else \
+                 model.meta['cell'].values[:counts.shape[modality.cells_axis]]
 
     # Subset to NTC cells
     cell_set = set(cell_names)
@@ -153,14 +146,12 @@ def sample_technical_priors(
     if distribution is None:
         distribution = modality.distribution
 
-    # Get model dimensions
-    if modality_name == model.primary_modality and hasattr(model, 'counts'):
-        T = model.counts.shape[0]  # All features including cis gene
+    # Get model dimensions - always use modality.counts for consistency
+    # (model.counts might be subset to cis gene only, but modality has all features)
+    if modality.counts.ndim == 2:
+        T = modality.counts.shape[0 if modality.cells_axis == 1 else 1]
     else:
-        if modality.counts.ndim == 2:
-            T = modality.counts.shape[0 if modality.cells_axis == 1 else 1]
-        else:
-            T = modality.counts.shape[0]
+        T = modality.counts.shape[0]
 
     C = model.meta['technical_group_code'].nunique()
 
@@ -184,6 +175,13 @@ def sample_technical_priors(
 
     # Compute data-driven prior parameters from NTC data
     mu_x_mean_tensor, mu_x_sd_tensor = _compute_data_driven_priors(model, modality, distribution)
+
+    # Ensure T matches the actual computed prior parameters
+    # (handles edge cases where modality might have been modified after fitting)
+    if mu_x_mean_tensor.numel() > 0 and mu_x_mean_tensor.numel() != T:
+        print(f"[WARNING] Modality has {T} features but computed priors have {mu_x_mean_tensor.numel()} features. "
+              f"Using actual prior size ({mu_x_mean_tensor.numel()}).")
+        T = mu_x_mean_tensor.numel()
 
     # Distribution-specific parameters
     if distribution == 'negbinom':
@@ -227,13 +225,9 @@ def sample_technical_priors(
 
         # Get denominator if available
         if modality.denominator is not None:
-            # Subset to NTC cells (recompute indices)
-            if modality.name == model.primary_modality and hasattr(model, 'counts'):
-                cell_names = model.counts.columns.tolist() if isinstance(model.counts, pd.DataFrame) else \
-                             model.meta['cell'].values[:model.counts.shape[modality.cells_axis]]
-            else:
-                cell_names = modality.cell_names if modality.cell_names is not None else \
-                             model.meta['cell'].values[:modality.counts.shape[modality.cells_axis]]
+            # Get cell names from modality for consistency
+            cell_names = modality.cell_names if modality.cell_names is not None else \
+                         model.meta['cell'].values[:modality.counts.shape[modality.cells_axis]]
 
             meta_subset = model.meta[model.meta['cell'].isin(set(cell_names))].copy()
             meta_ntc = meta_subset[meta_subset["target"] == "ntc"].copy()
@@ -286,13 +280,9 @@ def sample_technical_priors(
         # probs_baseline ~ Dirichlet(concentration) with empirical concentration from NTC data
         # This matches technical.py:118-123
 
-        # Subset to NTC cells (recompute indices)
-        if modality.name == model.primary_modality and hasattr(model, 'counts'):
-            cell_names = model.counts.columns.tolist() if isinstance(model.counts, pd.DataFrame) else \
-                         model.meta['cell'].values[:model.counts.shape[modality.cells_axis]]
-        else:
-            cell_names = modality.cell_names if modality.cell_names is not None else \
-                         model.meta['cell'].values[:modality.counts.shape[modality.cells_axis]]
+        # Get cell names from modality for consistency
+        cell_names = modality.cell_names if modality.cell_names is not None else \
+                     model.meta['cell'].values[:modality.counts.shape[modality.cells_axis]]
 
         meta_subset = model.meta[model.meta['cell'].isin(set(cell_names))].copy()
         meta_ntc = meta_subset[meta_subset["target"] == "ntc"].copy()

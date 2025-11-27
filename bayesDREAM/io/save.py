@@ -141,7 +141,8 @@ class ModelSaver:
                     'distribution': mod.distribution,
                     'feature_names': mod.feature_names if hasattr(mod, 'feature_names') else None,
                     'n_features': mod.dims.get('n_features', None),
-                    'feature_meta': mod.feature_meta.to_dict('records') if hasattr(mod, 'feature_meta') and mod.feature_meta is not None else None
+                    'feature_meta': mod.feature_meta.to_dict('records') if hasattr(mod, 'feature_meta') and mod.feature_meta is not None else None,
+                    'loss_technical': mod.loss_technical if hasattr(mod, 'loss_technical') else None
                 }
 
                 path = os.path.join(output_dir, f'posterior_samples_technical_{mod_name}.pt')
@@ -201,7 +202,8 @@ class ModelSaver:
                 'posterior_samples': posterior_clean,
                 'cis_gene': self.model.cis_gene,
                 'modality_name': 'cis',  # Cis always uses 'cis' modality
-                'feature_meta': cis_mod.feature_meta.to_dict('records') if hasattr(cis_mod, 'feature_meta') and cis_mod.feature_meta is not None else None
+                'feature_meta': cis_mod.feature_meta.to_dict('records') if hasattr(cis_mod, 'feature_meta') and cis_mod.feature_meta is not None else None,
+                'loss_x': self.model.loss_x if hasattr(self.model, 'loss_x') else None
             }
 
             path = os.path.join(output_dir, 'posterior_samples_cis.pt')
@@ -276,7 +278,8 @@ class ModelSaver:
                     'feature_names': primary_mod.feature_names if hasattr(primary_mod, 'feature_names') else None,
                     'n_features': primary_mod.dims.get('n_features', None),
                     'feature_meta': primary_mod.feature_meta.to_dict('records') if hasattr(primary_mod, 'feature_meta') and primary_mod.feature_meta is not None else None,
-                    'cis_gene': self.model.cis_gene
+                    'cis_gene': self.model.cis_gene,
+                    'losses_trans': self.model.losses_trans if hasattr(self.model, 'losses_trans') else None
                 }
 
                 # Include modality name in filename to prevent overwrites
@@ -300,7 +303,8 @@ class ModelSaver:
                     'feature_names': mod.feature_names if hasattr(mod, 'feature_names') else None,
                     'n_features': mod.dims.get('n_features', None),
                     'feature_meta': mod.feature_meta.to_dict('records') if hasattr(mod, 'feature_meta') and mod.feature_meta is not None else None,
-                    'cis_gene': self.model.cis_gene
+                    'cis_gene': self.model.cis_gene,
+                    'losses_trans': mod.losses_trans if hasattr(mod, 'losses_trans') else None
                 }
 
                 path = os.path.join(output_dir, f'posterior_samples_trans_{mod_name}.pt')
