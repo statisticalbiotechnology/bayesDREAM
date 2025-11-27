@@ -1500,8 +1500,30 @@ class TechnicalFitter:
             elbo = pyro.infer.TraceMeanField_ELBO(num_particles=1)
         else:
             elbo = pyro.infer.Trace_ELBO(num_particles=1)   # you can bump num_particles later if needed
-        
-        optimizer = pyro.optim.ClippedAdam({"lr": lr, "clip_norm": 10.0})
+
+        # Use OneCycleLR scheduler for stable convergence
+        from torch.optim.lr_scheduler import OneCycleLR
+        base_lr = 1e-3 if lr is None else lr
+
+        optimizer = pyro.optim.PyroLRScheduler(
+            scheduler_constructor=OneCycleLR,
+            optim_args={
+                # underlying torch optimizer
+                "optimizer": torch.optim.Adam,
+                "optim_args": {
+                    "lr": base_lr,      # initial lr (OneCycle will move it)
+                    "betas": (0.9, 0.999),
+                },
+                # OneCycleLR hyperparameters
+                "max_lr":          base_lr * 10,  # peak at 10x base_lr
+                "total_steps":     niters,
+                "pct_start":       0.1,           # 10% warmup
+                "div_factor":      25.0,          # initial_lr = max_lr/25
+                "final_div_factor": 1e4,          # final_lr = max_lr/1e4
+            },
+            clip_args={"clip_norm": 10.0},  # gradient clipping
+        )
+
         svi = pyro.infer.SVI(self._model_technical, guide_cellline, optimizer, loss=elbo)
         guide_cellline.to(self.model.device)
     
