@@ -311,6 +311,7 @@ def sample_binomial_trans(
         Observed success counts, shape [N, T]
     denominator_tensor : torch.Tensor
         Total counts (denominator), shape [N, T]
+        Observations with denominator=0 are masked (excluded from likelihood)
     mu_y : torch.Tensor
         Expected probability from f(x), shape [N, T]
         Should be in [0, 1] but we'll apply sigmoid anyway
@@ -329,7 +330,17 @@ def sample_binomial_trans(
     -----
     logit(p) = logit(mu_y) + alpha_y[group]
     p = sigmoid(logit(p))
+
+    Observations where denominator_tensor=0 are masked and contribute zero to the log-likelihood.
     """
+    # Create mask for valid observations (denominator > 0)
+    valid_mask = denominator_tensor > 0
+
+    # If no valid observations, return early
+    if not valid_mask.any():
+        print("[WARNING] No valid observations (all denominators are 0)")
+        return
+
     # Convert mu_y to logit scale
     mu_y_clamped = torch.clamp(mu_y, min=1e-6, max=1-1e-6)
     logit_mu = torch.log(mu_y_clamped) - torch.log(1 - mu_y_clamped)
@@ -341,13 +352,28 @@ def sample_binomial_trans(
     else:
         logit_final = logit_mu
 
-    # Sample observations
-    with pyro.plate("obs_plate", N, dim=-2):
-        pyro.sample(
-            "y_obs",
-            dist.Binomial(total_count=denominator_tensor, logits=logit_final),
-            obs=y_obs_tensor
-        )
+    # Compute log probability manually to handle masking
+    # For valid observations: Binomial log-prob
+    # For masked observations: 0 contribution
+    p = torch.sigmoid(logit_final)
+
+    # Binomial log-probability: log C(n,k) + k*log(p) + (n-k)*log(1-p)
+    # We ignore the combinatorial term log C(n,k) since it doesn't depend on parameters
+    y_clamped = torch.where(valid_mask, y_obs_tensor, torch.zeros_like(y_obs_tensor))
+    n_clamped = torch.where(valid_mask, denominator_tensor, torch.ones_like(denominator_tensor))  # Avoid log(0)
+    p_clamped = torch.clamp(p, min=1e-12, max=1-1e-12)
+
+    log_prob = (
+        y_clamped * torch.log(p_clamped) +
+        (n_clamped - y_clamped) * torch.log(1 - p_clamped)
+    )
+
+    # Zero out masked entries
+    log_prob = torch.where(valid_mask, log_prob, torch.zeros_like(log_prob))
+
+    # Attach as factor (summed over all observations)
+    with pyro.plate("obs_plate", N * T):
+        pyro.factor("y_obs", log_prob.reshape(-1))
 
 
 #######################################

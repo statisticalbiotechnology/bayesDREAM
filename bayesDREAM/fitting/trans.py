@@ -789,6 +789,7 @@ class TransFitter:
         distribution: str = None,
         denominator: np.ndarray = None,
         modality_name: str = None,
+        min_denominator: int = None,
         **kwargs
     ):
         """
@@ -806,6 +807,10 @@ class TransFitter:
         denominator : np.ndarray, optional
             Denominator array for binomial distribution (e.g., total counts for PSI)
             If None, auto-detected from modality.
+        min_denominator : int, optional
+            Minimum denominator value for binomial observations. Observations where
+            denominator < min_denominator are masked (excluded from fitting).
+            Useful for filtering low-coverage splicing junctions. Default: None (no filtering).
         function_type : str
             Dose-response function: 'single_hill', 'additive_hill', 'polynomial'
         **kwargs
@@ -963,6 +968,27 @@ class TransFitter:
                 # 3D denominator (shouldn't happen for current distributions, but handle it)
                 denominator_subset = denominator[:, cell_indices, :].transpose(1, 0, 2)
                 denominator_tensor = torch.tensor(denominator_subset, dtype=torch.float32, device=self.model.device)
+
+            # Apply min_denominator filter if specified
+            if min_denominator is not None and min_denominator > 0:
+                # Create mask for observations where denominator < threshold
+                low_coverage_mask = denominator_tensor < min_denominator
+                n_masked = low_coverage_mask.sum().item()
+                n_total = denominator_tensor.numel()
+                pct_masked = 100 * n_masked / n_total if n_total > 0 else 0
+
+                print(f"[INFO] Filtering observations with denominator < {min_denominator}")
+                print(f"[INFO] Masked {n_masked}/{n_total} observations ({pct_masked:.1f}%)")
+
+                # For binomial distributions, we'll pass the mask to the model
+                # The sampler will need to handle it (for now, set those observations to special value)
+                # We'll use a very negative value that the sampler can detect
+                # Actually, better approach: modify y_obs to have NaN for masked observations
+                # But binomial doesn't support NaN observations...
+                # Best approach: set denominator=0 for masked observations, and sampler handles it
+                denominator_tensor = torch.where(low_coverage_mask,
+                                                 torch.zeros_like(denominator_tensor),
+                                                 denominator_tensor)
 
         # Detect data dimensions (for multinomial)
         from .distributions import is_3d_distribution

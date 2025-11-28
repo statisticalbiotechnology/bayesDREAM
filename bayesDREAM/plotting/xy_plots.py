@@ -913,16 +913,20 @@ def predict_trans_function(
             n_a = _extract_param(posterior['n_a'], feature_idx)
             n_b = _extract_param(posterior['n_b'], feature_idx)
 
-            # For binomial/multinomial, both Hill functions share the same Vmax
-            # which is the distance from baseline A to upper_limit
-            Vmax = upper_limit - A
+            # IMPORTANT: Match the actual model computation!
+            # Model uses: y = A + Vmax_sum * (alpha * Hill_{Vmax=1}(x) + beta * Hill_{Vmax=1}(x))
+            # where Hills with Vmax=1 return values in [0, 1]
+            Vmax_sum = upper_limit - A
 
-            # Compute Hill functions
-            Hill_a = Hill_based_positive(x_range, Vmax=Vmax, A=0, K=K_a, n=n_a)
-            Hill_b = Hill_based_positive(x_range, Vmax=Vmax, A=0, K=K_b, n=n_b)
+            # Compute Hill functions with Vmax=1 (normalized to [0, 1])
+            Hill_a = Hill_based_positive(x_range, Vmax=1.0, A=0, K=K_a, n=n_a)
+            Hill_b = Hill_based_positive(x_range, Vmax=1.0, A=0, K=K_b, n=n_b)
 
-            # Combined prediction
-            y_pred = A + alpha * Hill_a + beta * Hill_b
+            # Combined Hill can exceed 1 if alpha + beta > 1!
+            combined_hill = alpha * Hill_a + beta * Hill_b
+
+            # Combined prediction (can exceed upper_limit if combined_hill > 1)
+            y_pred = A + Vmax_sum * combined_hill
             return y_pred
 
         except (KeyError, IndexError, AttributeError):
