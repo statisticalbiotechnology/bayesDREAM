@@ -878,7 +878,7 @@ def predict_trans_function(
 
     # Determine function type from available parameters
     if 'Vmax_a' in posterior and 'Vmax_b' in posterior:
-        # ===== ADDITIVE HILL =====
+        # ===== ADDITIVE HILL (negbinom/normal/studentt) =====
         try:
             # Extract parameters using helper function
             alpha = _extract_param(posterior['alpha'], feature_idx)
@@ -893,6 +893,33 @@ def predict_trans_function(
             # Compute Hill functions
             Hill_a = Hill_based_positive(x_range, Vmax=Vmax_a, A=0, K=K_a, n=n_a)
             Hill_b = Hill_based_positive(x_range, Vmax=Vmax_b, A=0, K=K_b, n=n_b)
+
+            # Combined prediction
+            y_pred = A + alpha * Hill_a + beta * Hill_b
+            return y_pred
+
+        except (KeyError, IndexError, AttributeError):
+            return None
+
+    elif 'upper_limit' in posterior and 'alpha' in posterior and 'beta' in posterior:
+        # ===== ADDITIVE HILL (binomial/multinomial with upper_limit) =====
+        try:
+            # Extract parameters using helper function
+            alpha = _extract_param(posterior['alpha'], feature_idx)
+            beta = _extract_param(posterior['beta'], feature_idx)
+            upper_limit = _extract_param(posterior['upper_limit'], feature_idx)
+            K_a = _extract_param(posterior['K_a'], feature_idx)
+            K_b = _extract_param(posterior['K_b'], feature_idx)
+            n_a = _extract_param(posterior['n_a'], feature_idx)
+            n_b = _extract_param(posterior['n_b'], feature_idx)
+
+            # For binomial/multinomial, both Hill functions share the same Vmax
+            # which is the distance from baseline A to upper_limit
+            Vmax = upper_limit - A
+
+            # Compute Hill functions
+            Hill_a = Hill_based_positive(x_range, Vmax=Vmax, A=0, K=K_a, n=n_a)
+            Hill_b = Hill_based_positive(x_range, Vmax=Vmax, A=0, K=K_b, n=n_b)
 
             # Combined prediction
             y_pred = A + alpha * Hill_a + beta * Hill_b
