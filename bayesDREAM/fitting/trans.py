@@ -79,6 +79,7 @@ class TransFitter:
         D=None,
         mean_within_guide_var=None,
         x_true_CV=None,
+        use_data_driven_priors=True,
     ):
 
         if use_alpha:
@@ -179,18 +180,26 @@ class TransFitter:
                     # This gives each category concentration ≈ 1 on average (weak prior)
                     K_dim = Amean_tensor.shape[-1]
 
-                    # Normalize means to sum to 1
-                    A_mean_clamped = Amean_tensor.clamp(min=epsilon_tensor, max=1.0 - epsilon_tensor)
-                    A_mean_normalized = A_mean_clamped / A_mean_clamped.sum(dim=-1, keepdim=True)  # [T, K]
+                    # For multinomial: use Dirichlet priors over K categories
+                    if use_data_driven_priors:
+                        # Data-driven Dirichlet: concentration proportional to mean probabilities
+                        # Normalize means to sum to 1
+                        A_mean_clamped = Amean_tensor.clamp(min=epsilon_tensor, max=1.0 - epsilon_tensor)
+                        A_mean_normalized = A_mean_clamped / A_mean_clamped.sum(dim=-1, keepdim=True)  # [T, K]
 
-                    Vmax_clamped = Vmax_mean_tensor.clamp(min=epsilon_tensor, max=1.0 - epsilon_tensor)
-                    upper_mean_normalized = Vmax_clamped / Vmax_clamped.sum(dim=-1, keepdim=True)  # [T, K]
+                        Vmax_clamped = Vmax_mean_tensor.clamp(min=epsilon_tensor, max=1.0 - epsilon_tensor)
+                        upper_mean_normalized = Vmax_clamped / Vmax_clamped.sum(dim=-1, keepdim=True)  # [T, K]
 
-                    # Weak concentration: mean_normalized * K gives ~1 per category
-                    concentration_A = A_mean_normalized * K_dim  # [T, K]
-                    concentration_upper = upper_mean_normalized * K_dim  # [T, K]
+                        # Weak concentration: mean_normalized * K gives ~1 per category
+                        concentration_A = A_mean_normalized * K_dim  # [T, K]
+                        concentration_upper = upper_mean_normalized * K_dim  # [T, K]
 
-                    #print(f"[INFO] Dirichlet weak concentration: A={concentration_A.mean().item():.2f}, upper={concentration_upper.mean().item():.2f}")
+                        #print(f"[INFO] Dirichlet data-driven concentration: A={concentration_A.mean().item():.2f}, upper={concentration_upper.mean().item():.2f}")
+                    else:
+                        # Uniform Dirichlet: all categories have equal concentration=1
+                        concentration_A = self._t(1.0).expand([T_dim, K_dim])  # [T, K] with all 1s
+                        concentration_upper = self._t(1.0).expand([T_dim, K_dim])  # [T, K] with all 1s
+                        print(f"[INFO] Using uniform Dirichlet(1, ..., 1) priors for A and upper_limit ({K_dim} categories)")
 
                     # Sample K-dimensional probability vectors from Dirichlet
                     # Each row sums to 1
@@ -198,24 +207,39 @@ class TransFitter:
                     upper_limit = pyro.sample("upper_limit", dist.Dirichlet(concentration_upper))  # [T, K]
 
                 else:
-                    # For binomial: Beta with α=1 or β=1
-                    # A ~ Beta(α=1, β) with mean = A_mean
-                    #   mean = α/(α+β) = 1/(1+β) = A_mean
-                    #   β = (1-A_mean)/A_mean
-                    beta_A = (1.0 - Amean_tensor) / Amean_tensor  # [T]
-                    alpha_A = self._t(1.0)  # [scalar] or could be torch.ones_like(beta_A)
+                    # For binomial: Beta priors
+                    if use_data_driven_priors:
+                        # Data-driven Beta priors with α=1 or β=1
+                        # A ~ Beta(α=1, β) with mean = A_mean
+                        #   mean = α/(α+β) = 1/(1+β) = A_mean
+                        #   β = (1-A_mean)/A_mean
+                        beta_A = (1.0 - Amean_tensor) / Amean_tensor  # [T]
+                        alpha_A = self._t(1.0)  # [scalar] or could be torch.ones_like(beta_A)
 
-                    # upper_limit ~ Beta(α, β=1) with mean = Vmax_mean
-                    #   mean = α/(α+1) = Vmax_mean
-                    #   α = Vmax_mean/(1-Vmax_mean)
-                    alpha_upper = Vmax_mean_tensor / (1.0 - Vmax_mean_tensor)  # [T]
-                    beta_upper = self._t(1.0)  # [scalar]
+                        # upper_limit ~ Beta(α, β=1) with mean = Vmax_mean
+                        #   mean = α/(α+1) = Vmax_mean
+                        #   α = Vmax_mean/(1-Vmax_mean)
+                        alpha_upper = Vmax_mean_tensor / (1.0 - Vmax_mean_tensor)  # [T]
+                        beta_upper = self._t(1.0)  # [scalar]
 
-                    #print(f"[INFO] Beta weak priors: A (α=1, β̄={beta_A.mean().item():.2f}), upper (ᾱ={alpha_upper.mean().item():.2f}, β=1)")
+                        #print(f"[INFO] Beta data-driven priors: A (α=1, β̄={beta_A.mean().item():.2f}), upper (ᾱ={alpha_upper.mean().item():.2f}, β=1)")
+                    else:
+                        # Uniform priors: Beta(1, 1) for both A and upper_limit
+                        alpha_A = self._t(1.0)
+                        beta_A = self._t(1.0)
+                        alpha_upper = self._t(1.0)
+                        beta_upper = self._t(1.0)
+                        print(f"[INFO] Using uniform Beta(1, 1) priors for A and upper_limit")
 
                     # Sample per-feature [T]
-                    A = pyro.sample("A", dist.Beta(alpha_A, beta_A))  # [T]
-                    upper_limit = pyro.sample("upper_limit", dist.Beta(alpha_upper, beta_upper))  # [T]
+                    # Note: When using uniform priors, these become scalars broadcast to [T]
+                    if use_data_driven_priors:
+                        A = pyro.sample("A", dist.Beta(alpha_A, beta_A))  # [T]
+                        upper_limit = pyro.sample("upper_limit", dist.Beta(alpha_upper, beta_upper))  # [T]
+                    else:
+                        # Uniform priors - need to expand to match shape [T]
+                        A = pyro.sample("A", dist.Beta(alpha_A, beta_A).expand([T_dim]))  # [T]
+                        upper_limit = pyro.sample("upper_limit", dist.Beta(alpha_upper, beta_upper).expand([T_dim]))  # [T]
 
                 # Compute Vmax_sum (total amplitude available for Hills)
                 # For multinomial: Both A and upper_limit are K-dimensional from Dirichlet (sum to 1)
@@ -790,6 +814,7 @@ class TransFitter:
         denominator: np.ndarray = None,
         modality_name: str = None,
         min_denominator: int = None,
+        use_data_driven_priors: bool = True,
         **kwargs
     ):
         """
@@ -811,6 +836,10 @@ class TransFitter:
             Minimum denominator value for binomial observations. Observations where
             denominator < min_denominator are masked (excluded from fitting).
             Useful for filtering low-coverage splicing junctions. Default: None (no filtering).
+        use_data_driven_priors : bool, optional
+            If True (default), use Beta priors for A and upper_limit based on data percentiles.
+            If False, use uniform priors (Beta(1, 1)). Useful for testing if data-driven
+            priors are too strong or causing issues. Default: True.
         function_type : str
             Dose-response function: 'single_hill', 'additive_hill', 'polynomial'
         **kwargs
@@ -829,6 +858,10 @@ class TransFitter:
         --------
         >>> model.set_technical_groups(['cell_line'])  # Optional, for correction
         >>> model.fit_trans(sum_factor_col='sum_factor', function_type='additive_hill')
+
+        >>> # Test without data-driven priors
+        >>> model.fit_trans(sum_factor_col='sum_factor', function_type='additive_hill',
+        ...                 use_data_driven_priors=False)
         """
 
         # Determine which modality to use
@@ -1442,6 +1475,7 @@ class TransFitter:
                 D=D,
                 mean_within_guide_var=mean_within_guide_var,
                 x_true_CV=x_true_CV,
+                use_data_driven_priors=use_data_driven_priors,
             )
         else:
             guide_y = pyro.infer.autoguide.AutoNormalMessenger(self._model_y)
@@ -1563,6 +1597,7 @@ class TransFitter:
                 D=D,
                 mean_within_guide_var=mean_within_guide_var,
                 x_true_CV=x_true_CV,
+                use_data_driven_priors=use_data_driven_priors,
             )
             
             self.losses_trans.append(loss)
@@ -1619,6 +1654,7 @@ class TransFitter:
                 "D": D,
                 "mean_within_guide_var": self._to_cpu(mean_within_guide_var) if mean_within_guide_var is not None else None,
                 "x_true_CV": self._to_cpu(x_true_CV) if x_true_CV is not None else None,
+                "use_data_driven_priors": use_data_driven_priors,
             }
         else:
             model_inputs = {
@@ -1655,8 +1691,9 @@ class TransFitter:
                 "D": D,
                 "mean_within_guide_var": mean_within_guide_var,
                 "x_true_CV": x_true_CV,
+                "use_data_driven_priors": use_data_driven_priors,
             }
-        
+
         if self.model.device.type == "cuda":
             torch.cuda.empty_cache()
         import gc

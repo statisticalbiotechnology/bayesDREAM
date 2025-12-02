@@ -85,8 +85,8 @@ def diagnose_alpha_y(model, modality_name='splicing_sj'):
         return
 
     # Get group assignments
-    if not hasattr(model, 'technical_group_code'):
-        print("[ERROR] No technical_group_code found. Run set_technical_groups() first.")
+    if 'technical_group_code' not in model.meta.columns:
+        print("[ERROR] No technical_group_code found in model.meta. Run set_technical_groups() first.")
         return
 
     groups = model.meta['technical_group_code'].values

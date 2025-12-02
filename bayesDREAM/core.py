@@ -1438,6 +1438,156 @@ class _BayesDREAMCore(PlottingMixin):
 
         self.counts = counts_sub
 
+    def subset_cells(
+        self,
+        cell_mask: Union[np.ndarray, pd.Series, list] = None,
+        query: str = None,
+        preserve_fits: bool = False
+    ):
+        """
+        Create a new model instance with a subset of cells.
+
+        Useful for testing without technical correction by subsetting to a single
+        cell_line (e.g., CRISPRi or CRISPRa only).
+
+        Parameters
+        ----------
+        cell_mask : np.ndarray, pd.Series, or list, optional
+            Boolean mask or list of cell names to keep. If None, must provide query.
+        query : str, optional
+            Pandas query string to filter cells (e.g., "cell_line == 'CRISPRa'").
+            Applied to self.meta. If None, must provide cell_mask.
+        preserve_fits : bool
+            If True, copy fitted parameters (alpha_x_prefit, alpha_y_prefit, x_true, etc.)
+            to the new model. Default: False.
+
+        Returns
+        -------
+        bayesDREAM
+            New model instance with subsetted cells
+
+        Examples
+        --------
+        # Subset by query
+        model_crispra = model.subset_cells(query="cell_line == 'CRISPRa'")
+
+        # Subset by mask
+        mask = model.meta['cell_line'].str.contains('CRISPRa')
+        model_crispra = model.subset_cells(cell_mask=mask)
+
+        # Subset by cell list
+        cells = model.meta[model.meta['cell_line'] == 'CRISPRa']['cell'].tolist()
+        model_crispra = model.subset_cells(cell_mask=cells)
+        """
+        if cell_mask is None and query is None:
+            raise ValueError("Must provide either cell_mask or query")
+
+        if query is not None:
+            # Filter meta using query
+            meta_subset = self.meta.query(query).copy()
+            cells_to_keep = meta_subset['cell'].values
+        elif isinstance(cell_mask, (list, np.ndarray, pd.Series)):
+            # Handle list of cell names
+            if isinstance(cell_mask, list) and len(cell_mask) > 0 and isinstance(cell_mask[0], str):
+                cells_to_keep = cell_mask
+                meta_subset = self.meta[self.meta['cell'].isin(cells_to_keep)].copy()
+            # Handle boolean mask
+            elif isinstance(cell_mask, (np.ndarray, pd.Series)):
+                if cell_mask.dtype == bool:
+                    meta_subset = self.meta[cell_mask].copy()
+                    cells_to_keep = meta_subset['cell'].values
+                else:
+                    # Assume it's a list of cell names
+                    cells_to_keep = cell_mask
+                    meta_subset = self.meta[self.meta['cell'].isin(cells_to_keep)].copy()
+            else:
+                raise ValueError("cell_mask must be boolean array/Series or list of cell names")
+        else:
+            raise ValueError("Invalid cell_mask type")
+
+        if len(meta_subset) == 0:
+            raise ValueError("Subset resulted in zero cells")
+
+        print(f"[INFO] Subsetting from {len(self.meta)} to {len(meta_subset)} cells")
+
+        # Subset counts
+        if isinstance(self.counts, pd.DataFrame):
+            counts_subset = self.counts[cells_to_keep].copy()
+        else:
+            # Sparse or dense array - subset by column indices
+            cell_indices = [i for i, cell in enumerate(self._cell_names) if cell in cells_to_keep]
+            if self.is_sparse_counts:
+                counts_subset = self.counts[:, cell_indices]
+            else:
+                counts_subset = self.counts[:, cell_indices]
+
+        # Subset high MOI guide_assignment if applicable
+        guide_assignment_subset = None
+        if self.is_high_moi:
+            # Get indices of subsetted cells in original meta
+            cell_indices = [i for i, cell in enumerate(self.meta['cell']) if cell in cells_to_keep]
+            guide_assignment_subset = self.guide_assignment[cell_indices, :]
+
+        # Create new model instance
+        from .model import bayesDREAM
+
+        model_new = bayesDREAM(
+            meta=meta_subset,
+            counts=counts_subset,
+            gene_meta=self.gene_meta.copy() if hasattr(self, 'gene_meta') else None,
+            cis_gene=self.cis_gene,
+            output_dir=self.output_dir,
+            label=f"{self.label}_subset",
+            device=str(self.device),
+            random_seed=2402,
+            cores=1,
+            guide_assignment=guide_assignment_subset,
+            guide_meta=self.guide_meta.copy() if self.is_high_moi else None,
+            guide_target=None  # Already encoded in guide_meta
+        )
+
+        # Optionally preserve fitted parameters
+        if preserve_fits:
+            # Copy technical fit parameters if they exist
+            if self.alpha_x_prefit is not None:
+                model_new.alpha_x_prefit = self.alpha_x_prefit.clone() if isinstance(self.alpha_x_prefit, torch.Tensor) else self.alpha_x_prefit
+                model_new.alpha_x_type = self.alpha_x_type
+
+            if self.alpha_y_prefit is not None:
+                model_new.alpha_y_prefit = self.alpha_y_prefit.clone() if isinstance(self.alpha_y_prefit, torch.Tensor) else self.alpha_y_prefit
+                model_new.alpha_y_type = self.alpha_y_type
+
+            # Copy cis fit parameters if they exist
+            if hasattr(self, 'x_true') and self.x_true is not None:
+                # x_true needs to be subsetted to match new cells
+                if isinstance(self.x_true, torch.Tensor):
+                    # Get indices of subsetted cells
+                    cell_indices_torch = torch.tensor(
+                        [i for i, cell in enumerate(self.meta['cell']) if cell in cells_to_keep],
+                        dtype=torch.long
+                    )
+                    if self.x_true_type == 'posterior':
+                        # x_true shape: [S, N] or [S, 1, N]
+                        if self.x_true.ndim == 2:
+                            model_new.x_true = self.x_true[:, cell_indices_torch].clone()
+                        else:
+                            model_new.x_true = self.x_true[:, :, cell_indices_torch].clone()
+                    else:
+                        # Point estimate: shape [N]
+                        model_new.x_true = self.x_true[cell_indices_torch].clone()
+                    model_new.x_true_type = self.x_true_type
+
+            # Copy traces if they exist
+            if self.trace_cellline is not None:
+                model_new.trace_cellline = self.trace_cellline
+            if self.trace_x is not None:
+                model_new.trace_x = self.trace_x
+            if self.trace_y is not None:
+                model_new.trace_y = self.trace_y
+
+            print("[INFO] Preserved fitted parameters in subset model")
+
+        return model_new
 
 
     # ========================================================================
