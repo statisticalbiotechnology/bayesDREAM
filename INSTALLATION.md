@@ -102,24 +102,46 @@ CUDA version: 12.1
 ### AMD GPUs (ROCm)
 
 **Using `environment_rocm.yml`** (recommended):
-- Default: ROCm 6.0 (latest stable)
-- For older versions: Edit file and change `pytorch-rocm=6.0` to your version
 
-**Check your ROCm version:**
+ROCm requires a two-step installation (PyTorch must be installed via pip):
+
 ```bash
+# 1. Check your ROCm version
 rocm-smi --version
-# OR
-/opt/rocm/bin/rocminfo
+
+# 2. Create environment (without PyTorch)
+conda env create -f environment_rocm.yml
+
+# 3. Activate environment
+conda activate bayesdream_rocm
+
+# 4. Install PyTorch with ROCm via pip
+# For ROCm 6.2 (most common):
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.2
+
+# For ROCm 6.1:
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.1
+
+# For ROCm 6.0:
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.0
+
+# 5. Install Pyro
+pip install pyro-ppl
+
+# 6. Install bayesDREAM
+cd /path/to/bayesDREAM_forClaude
+pip install -e .
 ```
 
 **Verify GPU after installation:**
 ```bash
-conda activate bayesdream_rocm
 python -c "import torch; print('CUDA available:', torch.cuda.is_available())"  # Uses 'cuda' API for AMD too
 python -c "import torch; print('ROCm version:', torch.version.hip)"
 ```
 
 **Important notes for ROCm:**
+- PyTorch ROCm packages must be installed via pip (conda packages are incomplete)
+- This matches the working pyroenv setup with torch 2.5.1+rocm6.2
 - PyTorch uses 'cuda' API for both NVIDIA and AMD GPUs
 - ROCm support is generally good but less mature than CUDA
 - If you encounter issues, fall back to `environment_cpu.yml`
