@@ -1546,6 +1546,15 @@ class _BayesDREAMCore(PlottingMixin):
             guide_target=None  # Already encoded in guide_meta
         )
 
+        # Copy additional modalities (beyond the primary 'gene' modality)
+        if hasattr(self, 'modalities'):
+            for mod_name, modality in self.modalities.items():
+                if mod_name not in ['gene', 'cis']:  # Skip primary and cis modalities (already handled)
+                    # Subset the modality to the selected cells
+                    subset_modality = modality.subset_cells(cell_mask)
+                    model_new.modalities[mod_name] = subset_modality
+            print(f"[INFO] Copied {len(self.modalities) - 2} additional modalities to subset model")
+
         # Optionally preserve fitted parameters
         if preserve_fits:
             # Copy technical fit parameters if they exist
