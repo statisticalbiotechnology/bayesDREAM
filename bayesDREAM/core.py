@@ -1550,8 +1550,8 @@ class _BayesDREAMCore(PlottingMixin):
         if hasattr(self, 'modalities'):
             for mod_name, modality in self.modalities.items():
                 if mod_name not in ['gene', 'cis']:  # Skip primary and cis modalities (already handled)
-                    # Subset the modality to the selected cells
-                    subset_modality = modality.subset_cells(cell_mask)
+                    # Subset the modality to the selected cells using cell names
+                    subset_modality = modality.get_cell_subset(cells_to_keep)
                     model_new.modalities[mod_name] = subset_modality
             print(f"[INFO] Copied {len(self.modalities) - 2} additional modalities to subset model")
 
