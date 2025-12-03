@@ -1,0 +1,77 @@
+name: bayesdream_cuda
+channels:
+  - pytorch
+  - conda-forge
+  - bioconda
+  - defaults
+
+dependencies:
+  # Python version
+  - python=3.11
+
+  # Core scientific computing
+  - numpy>=1.24.0
+  - scipy>=1.10.0
+  - pandas>=2.0.0
+  - scikit-learn>=1.3.0
+
+  # R and Bioconductor packages for preprocessing
+  - r-base>=4.0
+  - bioconductor-scran>=1.20
+  - r-irkernel
+  - r-data.table
+
+  # PyTorch with CUDA support (NVIDIA GPUs)
+  # CUDA 12.1 is recommended for most modern clusters
+  - pytorch>=2.2.0
+  - pytorch::pytorch-cuda=12.1
+
+  # For older clusters with CUDA 11.8, change above line to:
+  # - pytorch::pytorch-cuda=11.8
+
+  # Visualization
+  - matplotlib>=3.7
+  - seaborn>=0.12
+
+  # Pyro probabilistic programming
+  - pip
+  - pip:
+    - pyro-ppl>=1.9.0
+
+  # Data I/O
+  - h5py>=3.8.0
+
+  # Performance
+  - openblas
+
+  # Jupyter
+  - jupyterlab>=4.0
+  - ipykernel
+  - notebook
+  - ipywidgets
+
+# Installation instructions:
+# 1. Check your cluster's CUDA version:
+#    nvcc --version
+#    # OR
+#    nvidia-smi
+#
+# 2. If using CUDA 11.8, edit this file and change pytorch-cuda=12.1 to pytorch-cuda=11.8
+#
+# 3. Create the environment:
+#    conda env create -f environment_cuda.yml
+#
+# 4. Activate the environment:
+#    conda activate bayesdream_cuda
+#
+# 5. Install bayesDREAM in development mode:
+#    cd /path/to/bayesDREAM_forClaude
+#    pip install -e .
+#
+# 6. Verify GPU access:
+#    python -c "import torch; print(torch.cuda.is_available())"
+#
+# Use this environment for:
+# - HPC clusters with NVIDIA GPUs
+# - Workstations with NVIDIA GPUs
+# - Cloud instances with NVIDIA GPUs (AWS, GCP, Azure)

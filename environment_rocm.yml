@@ -1,0 +1,84 @@
+name: bayesdream_rocm
+channels:
+  - pytorch
+  - conda-forge
+  - bioconda
+  - defaults
+
+dependencies:
+  # Python version
+  - python=3.11
+
+  # Core scientific computing
+  - numpy>=1.24.0
+  - scipy>=1.10.0
+  - pandas>=2.0.0
+  - scikit-learn>=1.3.0
+
+  # R and Bioconductor packages for preprocessing
+  - r-base>=4.0
+  - bioconductor-scran>=1.20
+  - r-irkernel
+  - r-data.table
+
+  # PyTorch with ROCm support (AMD GPUs)
+  # ROCm 6.0 is the latest stable version as of 2025
+  - pytorch>=2.2.0
+  - pytorch::pytorch-rocm=6.0
+
+  # For older ROCm versions (5.7, 5.6, etc.), change above line to:
+  # - pytorch::pytorch-rocm=5.7
+
+  # Visualization
+  - matplotlib>=3.7
+  - seaborn>=0.12
+
+  # Pyro probabilistic programming
+  - pip
+  - pip:
+    - pyro-ppl>=1.9.0
+
+  # Data I/O
+  - h5py>=3.8.0
+
+  # Performance
+  - openblas
+
+  # Jupyter
+  - jupyterlab>=4.0
+  - ipykernel
+  - notebook
+  - ipywidgets
+
+# Installation instructions:
+# 1. Check your cluster's ROCm version:
+#    rocm-smi --version
+#    # OR
+#    /opt/rocm/bin/rocminfo
+#
+# 2. If using a different ROCm version, edit this file and change pytorch-rocm=6.0 accordingly
+#
+# 3. Create the environment:
+#    conda env create -f environment_rocm.yml
+#
+# 4. Activate the environment:
+#    conda activate bayesdream_rocm
+#
+# 5. Install bayesDREAM in development mode:
+#    cd /path/to/bayesDREAM_forClaude
+#    pip install -e .
+#
+# 6. Verify GPU access:
+#    python -c "import torch; print(torch.cuda.is_available())"
+#    # Note: PyTorch uses 'cuda' API for both NVIDIA and AMD GPUs
+#
+# Use this environment for:
+# - HPC clusters with AMD GPUs (MI250X, MI300, etc.)
+# - Workstations with AMD GPUs
+# - Clusters that have migrated from NVIDIA to AMD
+#
+# Important notes:
+# - ROCm support in PyTorch is generally good but not as mature as CUDA
+# - Some advanced features may have compatibility issues
+# - For bayesDREAM, basic operations should work fine
+# - If you encounter issues, fall back to environment_cpu.yml
