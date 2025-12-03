@@ -1534,7 +1534,7 @@ class _BayesDREAMCore(PlottingMixin):
         model_new = bayesDREAM(
             meta=meta_subset,
             counts=counts_subset,
-            gene_meta=self.gene_meta.copy() if hasattr(self, 'gene_meta') else None,
+            feature_meta=self.gene_meta.copy() if hasattr(self, 'gene_meta') else None,
             cis_gene=self.cis_gene,
             output_dir=self.output_dir,
             label=f"{self.label}_subset",
