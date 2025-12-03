@@ -22,13 +22,14 @@ bayesDREAM provides architecture-specific conda environments:
 
 ### Using Conda (Recommended for most users)
 
+**⚠️ Important:** If you have an **AMD GPU cluster**, skip this Quick Start and go directly to the [AMD GPUs (ROCm)](#amd-gpus-rocm) section below, as it requires additional pip installation steps.
+
+#### For CPU-only or NVIDIA GPU:
+
 1. **Create the conda environment** (choose appropriate file):
    ```bash
    # For NVIDIA GPUs
    conda env create -f environment_cuda.yml
-
-   # For AMD GPUs
-   conda env create -f environment_rocm.yml
 
    # For CPU-only
    conda env create -f environment_cpu.yml
@@ -37,7 +38,7 @@ bayesDREAM provides architecture-specific conda environments:
 2. **Activate the environment:**
    ```bash
    # Adjust name based on which file you used
-   conda activate bayesdream_cuda    # or bayesdream_rocm, bayesdream_cpu
+   conda activate bayesdream_cuda    # or bayesdream_cpu
    ```
 
 3. **Install bayesDREAM in development mode:**
