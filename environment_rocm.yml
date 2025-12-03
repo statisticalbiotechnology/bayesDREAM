@@ -1,13 +1,12 @@
 name: bayesdream_rocm
 channels:
-  - pytorch
   - conda-forge
   - bioconda
   - defaults
 
 dependencies:
-  # Python version
-  - python=3.11
+  # Python version (match cluster setup)
+  - python=3.12
 
   # Core scientific computing
   - numpy>=1.24.0
@@ -22,21 +21,15 @@ dependencies:
   - r-data.table
 
   # PyTorch with ROCm support (AMD GPUs)
-  # ROCm 6.0 is the latest stable version as of 2025
-  - pytorch>=2.2.0
-  - pytorch::pytorch-rocm=6.0
-
-  # For older ROCm versions (5.7, 5.6, etc.), change above line to:
-  # - pytorch::pytorch-rocm=5.7
+  # NOTE: PyTorch for ROCm must be installed via pip AFTER creating the environment
+  # See installation instructions below
 
   # Visualization
   - matplotlib>=3.7
   - seaborn>=0.12
 
-  # Pyro probabilistic programming
+  # Pip (PyTorch and Pyro will be installed via pip in separate step)
   - pip
-  - pip:
-    - pyro-ppl>=1.9.0
 
   # Data I/O
   - h5py>=3.8.0
@@ -56,21 +49,32 @@ dependencies:
 #    # OR
 #    /opt/rocm/bin/rocminfo
 #
-# 2. If using a different ROCm version, edit this file and change pytorch-rocm=6.0 accordingly
-#
-# 3. Create the environment:
+# 2. Create the environment (without PyTorch):
 #    conda env create -f environment_rocm.yml
 #
-# 4. Activate the environment:
+# 3. Activate the environment:
 #    conda activate bayesdream_rocm
 #
-# 5. Install bayesDREAM in development mode:
-#    cd /path/to/bayesDREAM_forClaude
-#    pip install -e .
+# 4. Install PyTorch with ROCm support via pip:
+#    # For ROCm 6.2 (matches cluster setup):
+#    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.2
+#
+#    # For ROCm 6.1:
+#    # pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.1
+#
+#    # For ROCm 6.0:
+#    # pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.0
+#
+# 5. Install Pyro:
+#    pip install pyro-ppl
 #
 # 6. Verify GPU access:
 #    python -c "import torch; print(torch.cuda.is_available())"
 #    # Note: PyTorch uses 'cuda' API for both NVIDIA and AMD GPUs
+#
+# 7. Install bayesDREAM in development mode:
+#    cd /path/to/bayesDREAM_forClaude
+#    pip install -e .
 #
 # Use this environment for:
 # - HPC clusters with AMD GPUs (MI250X, MI300, etc.)
@@ -78,7 +82,8 @@ dependencies:
 # - Clusters that have migrated from NVIDIA to AMD
 #
 # Important notes:
+# - PyTorch for ROCm must be installed via pip (conda packages are incomplete)
+# - This matches the working pyroenv setup with torch 2.5.1+rocm6.2
 # - ROCm support in PyTorch is generally good but not as mature as CUDA
-# - Some advanced features may have compatibility issues
 # - For bayesDREAM, basic operations should work fine
 # - If you encounter issues, fall back to environment_cpu.yml
