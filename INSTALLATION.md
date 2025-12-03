@@ -4,18 +4,40 @@ This guide provides instructions for installing bayesDREAM on different computin
 
 ## Quick Start (Recommended)
 
+### Choose Your Environment
+
+bayesDREAM provides architecture-specific conda environments:
+
+| Environment File | Hardware | Use Case |
+|-----------------|----------|----------|
+| `environment_cpu.yml` | CPU-only | Local dev, login nodes, M1/M2 Mac |
+| `environment_cuda.yml` | NVIDIA GPU | CUDA 12.1 (most GPU clusters) |
+| `environment_rocm.yml` | AMD GPU | ROCm 6.0 (AMD GPU clusters) |
+| `environment.yml` | NVIDIA GPU | Legacy (same as CUDA) |
+
+**Quick reference:**
+- **NVIDIA GPU cluster** → `environment_cuda.yml`
+- **AMD GPU cluster** → `environment_rocm.yml`
+- **No GPU / Local Mac** → `environment_cpu.yml`
+
 ### Using Conda (Recommended for most users)
 
-**Note**: The default conda environment includes **GPU support with CUDA 12.1**, which works on most modern GPU clusters. If you need CPU-only installation, see the GPU Support section below.
-
-1. **Create the conda environment:**
+1. **Create the conda environment** (choose appropriate file):
    ```bash
-   conda env create -f environment.yml
+   # For NVIDIA GPUs
+   conda env create -f environment_cuda.yml
+
+   # For AMD GPUs
+   conda env create -f environment_rocm.yml
+
+   # For CPU-only
+   conda env create -f environment_cpu.yml
    ```
 
 2. **Activate the environment:**
    ```bash
-   conda activate bayesdream
+   # Adjust name based on which file you used
+   conda activate bayesdream_cuda    # or bayesdream_rocm, bayesdream_cpu
    ```
 
 3. **Install bayesDREAM in development mode:**
@@ -53,13 +75,21 @@ This guide provides instructions for installing bayesDREAM on different computin
 
 ## GPU Support
 
-**Default**: The conda environment (`environment.yml`) installs PyTorch with **CUDA 12.1 support** by default. This works with CUDA 12.x on most modern GPU clusters (including CUDA 12.2+).
+### NVIDIA GPUs (CUDA)
 
-### Verify GPU is Working
+**Using `environment_cuda.yml`** (recommended):
+- Default: CUDA 12.1 (works with CUDA 12.x drivers)
+- For CUDA 11.8: Edit file and change `pytorch-cuda=12.1` to `pytorch-cuda=11.8`
 
-After installation, verify CUDA is available:
+**Check your CUDA version:**
 ```bash
-conda activate bayesdream
+nvidia-smi  # Shows CUDA driver version (e.g., 12.2)
+nvcc --version  # Shows CUDA toolkit version (if installed)
+```
+
+**Verify GPU after installation:**
+```bash
+conda activate bayesdream_cuda
 python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('CUDA version:', torch.version.cuda)"
 ```
 
@@ -69,50 +99,41 @@ CUDA available: True
 CUDA version: 12.1
 ```
 
-### Check Your Cluster's CUDA Version
+### AMD GPUs (ROCm)
+
+**Using `environment_rocm.yml`** (recommended):
+- Default: ROCm 6.0 (latest stable)
+- For older versions: Edit file and change `pytorch-rocm=6.0` to your version
+
+**Check your ROCm version:**
+```bash
+rocm-smi --version
+# OR
+/opt/rocm/bin/rocminfo
+```
+
+**Verify GPU after installation:**
+```bash
+conda activate bayesdream_rocm
+python -c "import torch; print('CUDA available:', torch.cuda.is_available())"  # Uses 'cuda' API for AMD too
+python -c "import torch; print('ROCm version:', torch.version.hip)"
+```
+
+**Important notes for ROCm:**
+- PyTorch uses 'cuda' API for both NVIDIA and AMD GPUs
+- ROCm support is generally good but less mature than CUDA
+- If you encounter issues, fall back to `environment_cpu.yml`
+
+### CPU-Only Installation
+
+**Using `environment_cpu.yml`** (recommended):
+- No GPU support, optimized for CPU-only workloads
+- Use for: local dev, login nodes, M1/M2 Mac (MPS not fully supported by Pyro)
 
 ```bash
-nvidia-smi  # Shows CUDA driver version (e.g., 12.2)
-nvcc --version  # Shows CUDA toolkit version (if installed)
-```
-
-**Note**: PyTorch CUDA 12.1 is compatible with CUDA 12.2+ drivers.
-
-### For Older GPU Clusters (CUDA 11.8)
-
-If your cluster only has CUDA 11.x, edit `environment.yml` and change:
-```yaml
-- pytorch::pytorch-cuda=12.1
-```
-to:
-```yaml
-- pytorch::pytorch-cuda=11.8
-```
-
-Or reinstall with pip:
-```bash
-pip uninstall torch -y
-pip install torch>=2.2.0 --index-url https://download.pytorch.org/whl/cu118
-```
-
-### For CPU-Only Installation
-
-If you don't have a GPU or want CPU-only for local development:
-
-**Option 1: Edit environment.yml before creating environment**
-```yaml
-# Comment out:
-# - pytorch::pytorch-cuda=12.1
-
-# Uncomment:
-- pytorch::cpuonly
-```
-
-**Option 2: Reinstall PyTorch as CPU-only after creating environment**
-```bash
-conda activate bayesdream
-pip uninstall torch -y
-conda install pytorch cpuonly -c pytorch
+conda env create -f environment_cpu.yml
+conda activate bayesdream_cpu
+pip install -e .
 ```
 
 ## HPC Cluster Installation
