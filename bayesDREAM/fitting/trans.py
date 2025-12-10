@@ -1080,28 +1080,28 @@ class TransFitter:
             # Full probabilities for the likelihood
             y_obs_factored = y_obs_tensor / denominator_tensor.clamp_min(epsilon_tensor)
 
-            # For priors: only use entries where denominator >= 3
-            valid_mask = (denominator_tensor >= 3)
+            # For priors: only use entries where denominator >= min_denominator
+            valid_mask = (denominator_tensor >= min_denominator)
             # Mark invalid entries as NaN so we can ignore them in means
             y_obs_for_prior = torch.where(
                 valid_mask,
                 y_obs_factored,
                 torch.full_like(y_obs_factored, float('nan'))
             )
-            print(f"[INFO] Binomial: using {valid_mask.float().mean().item()*100:.1f}% of entries with denominator >= 3 for priors")
+            print(f"[INFO] Binomial: using {valid_mask.float().mean().item()*100:.1f}% of entries with denominator >= {min_denominator} for priors")
 
         elif distribution == 'multinomial' and y_obs_tensor.ndim == 3:
             total_counts = y_obs_tensor.sum(dim=-1, keepdim=True).clamp_min(epsilon_tensor)  # [N, T, 1]
             y_obs_factored = y_obs_tensor / total_counts  # [N, T, K]
 
-            # For priors: only use entries where total_counts >= 3
-            valid_mask = (total_counts >= 3)  # [N, T, 1]
+            # For priors: only use entries where total_counts >= min_denominator
+            valid_mask = (total_counts >= min_denominator)  # [N, T, 1]
             y_obs_for_prior = torch.where(
                 valid_mask,
                 y_obs_factored,
                 torch.full_like(y_obs_factored, float('nan'))
             )
-            print(f"[INFO] Multinomial: using {valid_mask.float().mean().item()*100:.1f}% of entries with total counts >= 3 for priors")
+            print(f"[INFO] Multinomial: using {valid_mask.float().mean().item()*100:.1f}% of entries with total counts >= {min_denominator} for priors")
 
         elif sum_factor_col is not None:
             y_obs_factored = y_obs_tensor / sum_factor_tensor.view(-1, 1)
@@ -1336,7 +1336,7 @@ class TransFitter:
         nan_mask = torch.isnan(Amean_tensor) | torch.isnan(Vmax_mean_tensor)
         if nan_mask.any():
             n_nan = nan_mask.sum().item() if nan_mask.ndim == 1 else nan_mask.any(dim=-1).sum().item()
-            print(f"[WARNING] {n_nan} features have all observations filtered (denominator < 3). Using fallback values.")
+            print(f"[WARNING] {n_nan} features have all observations filtered (denominator < {min_denominator}). Using fallback values.")
 
             # Fallback: use global mean/var across all valid features
             if distribution in ['binomial', 'multinomial']:
