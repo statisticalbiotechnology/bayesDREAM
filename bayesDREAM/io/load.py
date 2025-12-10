@@ -157,14 +157,17 @@ class ModelLoader:
                         alpha_y_add = mod.posterior_samples_technical['alpha_y_add']
                         if use_posterior:
                             mod.alpha_y_prefit_add = alpha_y_add
+                            # Only set generic alpha_y_prefit if distribution uses additive correction
                             if not hasattr(mod, 'alpha_y_prefit') or mod.alpha_y_prefit is None:
-                                mod.alpha_y_prefit = alpha_y_add
+                                if mod.distribution != 'negbinom':  # binomial, multinomial, normal, studentt
+                                    mod.alpha_y_prefit = alpha_y_add
                             if not hasattr(mod, 'alpha_y_type') or mod.alpha_y_type is None:
                                 mod.alpha_y_type = 'posterior'
                         else:
                             mod.alpha_y_prefit_add = alpha_y_add.mean(dim=0)
                             if not hasattr(mod, 'alpha_y_prefit') or mod.alpha_y_prefit is None:
-                                mod.alpha_y_prefit = alpha_y_add.mean(dim=0)
+                                if mod.distribution != 'negbinom':
+                                    mod.alpha_y_prefit = alpha_y_add.mean(dim=0)
                             if not hasattr(mod, 'alpha_y_type') or mod.alpha_y_type is None:
                                 mod.alpha_y_type = 'point'
                         print(f"[LOAD] {mod_name}.alpha_y_prefit_add ({mod.alpha_y_type}) ← extracted from posterior_samples_technical")
@@ -175,14 +178,17 @@ class ModelLoader:
                         alpha_y_mult = mod.posterior_samples_technical[alpha_y_mult_key]
                         if use_posterior:
                             mod.alpha_y_prefit_mult = alpha_y_mult
+                            # Only set generic alpha_y_prefit if distribution uses multiplicative correction
                             if not hasattr(mod, 'alpha_y_prefit') or mod.alpha_y_prefit is None:
-                                mod.alpha_y_prefit = alpha_y_mult
+                                if mod.distribution == 'negbinom':
+                                    mod.alpha_y_prefit = alpha_y_mult
                             if not hasattr(mod, 'alpha_y_type') or mod.alpha_y_type is None:
                                 mod.alpha_y_type = 'posterior'
                         else:
                             mod.alpha_y_prefit_mult = alpha_y_mult.mean(dim=0)
                             if not hasattr(mod, 'alpha_y_prefit') or mod.alpha_y_prefit is None:
-                                mod.alpha_y_prefit = alpha_y_mult.mean(dim=0)
+                                if mod.distribution == 'negbinom':
+                                    mod.alpha_y_prefit = alpha_y_mult.mean(dim=0)
                             if not hasattr(mod, 'alpha_y_type') or mod.alpha_y_type is None:
                                 mod.alpha_y_type = 'point'
                         print(f"[LOAD] {mod_name}.alpha_y_prefit_mult ({mod.alpha_y_type}) ← extracted from posterior_samples_technical")

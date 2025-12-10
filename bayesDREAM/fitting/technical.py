@@ -1782,7 +1782,13 @@ class TechnicalFitter:
             log2_alpha_fit = posterior_samples["log2_alpha_y"]
             alpha_y_add_full = _reconstruct_full_2d(log2_alpha_fit, baseline_value=0.0, fit_mask_bool=fit_mask)
 
-            posterior_samples["alpha_y"]       = alpha_y_mult_full
+            # Choose correct type based on distribution
+            # negbinom: multiplicative, others: additive
+            if distribution == 'negbinom':
+                posterior_samples["alpha_y"] = alpha_y_mult_full
+            else:  # binomial, normal, studentt use additive
+                posterior_samples["alpha_y"] = alpha_y_add_full
+
             posterior_samples["alpha_y_mult"]  = alpha_y_mult_full
             posterior_samples["alpha_y_add"]   = alpha_y_add_full
 
@@ -1966,7 +1972,13 @@ class TechnicalFitter:
                     all_idx = list(range(full_alpha_y_mult.shape[-1]))
                     trans_idx = [i for i in all_idx if i != cis_idx_orig]
 
-                    modality.alpha_y_prefit      = full_alpha_y_mult[..., trans_idx]
+                    # Choose correct correction type based on distribution
+                    # negbinom: multiplicative, others: additive
+                    if modality.distribution == 'negbinom':
+                        modality.alpha_y_prefit = full_alpha_y_mult[..., trans_idx]
+                    else:  # binomial, multinomial, normal, studentt use additive
+                        modality.alpha_y_prefit = full_alpha_y_add[..., trans_idx]
+
                     modality.alpha_y_type        = 'posterior'
                     modality.alpha_y_prefit_mult = full_alpha_y_mult[..., trans_idx]
                     modality.alpha_y_prefit_add  = full_alpha_y_add[..., trans_idx]
