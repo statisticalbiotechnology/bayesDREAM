@@ -95,8 +95,10 @@ class ModelLoader:
                 alpha_y_mod = torch.load(mod_path)
                 if use_posterior:
                     alpha_y_to_set = alpha_y_mod
+                    mod.alpha_y_type = 'posterior'
                 else:
                     alpha_y_to_set = alpha_y_mod.mean(dim=0)
+                    mod.alpha_y_type = 'point'
 
                 # Set generic alpha_y_prefit
                 mod.alpha_y_prefit = alpha_y_to_set
@@ -110,7 +112,7 @@ class ModelLoader:
                     mod.alpha_y_prefit_add = alpha_y_to_set
 
                 loaded[f'alpha_y_prefit_{mod_name}'] = mod.alpha_y_prefit
-                print(f"[LOAD] {mod_name}.alpha_y_prefit ← {mod_path}")
+                print(f"[LOAD] {mod_name}.alpha_y_prefit ({mod.alpha_y_type}) ← {mod_path}")
 
             # Load modality-specific posterior_samples_technical
             posterior_path = os.path.join(input_dir, f'posterior_samples_technical_{mod_name}.pt')
@@ -152,14 +154,38 @@ class ModelLoader:
                 # This ensures backward compatibility even if files were saved without the specific attributes
                 if 'alpha_y_add' in mod.posterior_samples_technical:
                     if not hasattr(mod, 'alpha_y_prefit_add') or mod.alpha_y_prefit_add is None:
-                        mod.alpha_y_prefit_add = mod.posterior_samples_technical['alpha_y_add']
-                        print(f"[LOAD] {mod_name}.alpha_y_prefit_add ← extracted from posterior_samples_technical")
+                        alpha_y_add = mod.posterior_samples_technical['alpha_y_add']
+                        if use_posterior:
+                            mod.alpha_y_prefit_add = alpha_y_add
+                            if not hasattr(mod, 'alpha_y_prefit') or mod.alpha_y_prefit is None:
+                                mod.alpha_y_prefit = alpha_y_add
+                            if not hasattr(mod, 'alpha_y_type') or mod.alpha_y_type is None:
+                                mod.alpha_y_type = 'posterior'
+                        else:
+                            mod.alpha_y_prefit_add = alpha_y_add.mean(dim=0)
+                            if not hasattr(mod, 'alpha_y_prefit') or mod.alpha_y_prefit is None:
+                                mod.alpha_y_prefit = alpha_y_add.mean(dim=0)
+                            if not hasattr(mod, 'alpha_y_type') or mod.alpha_y_type is None:
+                                mod.alpha_y_type = 'point'
+                        print(f"[LOAD] {mod_name}.alpha_y_prefit_add ({mod.alpha_y_type}) ← extracted from posterior_samples_technical")
 
                 if 'alpha_y_mult' in mod.posterior_samples_technical or 'alpha_y' in mod.posterior_samples_technical:
                     alpha_y_mult_key = 'alpha_y_mult' if 'alpha_y_mult' in mod.posterior_samples_technical else 'alpha_y'
                     if not hasattr(mod, 'alpha_y_prefit_mult') or mod.alpha_y_prefit_mult is None:
-                        mod.alpha_y_prefit_mult = mod.posterior_samples_technical[alpha_y_mult_key]
-                        print(f"[LOAD] {mod_name}.alpha_y_prefit_mult ← extracted from posterior_samples_technical")
+                        alpha_y_mult = mod.posterior_samples_technical[alpha_y_mult_key]
+                        if use_posterior:
+                            mod.alpha_y_prefit_mult = alpha_y_mult
+                            if not hasattr(mod, 'alpha_y_prefit') or mod.alpha_y_prefit is None:
+                                mod.alpha_y_prefit = alpha_y_mult
+                            if not hasattr(mod, 'alpha_y_type') or mod.alpha_y_type is None:
+                                mod.alpha_y_type = 'posterior'
+                        else:
+                            mod.alpha_y_prefit_mult = alpha_y_mult.mean(dim=0)
+                            if not hasattr(mod, 'alpha_y_prefit') or mod.alpha_y_prefit is None:
+                                mod.alpha_y_prefit = alpha_y_mult.mean(dim=0)
+                            if not hasattr(mod, 'alpha_y_type') or mod.alpha_y_type is None:
+                                mod.alpha_y_type = 'point'
+                        print(f"[LOAD] {mod_name}.alpha_y_prefit_mult ({mod.alpha_y_type}) ← extracted from posterior_samples_technical")
 
         print(f"[LOAD] Technical fit loaded from {input_dir}")
         print(f"[LOAD] Modalities loaded: {modalities_to_load}")
