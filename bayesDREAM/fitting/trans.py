@@ -1134,7 +1134,9 @@ class TransFitter:
                 # Technical effect: multiplicative (mu_corrected = mu * alpha_y_mult)
                 # Inverse: divide by alpha_y_mult to get baseline
                 # alpha_y_prefit for negbinom is multiplicative (from fit_technical)
-                alpha_y_mult_expanded = alpha_y_prefit[groups_tensor, :].T  # [N, T] -> [T, N]
+                alpha_y_mult = alpha_y_prefit[groups_tensor, :]  # [N, ...]
+                # Swap first two dims: [N, T] -> [T, N] or [N, T, K] -> [T, N, K]
+                alpha_y_mult_expanded = alpha_y_mult.transpose(0, 1)
                 y_obs_for_prior = y_obs_for_prior / alpha_y_mult_expanded.clamp_min(epsilon_tensor)
                 print(f"[INFO] negbinom: Applied inverse multiplicative correction (divide by alpha_y_mult)")
 
@@ -1142,7 +1144,9 @@ class TransFitter:
                 # Technical effect: additive (mu_corrected = mu + alpha_y_add)
                 # Inverse: subtract alpha_y_add to get baseline
                 # alpha_y_prefit for normal/studentt is additive (from fit_technical)
-                alpha_y_add_expanded = alpha_y_prefit[groups_tensor, :].T  # [N, T] -> [T, N]
+                alpha_y_add = alpha_y_prefit[groups_tensor, :]  # [N, ...]
+                # Swap first two dims: [N, T] -> [T, N]
+                alpha_y_add_expanded = alpha_y_add.transpose(0, 1)
                 y_obs_for_prior = y_obs_for_prior - alpha_y_add_expanded
                 print(f"[INFO] {distribution}: Applied inverse additive correction (subtract alpha_y_add)")
 
@@ -1150,7 +1154,9 @@ class TransFitter:
                 # Technical effect: logit scale (logit(p_corrected) = logit(p) + alpha_y_add)
                 # Inverse: logit(p_baseline) = logit(p_observed) - alpha_y_add
                 # Then: p_baseline = sigmoid(logit(p_baseline))
-                alpha_y_add_expanded = alpha_y_prefit[groups_tensor, :].T  # [N, T] -> [T, N]
+                alpha_y_add = alpha_y_prefit[groups_tensor, :]  # [N, ...]
+                # Swap first two dims: [N, T] -> [T, N]
+                alpha_y_add_expanded = alpha_y_add.transpose(0, 1)
 
                 # Convert observed proportions to logit scale
                 p_obs_clamped = torch.clamp(y_obs_for_prior, min=epsilon_tensor, max=1.0 - epsilon_tensor)
