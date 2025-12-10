@@ -925,6 +925,14 @@ class TransFitter:
 
         print(f"[INFO] Fitting trans model for modality '{modality_name}' (distribution: {distribution})")
 
+        # Validate min_denominator is specified for binomial/multinomial
+        if distribution in ['binomial', 'multinomial'] and min_denominator is None:
+            raise ValueError(
+                f"min_denominator is required for distribution='{distribution}'. "
+                f"Please specify min_denominator (e.g., min_denominator=0 for no filtering, "
+                f"or min_denominator=3 for standard quality filtering)."
+            )
+
         # Validate distribution-specific requirements
         from .distributions import requires_sum_factor, requires_denominator
 
@@ -1075,6 +1083,9 @@ class TransFitter:
         # Distribution-specific normalization for data-driven priors
         # For building priors later:
         y_obs_for_prior = None
+
+        # Note: min_denominator is now required for binomial/multinomial (validated earlier)
+        # For negbinom/normal/studentt, it's not used so None is fine
 
         if distribution == 'binomial' and denominator_tensor is not None:
             # Full probabilities for the likelihood
