@@ -1131,16 +1131,19 @@ class TransFitter:
             print(f"[INFO] Correcting for technical effects before computing priors (distribution: {distribution})")
 
             # Handle both point estimates (2D) and posterior samples (3D)
-            if alpha_y_type == 'posterior':
-                # alpha_y_prefit is 3D: [samples, groups, features]
+            # Check actual tensor dimensions rather than just alpha_y_type (for robustness)
+            if alpha_y_prefit.dim() >= 3:
+                # alpha_y_prefit is 3D/4D: [samples, groups, features] or [samples, groups, features, categories]
                 # Index groups dimension and average over samples
-                alpha_y_grouped = alpha_y_prefit[:, groups_tensor, :]  # [S, N, T]
-                alpha_y_mean = alpha_y_grouped.mean(dim=0)  # [N, T]
+                alpha_y_grouped = alpha_y_prefit[:, groups_tensor, ...]  # [S, N, ...] where ... is T or T,K
+                alpha_y_mean = alpha_y_grouped.mean(dim=0)  # [N, ...] where ... is T or T,K
                 print(f"[INFO] Using posterior mean for technical correction (averaged over {alpha_y_prefit.shape[0]} samples)")
             else:
-                # alpha_y_prefit is 2D: [groups, features]
+                # alpha_y_prefit is 2D: [groups, features] or 3D: [groups, features, categories]
                 # Just index groups dimension
-                alpha_y_mean = alpha_y_prefit[groups_tensor, :]  # [N, T]
+                alpha_y_mean = alpha_y_prefit[groups_tensor, ...]  # [N, ...] where ... is T or T,K
+                if alpha_y_type == 'posterior':
+                    print(f"[WARNING] alpha_y_type='posterior' but tensor is only {alpha_y_prefit.dim()}D. Treating as point estimate.")
 
             if distribution == 'negbinom':
                 # Technical effect: multiplicative (mu_corrected = mu * alpha_y_mult)
@@ -1184,13 +1187,16 @@ class TransFitter:
                 # Then: probs_baseline = exp(log_probs_baseline) / sum(exp(...))
                 # Multinomial has 3D shape: [features, categories] -> need [T, N, K]
                 # Handle both point estimates (3D) and posterior samples (4D)
-                if alpha_y_type == 'posterior':
+                # Check actual dimensions
+                if alpha_y_prefit.dim() == 4:
                     # alpha_y_prefit is 4D: [samples, groups, features, categories]
                     alpha_y_grouped_3d = alpha_y_prefit[:, groups_tensor, :, :]  # [S, N, T, K]
                     alpha_y_mean_3d = alpha_y_grouped_3d.mean(dim=0)  # [N, T, K]
-                else:
+                elif alpha_y_prefit.dim() == 3:
                     # alpha_y_prefit is 3D: [groups, features, categories]
                     alpha_y_mean_3d = alpha_y_prefit[groups_tensor, :, :]  # [N, T, K]
+                else:
+                    raise ValueError(f"For multinomial, alpha_y_prefit should be 3D or 4D, got {alpha_y_prefit.dim()}D")
 
                 # Permute to [T, N, K] for consistency with y_obs_for_prior
                 alpha_y_add_expanded = alpha_y_mean_3d.permute(1, 0, 2)  # [N, T, K] -> [T, N, K]
