@@ -1130,13 +1130,24 @@ class TransFitter:
         if alpha_y_prefit is not None and groups_tensor is not None:
             print(f"[INFO] Correcting for technical effects before computing priors (distribution: {distribution})")
 
+            # Handle both point estimates (2D) and posterior samples (3D)
+            if alpha_y_type == 'posterior':
+                # alpha_y_prefit is 3D: [samples, groups, features]
+                # Index groups dimension and average over samples
+                alpha_y_grouped = alpha_y_prefit[:, groups_tensor, :]  # [S, N, T]
+                alpha_y_mean = alpha_y_grouped.mean(dim=0)  # [N, T]
+                print(f"[INFO] Using posterior mean for technical correction (averaged over {alpha_y_prefit.shape[0]} samples)")
+            else:
+                # alpha_y_prefit is 2D: [groups, features]
+                # Just index groups dimension
+                alpha_y_mean = alpha_y_prefit[groups_tensor, :]  # [N, T]
+
             if distribution == 'negbinom':
                 # Technical effect: multiplicative (mu_corrected = mu * alpha_y_mult)
                 # Inverse: divide by alpha_y_mult to get baseline
                 # alpha_y_prefit for negbinom is multiplicative (from fit_technical)
-                alpha_y_mult = alpha_y_prefit[groups_tensor, :]  # [N, ...]
-                # Swap first two dims: [N, T] -> [T, N] or [N, T, K] -> [T, N, K]
-                alpha_y_mult_expanded = alpha_y_mult.transpose(0, 1)
+                # Swap dims: [N, T] -> [T, N]
+                alpha_y_mult_expanded = alpha_y_mean.transpose(0, 1)
                 y_obs_for_prior = y_obs_for_prior / alpha_y_mult_expanded.clamp_min(epsilon_tensor)
                 print(f"[INFO] negbinom: Applied inverse multiplicative correction (divide by alpha_y_mult)")
 
@@ -1144,9 +1155,8 @@ class TransFitter:
                 # Technical effect: additive (mu_corrected = mu + alpha_y_add)
                 # Inverse: subtract alpha_y_add to get baseline
                 # alpha_y_prefit for normal/studentt is additive (from fit_technical)
-                alpha_y_add = alpha_y_prefit[groups_tensor, :]  # [N, ...]
-                # Swap first two dims: [N, T] -> [T, N]
-                alpha_y_add_expanded = alpha_y_add.transpose(0, 1)
+                # Swap dims: [N, T] -> [T, N]
+                alpha_y_add_expanded = alpha_y_mean.transpose(0, 1)
                 y_obs_for_prior = y_obs_for_prior - alpha_y_add_expanded
                 print(f"[INFO] {distribution}: Applied inverse additive correction (subtract alpha_y_add)")
 
@@ -1154,9 +1164,8 @@ class TransFitter:
                 # Technical effect: logit scale (logit(p_corrected) = logit(p) + alpha_y_add)
                 # Inverse: logit(p_baseline) = logit(p_observed) - alpha_y_add
                 # Then: p_baseline = sigmoid(logit(p_baseline))
-                alpha_y_add = alpha_y_prefit[groups_tensor, :]  # [N, ...]
-                # Swap first two dims: [N, T] -> [T, N]
-                alpha_y_add_expanded = alpha_y_add.transpose(0, 1)
+                # Swap dims: [N, T] -> [T, N]
+                alpha_y_add_expanded = alpha_y_mean.transpose(0, 1)
 
                 # Convert observed proportions to logit scale
                 p_obs_clamped = torch.clamp(y_obs_for_prior, min=epsilon_tensor, max=1.0 - epsilon_tensor)
@@ -1173,7 +1182,18 @@ class TransFitter:
                 # Technical effect: log scale (log(probs_corrected) = log(probs) + alpha_y_add)
                 # Inverse: log(probs_baseline) = log(probs_observed) - alpha_y_add
                 # Then: probs_baseline = exp(log_probs_baseline) / sum(exp(...))
-                alpha_y_add_expanded = alpha_y_prefit[groups_tensor, :, :].permute(1, 0, 2)  # [N, T, K] -> [T, N, K]
+                # Multinomial has 3D shape: [features, categories] -> need [T, N, K]
+                # Handle both point estimates (3D) and posterior samples (4D)
+                if alpha_y_type == 'posterior':
+                    # alpha_y_prefit is 4D: [samples, groups, features, categories]
+                    alpha_y_grouped_3d = alpha_y_prefit[:, groups_tensor, :, :]  # [S, N, T, K]
+                    alpha_y_mean_3d = alpha_y_grouped_3d.mean(dim=0)  # [N, T, K]
+                else:
+                    # alpha_y_prefit is 3D: [groups, features, categories]
+                    alpha_y_mean_3d = alpha_y_prefit[groups_tensor, :, :]  # [N, T, K]
+
+                # Permute to [T, N, K] for consistency with y_obs_for_prior
+                alpha_y_add_expanded = alpha_y_mean_3d.permute(1, 0, 2)  # [N, T, K] -> [T, N, K]
 
                 # Convert observed proportions to log scale
                 p_obs_clamped = torch.clamp(y_obs_for_prior, min=epsilon_tensor)
@@ -1808,6 +1828,7 @@ class TransFitter:
         # Update alpha_y_prefit in modality if it was None and alpha_y was sampled
         if modality.alpha_y_prefit is None and groups_tensor is not None and "alpha_y" in posterior_samples_y:
             modality.alpha_y_prefit = posterior_samples_y["alpha_y"].mean(dim=0)
+            modality.alpha_y_type = 'point'  # Mean of posterior -> point estimate
 
         # If primary modality, also store at model level (backward compatibility)
         if modality_name == self.model.primary_modality:

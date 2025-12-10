@@ -1967,6 +1967,7 @@ class TechnicalFitter:
                     trans_idx = [i for i in all_idx if i != cis_idx_orig]
 
                     modality.alpha_y_prefit      = full_alpha_y_mult[..., trans_idx]
+                    modality.alpha_y_type        = 'posterior'
                     modality.alpha_y_prefit_mult = full_alpha_y_mult[..., trans_idx]
                     modality.alpha_y_prefit_add  = full_alpha_y_add[..., trans_idx]
 
@@ -2040,16 +2041,19 @@ class TechnicalFitter:
                 else:
                     # Cis gene not present after filtering; store as-is
                     modality.alpha_y_prefit      = posterior_samples["alpha_y"]
+                    modality.alpha_y_type        = 'posterior'
                     modality.alpha_y_prefit_mult = posterior_samples["alpha_y_mult"]
                     modality.alpha_y_prefit_add  = posterior_samples["alpha_y_add"]
             else:
                 # Cis gene not in counts; store as-is
                 modality.alpha_y_prefit      = posterior_samples["alpha_y"]
+                modality.alpha_y_type        = 'posterior'
                 modality.alpha_y_prefit_mult = posterior_samples["alpha_y_mult"]
                 modality.alpha_y_prefit_add  = posterior_samples["alpha_y_add"]
         else:
             # Not primary modality or no cis gene, store as-is
             modality.alpha_y_prefit      = posterior_samples["alpha_y"]
+            modality.alpha_y_type        = 'posterior'
             modality.alpha_y_prefit_mult = posterior_samples["alpha_y_mult"]
             modality.alpha_y_prefit_add  = posterior_samples["alpha_y_add"]
 
