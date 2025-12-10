@@ -1442,7 +1442,7 @@ class _BayesDREAMCore(PlottingMixin):
         self,
         cell_mask: Union[np.ndarray, pd.Series, list] = None,
         query: str = None,
-        preserve_fits: bool = False
+        preserve_fits: bool = True
     ):
         """
         Create a new model instance with a subset of cells.
@@ -1458,8 +1458,8 @@ class _BayesDREAMCore(PlottingMixin):
             Pandas query string to filter cells (e.g., "cell_line == 'CRISPRa'").
             Applied to self.meta. If None, must provide cell_mask.
         preserve_fits : bool
-            If True, copy fitted parameters (alpha_x_prefit, alpha_y_prefit, x_true, etc.)
-            to the new model. Default: False.
+            If True (default), copy fitted parameters (alpha_x_prefit, alpha_y_prefit,
+            x_true, etc.) to the new model. Set to False to start fresh with the subset.
 
         Returns
         -------
