@@ -1676,7 +1676,9 @@ class TransFitter:
                 "nmin": self._to_cpu(nmin),
                 "nmax": self._to_cpu(nmax),
                 # Only move if not None:
-                "alpha_y_sample": self._to_cpu(alpha_y_prefit.mean(dim=0) if alpha_y_type == "posterior" else alpha_y_prefit) if alpha_y_prefit is not None else None,
+                "alpha_y_sample": self._to_cpu(
+                    alpha_y_prefit.mean(dim=0) if alpha_y_prefit.dim() >= 3 else alpha_y_prefit
+                ) if alpha_y_prefit is not None else None,
                 "C": C,
                 "groups_tensor": self._to_cpu(groups_tensor) if groups_tensor is not None else None,
                 # create on CPU explicitly since we just set self.model.device="cpu"
@@ -1714,7 +1716,9 @@ class TransFitter:
                 "log2_x_true_sample": self.log2_x_true.mean(dim=0) if self.log2_x_true_type == "posterior" else self.log2_x_true,
                 "nmin": nmin,
                 "nmax": nmax,
-                "alpha_y_sample": alpha_y_prefit.mean(dim=0) if alpha_y_type == "posterior" else alpha_y_prefit if alpha_y_prefit is not None else None,
+                "alpha_y_sample": (
+                    alpha_y_prefit.mean(dim=0) if alpha_y_prefit.dim() >= 3 else alpha_y_prefit
+                ) if alpha_y_prefit is not None else None,
                 "C": C,
                 "groups_tensor": groups_tensor if groups_tensor is not None else None,
                 "temperature": torch.tensor(final_temp, dtype=torch.float32, device=self.model.device),
