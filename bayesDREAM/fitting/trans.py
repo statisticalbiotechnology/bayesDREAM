@@ -1488,7 +1488,9 @@ class TransFitter:
                 log2_x_true_sample = self.log2_x_true.mean(dim=0) if self.log2_x_true_type == "posterior" else self.log2_x_true,
                 nmin = nmin,
                 nmax = nmax,
-                alpha_y_sample = alpha_y_prefit.mean(dim=0) if alpha_y_type == "posterior" else alpha_y_prefit,
+                alpha_y_sample = (
+                    alpha_y_prefit.mean(dim=0) if alpha_y_prefit.dim() >= 3 else alpha_y_prefit
+                ) if alpha_y_prefit is not None else None,
                 C = C,
                 groups_tensor=groups_tensor,
                 temperature=torch.tensor(init_temp, dtype=torch.float32, device=self.model.device),
@@ -1582,10 +1584,18 @@ class TransFitter:
                 self.log2_x_true[samp] if samp < self.log2_x_true.shape[0] else self.log2_x_true.mean(dim=0)
                 if self.log2_x_true_type == "posterior" else self.log2_x_true
             )
-            alpha_y_sample = (
-                alpha_y_prefit[samp] if samp < alpha_y_prefit.shape[0] else alpha_y_prefit.mean(dim=0)
-                if alpha_y_type == "posterior" else alpha_y_prefit
-            ) if alpha_y_prefit is not None else None
+            # For alpha_y_sample: check actual dimensions instead of just alpha_y_type
+            if alpha_y_prefit is not None:
+                if alpha_y_prefit.dim() >= 3:
+                    # Posterior samples: [S, C-1, T] - sample or average
+                    alpha_y_sample = (
+                        alpha_y_prefit[samp] if samp < alpha_y_prefit.shape[0] else alpha_y_prefit.mean(dim=0)
+                    )
+                else:
+                    # Point estimate: [C-1, T] - use as-is
+                    alpha_y_sample = alpha_y_prefit
+            else:
+                alpha_y_sample = None
 
             #use_straight_through = step >= int(0.7 * niters)
             use_straight_through = False
