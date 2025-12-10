@@ -144,8 +144,6 @@ class Modality:
         # Per-modality fitting results storage
         self.alpha_y_prefit = None          # Technical fit: overdispersion parameters
         self.alpha_y_type = None            # 'point' (2D/3D) or 'posterior' (3D/4D with samples dim)
-        self.sigma_y_prefit = None          # Technical fit: variance (normal & studentt distribution)
-        self.sigma_y_type = None            # 'point' or 'posterior'
         self.posterior_samples_technical = None  # Technical fit: full posterior samples
         self.posterior_samples_trans = None      # Trans fit: full posterior samples
 
