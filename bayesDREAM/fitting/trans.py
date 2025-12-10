@@ -1132,50 +1132,48 @@ class TransFitter:
 
             # Handle both point estimates (2D) and posterior samples (3D)
             # Check actual tensor dimensions rather than just alpha_y_type (for robustness)
+            # Note: y_obs_for_prior is always [N, T] (cells × features)
             if alpha_y_prefit.dim() >= 3:
                 # alpha_y_prefit is 3D/4D: [samples, groups, features] or [samples, groups, features, categories]
                 # Index groups dimension and average over samples
                 alpha_y_grouped = alpha_y_prefit[:, groups_tensor, ...]  # [S, N, ...] where ... is T or T,K
-                alpha_y_mean = alpha_y_grouped.mean(dim=0)  # [N, ...] where ... is T or T,K
+                alpha_y_expanded = alpha_y_grouped.mean(dim=0)  # [N, ...] where ... is T or T,K
                 print(f"[INFO] Using posterior mean for technical correction (averaged over {alpha_y_prefit.shape[0]} samples)")
             else:
                 # alpha_y_prefit is 2D: [groups, features] or 3D: [groups, features, categories]
                 # Just index groups dimension
-                alpha_y_mean = alpha_y_prefit[groups_tensor, ...]  # [N, ...] where ... is T or T,K
+                alpha_y_expanded = alpha_y_prefit[groups_tensor, ...]  # [N, ...] where ... is T or T,K
                 if alpha_y_type == 'posterior':
                     print(f"[WARNING] alpha_y_type='posterior' but tensor is only {alpha_y_prefit.dim()}D. Treating as point estimate.")
+
+            # alpha_y_expanded is now [N, T] (or [N, T, K] for multinomial), matching y_obs_for_prior
+            # NO TRANSPOSE NEEDED - both are [N, T]
 
             if distribution == 'negbinom':
                 # Technical effect: multiplicative (mu_corrected = mu * alpha_y_mult)
                 # Inverse: divide by alpha_y_mult to get baseline
                 # alpha_y_prefit for negbinom is multiplicative (from fit_technical)
-                # Swap dims: [N, T] -> [T, N]
-                alpha_y_mult_expanded = alpha_y_mean.transpose(0, 1)
-                y_obs_for_prior = y_obs_for_prior / alpha_y_mult_expanded.clamp_min(epsilon_tensor)
+                y_obs_for_prior = y_obs_for_prior / alpha_y_expanded.clamp_min(epsilon_tensor)
                 print(f"[INFO] negbinom: Applied inverse multiplicative correction (divide by alpha_y_mult)")
 
             elif distribution in ['normal', 'studentt']:
                 # Technical effect: additive (mu_corrected = mu + alpha_y_add)
                 # Inverse: subtract alpha_y_add to get baseline
                 # alpha_y_prefit for normal/studentt is additive (from fit_technical)
-                # Swap dims: [N, T] -> [T, N]
-                alpha_y_add_expanded = alpha_y_mean.transpose(0, 1)
-                y_obs_for_prior = y_obs_for_prior - alpha_y_add_expanded
+                y_obs_for_prior = y_obs_for_prior - alpha_y_expanded
                 print(f"[INFO] {distribution}: Applied inverse additive correction (subtract alpha_y_add)")
 
             elif distribution == 'binomial':
                 # Technical effect: logit scale (logit(p_corrected) = logit(p) + alpha_y_add)
                 # Inverse: logit(p_baseline) = logit(p_observed) - alpha_y_add
                 # Then: p_baseline = sigmoid(logit(p_baseline))
-                # Swap dims: [N, T] -> [T, N]
-                alpha_y_add_expanded = alpha_y_mean.transpose(0, 1)
 
                 # Convert observed proportions to logit scale
                 p_obs_clamped = torch.clamp(y_obs_for_prior, min=epsilon_tensor, max=1.0 - epsilon_tensor)
                 logit_obs = torch.log(p_obs_clamped) - torch.log(1.0 - p_obs_clamped)
 
                 # Apply inverse correction on logit scale
-                logit_baseline = logit_obs - alpha_y_add_expanded
+                logit_baseline = logit_obs - alpha_y_expanded
 
                 # Convert back to probability scale
                 y_obs_for_prior = torch.sigmoid(logit_baseline)
@@ -1185,28 +1183,14 @@ class TransFitter:
                 # Technical effect: log scale (log(probs_corrected) = log(probs) + alpha_y_add)
                 # Inverse: log(probs_baseline) = log(probs_observed) - alpha_y_add
                 # Then: probs_baseline = exp(log_probs_baseline) / sum(exp(...))
-                # Multinomial has 3D shape: [features, categories] -> need [T, N, K]
-                # Handle both point estimates (3D) and posterior samples (4D)
-                # Check actual dimensions
-                if alpha_y_prefit.dim() == 4:
-                    # alpha_y_prefit is 4D: [samples, groups, features, categories]
-                    alpha_y_grouped_3d = alpha_y_prefit[:, groups_tensor, :, :]  # [S, N, T, K]
-                    alpha_y_mean_3d = alpha_y_grouped_3d.mean(dim=0)  # [N, T, K]
-                elif alpha_y_prefit.dim() == 3:
-                    # alpha_y_prefit is 3D: [groups, features, categories]
-                    alpha_y_mean_3d = alpha_y_prefit[groups_tensor, :, :]  # [N, T, K]
-                else:
-                    raise ValueError(f"For multinomial, alpha_y_prefit should be 3D or 4D, got {alpha_y_prefit.dim()}D")
-
-                # Permute to [T, N, K] for consistency with y_obs_for_prior
-                alpha_y_add_expanded = alpha_y_mean_3d.permute(1, 0, 2)  # [N, T, K] -> [T, N, K]
+                # For multinomial, alpha_y_expanded is already [N, T, K] from above (matches y_obs_for_prior)
 
                 # Convert observed proportions to log scale
                 p_obs_clamped = torch.clamp(y_obs_for_prior, min=epsilon_tensor)
                 log_probs_obs = torch.log(p_obs_clamped)
 
                 # Apply inverse correction on log scale
-                log_probs_baseline = log_probs_obs - alpha_y_add_expanded
+                log_probs_baseline = log_probs_obs - alpha_y_expanded
 
                 # Normalize (softmax) to get valid probabilities
                 y_obs_for_prior = torch.softmax(log_probs_baseline, dim=-1)
