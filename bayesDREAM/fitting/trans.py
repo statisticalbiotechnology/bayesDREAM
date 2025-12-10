@@ -1134,7 +1134,7 @@ class TransFitter:
                 # Technical effect: multiplicative (mu_corrected = mu * alpha_y_mult)
                 # Inverse: divide by alpha_y_mult to get baseline
                 # alpha_y_prefit for negbinom is multiplicative (from fit_technical)
-                alpha_y_mult_expanded = alpha_y_prefit[groups_tensor, :]  # [N, T]
+                alpha_y_mult_expanded = alpha_y_prefit[groups_tensor, :].T  # [N, T] -> [T, N]
                 y_obs_for_prior = y_obs_for_prior / alpha_y_mult_expanded.clamp_min(epsilon_tensor)
                 print(f"[INFO] negbinom: Applied inverse multiplicative correction (divide by alpha_y_mult)")
 
@@ -1142,7 +1142,7 @@ class TransFitter:
                 # Technical effect: additive (mu_corrected = mu + alpha_y_add)
                 # Inverse: subtract alpha_y_add to get baseline
                 # alpha_y_prefit for normal/studentt is additive (from fit_technical)
-                alpha_y_add_expanded = alpha_y_prefit[groups_tensor, :]  # [N, T]
+                alpha_y_add_expanded = alpha_y_prefit[groups_tensor, :].T  # [N, T] -> [T, N]
                 y_obs_for_prior = y_obs_for_prior - alpha_y_add_expanded
                 print(f"[INFO] {distribution}: Applied inverse additive correction (subtract alpha_y_add)")
 
@@ -1150,7 +1150,7 @@ class TransFitter:
                 # Technical effect: logit scale (logit(p_corrected) = logit(p) + alpha_y_add)
                 # Inverse: logit(p_baseline) = logit(p_observed) - alpha_y_add
                 # Then: p_baseline = sigmoid(logit(p_baseline))
-                alpha_y_add_expanded = alpha_y_prefit[groups_tensor, :]  # [N, T]
+                alpha_y_add_expanded = alpha_y_prefit[groups_tensor, :].T  # [N, T] -> [T, N]
 
                 # Convert observed proportions to logit scale
                 p_obs_clamped = torch.clamp(y_obs_for_prior, min=epsilon_tensor, max=1.0 - epsilon_tensor)
@@ -1167,7 +1167,7 @@ class TransFitter:
                 # Technical effect: log scale (log(probs_corrected) = log(probs) + alpha_y_add)
                 # Inverse: log(probs_baseline) = log(probs_observed) - alpha_y_add
                 # Then: probs_baseline = exp(log_probs_baseline) / sum(exp(...))
-                alpha_y_add_expanded = alpha_y_prefit[groups_tensor, :, :]  # [N, T, K]
+                alpha_y_add_expanded = alpha_y_prefit[groups_tensor, :, :].permute(1, 0, 2)  # [N, T, K] -> [T, N, K]
 
                 # Convert observed proportions to log scale
                 p_obs_clamped = torch.clamp(y_obs_for_prior, min=epsilon_tensor)
