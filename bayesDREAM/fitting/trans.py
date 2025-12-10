@@ -1149,6 +1149,21 @@ class TransFitter:
             # alpha_y_expanded is now [N, T] (or [N, T, K] for multinomial), matching y_obs_for_prior
             # NO TRANSPOSE NEEDED - both are [N, T]
 
+            # Diagnostic: Check alpha_y_expanded for issues
+            if not torch.isfinite(alpha_y_expanded).all():
+                n_invalid_alpha = (~torch.isfinite(alpha_y_expanded)).sum().item()
+                print(f"[WARNING] alpha_y_expanded contains {n_invalid_alpha} non-finite values before correction")
+            else:
+                # Check if values look like multiplicative (around 1.0) vs additive (logit scale)
+                alpha_mean = alpha_y_expanded.mean().item()
+                alpha_std = alpha_y_expanded.std().item()
+                print(f"[DEBUG] alpha_y_expanded stats: mean={alpha_mean:.4f}, std={alpha_std:.4f}")
+                if distribution == 'binomial' and abs(alpha_mean - 1.0) < 0.5:
+                    print(f"[WARNING] alpha_y_expanded looks like multiplicative correction (mean~1.0). "
+                          f"For binomial, expected additive correction on logit scale (mean~0, range~[-5,5]). "
+                          f"You may be using technical fit results from old (buggy) code. "
+                          f"Re-run fit_technical with the fixed code.")
+
             if distribution == 'negbinom':
                 # Technical effect: multiplicative (mu_corrected = mu * alpha_y_mult)
                 # Inverse: divide by alpha_y_mult to get baseline
@@ -1172,8 +1187,18 @@ class TransFitter:
                 p_obs_clamped = torch.clamp(y_obs_for_prior, min=epsilon_tensor, max=1.0 - epsilon_tensor)
                 logit_obs = torch.log(p_obs_clamped) - torch.log(1.0 - p_obs_clamped)
 
+                # Diagnostic: Check logit_obs range
+                print(f"[DEBUG] logit_obs range: [{logit_obs.min().item():.2f}, {logit_obs.max().item():.2f}]")
+                print(f"[DEBUG] alpha_y_expanded range: [{alpha_y_expanded.min().item():.4f}, {alpha_y_expanded.max().item():.4f}]")
+
                 # Apply inverse correction on logit scale
                 logit_baseline = logit_obs - alpha_y_expanded
+
+                # Diagnostic: Check logit_baseline range and finite values
+                print(f"[DEBUG] logit_baseline range: [{logit_baseline.min().item():.2f}, {logit_baseline.max().item():.2f}]")
+                if not torch.isfinite(logit_baseline).all():
+                    n_invalid = (~torch.isfinite(logit_baseline)).sum().item()
+                    print(f"[WARNING] logit_baseline contains {n_invalid} non-finite values after correction")
 
                 # Convert back to probability scale
                 y_obs_for_prior = torch.sigmoid(logit_baseline)
