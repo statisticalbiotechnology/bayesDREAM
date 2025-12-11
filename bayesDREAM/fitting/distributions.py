@@ -371,40 +371,6 @@ def sample_binomial_trans(
     # Zero out masked entries
     log_prob = torch.where(valid_mask, log_prob, torch.zeros_like(log_prob))
 
-    # DIAGNOSTIC: Check for NaN/Inf to help debug
-    if not torch.isfinite(log_prob).all():
-        n_invalid = (~torch.isfinite(log_prob)).sum().item()
-        n_total = log_prob.numel()
-
-        print(f"\n[DIAGNOSTIC] Non-finite values detected in log_prob")
-        print(f"  Total invalid: {n_invalid}/{n_total} ({100*n_invalid/n_total:.2f}%)")
-
-        # Check each intermediate computation
-        print(f"\n[DIAGNOSTIC] Checking intermediate values:")
-        print(f"  mu_y shape: {mu_y.shape}, range: [{mu_y.min().item():.6f}, {mu_y.max().item():.6f}]")
-        print(f"  logit_mu: finite={torch.isfinite(logit_mu).all()}, range: [{logit_mu.min().item():.2f}, {logit_mu.max().item():.2f}]")
-
-        if alpha_y_full is not None:
-            print(f"  alpha_y_full shape: {alpha_y_full.shape}")
-            print(f"  alpha_y_used: finite={torch.isfinite(alpha_y_used).all()}, range: [{alpha_y_used.min().item():.2f}, {alpha_y_used.max().item():.2f}]")
-
-        print(f"  logit_final: finite={torch.isfinite(logit_final).all()}, range: [{logit_final.min().item():.2f}, {logit_final.max().item():.2f}]")
-        print(f"  p (sigmoid): finite={torch.isfinite(p).all()}, range: [{p.min().item():.6f}, {p.max().item():.6f}]")
-        print(f"  p_clamped: finite={torch.isfinite(p_clamped).all()}, range: [{p_clamped.min().item():.6f}, {p_clamped.max().item():.6f}]")
-
-        # Check the actual log terms
-        log_p = torch.log(p_clamped)
-        log_1mp = torch.log(1 - p_clamped)
-        print(f"  log(p): finite={torch.isfinite(log_p).all()}, n_invalid={(~torch.isfinite(log_p)).sum().item()}")
-        print(f"  log(1-p): finite={torch.isfinite(log_1mp).all()}, n_invalid={(~torch.isfinite(log_1mp)).sum().item()}")
-
-        # Check the y and denominator values
-        print(f"  y_obs: range=[{y_obs_tensor.min().item():.0f}, {y_obs_tensor.max().item():.0f}]")
-        print(f"  denominator: range=[{denominator_tensor.min().item():.0f}, {denominator_tensor.max().item():.0f}]")
-        print(f"  valid_mask: {valid_mask.sum().item()}/{valid_mask.numel()} observations")
-
-        raise ValueError(f"Non-finite log_prob detected. See diagnostic output above.")
-
     # Attach as factor (summed over all observations)
     with pyro.plate("obs_plate", N * T):
         pyro.factor("y_obs", log_prob.reshape(-1))

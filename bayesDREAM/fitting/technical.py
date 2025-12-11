@@ -190,6 +190,7 @@ class TechnicalFitter:
         K=None,
         D=None,
         sigma_hat_tensor=None,
+        skip_obs_sampling=False,
     ):
         """
         Technical model used for NTC-only prefit of cell-line effects.
@@ -473,13 +474,17 @@ class TechnicalFitter:
         # --------------------------------
         # Call distribution-specific sampler
         # --------------------------------
-        # Note: Observations ARE sampled (needed for likelihood evaluation)
-        # This creates temporary [S, N, T] tensors during forward pass
-        # But they're not saved in output (filtered by keep_sites in fit_technical)
-        from .distributions import get_observation_sampler
-        observation_sampler = get_observation_sampler(distribution, 'trans')
+        # --------------------------------
+        # Call distribution-specific sampler
+        # --------------------------------
+        # CRITICAL: Skip observation sampling during Predictive to avoid NaN/Inf issues
+        # During Predictive, posterior samples of alpha_y can be extreme due to heavy-tailed priors
+        # We only need parameter posteriors (alpha, mu, phi), not observations
+        if not skip_obs_sampling:
+            from .distributions import get_observation_sampler
+            observation_sampler = get_observation_sampler(distribution, 'trans')
 
-        if distribution == 'negbinom':
+        if not skip_obs_sampling and distribution == 'negbinom':
             observation_sampler(
                 y_obs_tensor=y_obs_ntc_tensor,           # [N, T]
                 mu_y=mu_y,                               # [T]
@@ -490,7 +495,7 @@ class TechnicalFitter:
                 N=N, T=T, C=C
             )
 
-        elif distribution == 'normal':
+        elif not skip_obs_sampling and distribution == 'normal':
             observation_sampler(
                 y_obs_tensor=y_obs_ntc_tensor,           # [N, T]
                 mu_y=mu_y,                               # [T]
@@ -500,7 +505,7 @@ class TechnicalFitter:
                 N=N, T=T, C=C
             )
 
-        elif distribution == 'studentt':
+        elif not skip_obs_sampling and distribution == 'studentt':
             # Degrees of freedom (nu) - two options:
             # Option 1: Fixed value (simpler, faster)
             nu_y = self._t(3.0)
@@ -518,7 +523,7 @@ class TechnicalFitter:
                 N=N, T=T, C=C
             )
 
-        elif distribution == 'binomial':
+        elif not skip_obs_sampling and distribution == 'binomial':
             observation_sampler(
                 y_obs_tensor=y_obs_ntc_tensor,           # [N, T]
                 denominator_tensor=denominator_ntc_tensor,
@@ -528,7 +533,7 @@ class TechnicalFitter:
                 N=N, T=T, C=C
             )
 
-        elif distribution == 'multinomial':
+        elif not skip_obs_sampling and distribution == 'multinomial':
             # mu_y is [T, K] baseline; expand to [N, T, K]
             #mu_y_multi = mu_y.unsqueeze(0).expand(N, T, K)
             observation_sampler(
@@ -540,17 +545,21 @@ class TechnicalFitter:
                 N=N, T=T, K=K, C=C
             )
 
-        else:
+        elif not skip_obs_sampling:
+            # Only raise error if we're actually trying to sample observations
             raise ValueError(f"Unknown distribution: {distribution}")
     
     def set_technical_groups(self, covariates: list[str]):
+        # Allow empty covariates list to create a single technical group
         if not covariates:
-            raise ValueError("covariates must not be empty")
-    
+            print("[INFO] No covariates specified - creating single technical group (C=1)")
+            self.model.meta["technical_group_code"] = 0
+            return
+
         missing_cols = [c for c in covariates if c not in self.model.meta.columns]
         if missing_cols:
             raise ValueError(f"Missing columns in meta: {missing_cols}")
-    
+
         self.model.meta["technical_group_code"] = self.model.meta.groupby(covariates).ngroup()
         print(f"[INFO] Set technical_group_code with {self.model.meta['technical_group_code'].nunique()} groups based on {covariates}")
     
@@ -1624,6 +1633,13 @@ class TechnicalFitter:
 
         keep_sites = kwargs.get("keep_sites", default_keep_sites)
 
+        # CRITICAL: Skip observation sampling during Predictive
+        # During Predictive, posterior samples of alpha_y can be extreme due to heavy-tailed priors
+        # This causes NaN/Inf in likelihood evaluation
+        # We only need parameter posteriors (alpha, mu, phi), not observations
+        model_inputs_with_skip = model_inputs.copy()
+        model_inputs_with_skip['skip_obs_sampling'] = True
+
         if minibatch_size is not None:
             predictive_technical = pyro.infer.Predictive(
                 self._model_technical, guide=guide_cellline, num_samples=minibatch_size,
@@ -1641,11 +1657,12 @@ class TechnicalFitter:
                     if current_batch_size < minibatch_size:
                         # Last batch might be smaller
                         predictive_batch = pyro.infer.Predictive(
-                            self._model_technical, guide=guide_cellline, num_samples=current_batch_size, parallel=use_parallel
+                            self._model_technical, guide=guide_cellline, num_samples=current_batch_size,
+                            parallel=use_parallel
                         )
-                        samples = predictive_batch(**model_inputs)
+                        samples = predictive_batch(**model_inputs_with_skip)
                     else:
-                        samples = predictive_technical(**model_inputs)
+                        samples = predictive_technical(**model_inputs_with_skip)
 
                     # First batch: preallocate full tensors
                     if batch_idx == 0:
@@ -1678,7 +1695,7 @@ class TechnicalFitter:
                 parallel=use_parallel
             )
             with torch.no_grad():
-                posterior_samples = predictive_technical(**model_inputs)
+                posterior_samples = predictive_technical(**model_inputs_with_skip)
                 if self.model.device.type == "cuda":
                     torch.cuda.empty_cache()
                 gc.collect()

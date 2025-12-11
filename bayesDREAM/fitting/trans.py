@@ -197,9 +197,8 @@ class TransFitter:
                         #print(f"[INFO] Dirichlet data-driven concentration: A={concentration_A.mean().item():.2f}, upper={concentration_upper.mean().item():.2f}")
                     else:
                         # Uniform Dirichlet: all categories have equal concentration=1
-                        concentration_A = self._t(1.0).expand([T_dim, K_dim])  # [T, K] with all 1s
-                        concentration_upper = self._t(1.0).expand([T_dim, K_dim])  # [T, K] with all 1s
-                        print(f"[INFO] Using uniform Dirichlet(1, ..., 1) priors for A and upper_limit ({K_dim} categories)")
+                        concentration_A = self._t(1.0).expand([T, K_dim])  # [T, K] with all 1s
+                        concentration_upper = self._t(1.0).expand([T, K_dim])  # [T, K] with all 1s
 
                     # Sample K-dimensional probability vectors from Dirichlet
                     # Each row sums to 1
@@ -229,7 +228,6 @@ class TransFitter:
                         beta_A = self._t(1.0)
                         alpha_upper = self._t(1.0)
                         beta_upper = self._t(1.0)
-                        print(f"[INFO] Using uniform Beta(1, 1) priors for A and upper_limit")
 
                     # Sample per-feature [T]
                     # Note: When using uniform priors, these become scalars broadcast to [T]
@@ -238,8 +236,8 @@ class TransFitter:
                         upper_limit = pyro.sample("upper_limit", dist.Beta(alpha_upper, beta_upper))  # [T]
                     else:
                         # Uniform priors - need to expand to match shape [T]
-                        A = pyro.sample("A", dist.Beta(alpha_A, beta_A).expand([T_dim]))  # [T]
-                        upper_limit = pyro.sample("upper_limit", dist.Beta(alpha_upper, beta_upper).expand([T_dim]))  # [T]
+                        A = pyro.sample("A", dist.Beta(alpha_A, beta_A).expand([T]))  # [T]
+                        upper_limit = pyro.sample("upper_limit", dist.Beta(alpha_upper, beta_upper).expand([T]))  # [T]
 
                 # Compute Vmax_sum (total amplitude available for Hills)
                 # For multinomial: Both A and upper_limit are K-dimensional from Dirichlet (sum to 1)
@@ -1088,7 +1086,6 @@ class TransFitter:
         # candidates can be inf if denominator ~ 0; we cap them later
         nmin_cand = (-log_fmax / torch.abs(torch.log(x_min))) if (x_min < 1) else torch.tensor(float('-inf'), device=self.model.device)
         nmax_cand = ( log_fmax / torch.abs(torch.log(x_max))) if (x_max > 1) else torch.tensor(float('inf'),  device=self.model.device)
-        print(f'nmin_cand={nmin_cand}, nmax_cand={nmax_cand}')
 
         BOX_LOW  = torch.tensor(-20.0, device=self.model.device)
         BOX_HIGH = torch.tensor( 20.0, device=self.model.device)
@@ -1097,7 +1094,6 @@ class TransFitter:
         nmax = torch.where(torch.isfinite(nmax_cand), torch.minimum(nmax_cand, BOX_HIGH), BOX_HIGH)
         # ensure proper ordering just in case
         nmin = torch.minimum(nmin, nmax)
-        print(f'nmin={nmin}, nmax={nmax}')
 
 
         guides_tensor = torch.tensor(self.model.meta['guide_code'].values, dtype=torch.long, device=self.model.device)
@@ -1113,28 +1109,23 @@ class TransFitter:
             # Full probabilities for the likelihood
             y_obs_factored = y_obs_tensor / denominator_tensor.clamp_min(epsilon_tensor)
 
-            # For priors: only use entries where denominator >= min_denominator
-            valid_mask = (denominator_tensor >= min_denominator)
-            # Mark invalid entries as NaN so we can ignore them in means
-            y_obs_for_prior = torch.where(
-                valid_mask,
-                y_obs_factored,
-                torch.full_like(y_obs_factored, float('nan'))
-            )
-            print(f"[INFO] Binomial: using {valid_mask.float().mean().item()*100:.1f}% of entries with denominator >= {min_denominator} for priors")
+            # Store valid_mask for later (will apply AFTER technical correction)
+            valid_mask_binomial = (denominator_tensor >= min_denominator)
+            print(f"[INFO] Binomial: will use {valid_mask_binomial.float().mean().item()*100:.1f}% of entries with denominator >= {min_denominator} for priors (after technical correction)")
+
+            # Don't create y_obs_for_prior yet - technical correction happens first
+            y_obs_for_prior = y_obs_factored
 
         elif distribution == 'multinomial' and y_obs_tensor.ndim == 3:
             total_counts = y_obs_tensor.sum(dim=-1, keepdim=True).clamp_min(epsilon_tensor)  # [N, T, 1]
             y_obs_factored = y_obs_tensor / total_counts  # [N, T, K]
 
-            # For priors: only use entries where total_counts >= min_denominator
-            valid_mask = (total_counts >= min_denominator)  # [N, T, 1]
-            y_obs_for_prior = torch.where(
-                valid_mask,
-                y_obs_factored,
-                torch.full_like(y_obs_factored, float('nan'))
-            )
-            print(f"[INFO] Multinomial: using {valid_mask.float().mean().item()*100:.1f}% of entries with total counts >= {min_denominator} for priors")
+            # Store valid_mask for later (will apply AFTER technical correction)
+            valid_mask_multinomial = (total_counts >= min_denominator)  # [N, T, 1]
+            print(f"[INFO] Multinomial: will use {valid_mask_multinomial.float().mean().item()*100:.1f}% of entries with total counts >= {min_denominator} for priors (after technical correction)")
+
+            # Don't create y_obs_for_prior yet - technical correction happens first
+            y_obs_for_prior = y_obs_factored
 
         elif sum_factor_col is not None:
             y_obs_factored = y_obs_tensor / sum_factor_tensor.view(-1, 1)
@@ -1260,6 +1251,30 @@ class TransFitter:
         else:
             if alpha_y_prefit is not None:
                 print(f"[INFO] alpha_y_prefit provided but groups_tensor is None - skipping technical correction")
+
+        # NOW apply min_denominator masking (AFTER technical correction)
+        # This prevents computing priors from low-coverage observations
+        if distribution == 'binomial' and 'valid_mask_binomial' in locals():
+            # Mask low-coverage entries with NaN
+            y_obs_for_prior = torch.where(
+                valid_mask_binomial,
+                y_obs_for_prior,
+                torch.full_like(y_obs_for_prior, float('nan'))
+            )
+            n_masked = (~valid_mask_binomial).sum().item()
+            n_total = valid_mask_binomial.numel()
+            print(f"[INFO] Masked {n_masked}/{n_total} ({100*n_masked/n_total:.2f}%) low-coverage observations (denominator < {min_denominator})")
+
+        elif distribution == 'multinomial' and 'valid_mask_multinomial' in locals():
+            # Mask low-coverage entries with NaN
+            y_obs_for_prior = torch.where(
+                valid_mask_multinomial,
+                y_obs_for_prior,
+                torch.full_like(y_obs_for_prior, float('nan'))
+            )
+            n_masked = (~valid_mask_multinomial).sum().item()
+            n_total = valid_mask_multinomial.numel()
+            print(f"[INFO] Masked {n_masked}/{n_total} ({100*n_masked/n_total:.2f}%) low-coverage observations (total counts < {min_denominator})")
 
         unique_guides = torch.unique(guides_tensor)
 
@@ -1496,6 +1511,10 @@ class TransFitter:
         print("[DEBUG] Vmax_mean:", Vmax_mean_tensor.min().item(), Vmax_mean_tensor.max().item())
         print("[DEBUG] Mean within-guide variance:", mean_within_guide_var.min().item(), mean_within_guide_var.max().item())
         print("[DEBUG] x_true CV:", x_true_CV.item(), "K_max:", K_max_tensor.item())
+
+        # Ensure x_true is on the correct device (may have been loaded from CPU)
+        if self.model.x_true.device != self.model.device:
+            self.model.x_true = self.model.x_true.to(self.model.device)
 
         assert self.model.x_true.device == self.model.device
         if alpha_y_prefit is not None:
