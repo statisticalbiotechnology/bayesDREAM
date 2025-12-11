@@ -545,7 +545,7 @@ def get_technical_group_labels(model) -> List[str]:
         Informative labels for each technical group code
     """
     if 'technical_group_code' not in model.meta.columns:
-        raise ValueError("technical_group_code not set. Run set_technical_groups() first.")
+        return ['All']  # Single group when no technical groups
 
     # Get unique technical groups
     group_codes = sorted(model.meta['technical_group_code'].unique())

@@ -391,30 +391,31 @@ def sample_binomial_trans(
     # Zero out masked entries
     log_prob = torch.where(valid_mask, log_prob, torch.zeros_like(log_prob))
 
-    # Defensive: Check for NaN/Inf before passing to pyro.factor
-    if not torch.isfinite(log_prob).all():
-        n_invalid = (~torch.isfinite(log_prob)).sum().item()
-        n_total = log_prob.numel()
-
-        # Debug info about the invalid values
-        if torch.isnan(log_prob).any():
-            print(f"[ERROR] log_prob contains {torch.isnan(log_prob).sum().item()} NaN values")
-        if torch.isinf(log_prob).any():
-            n_inf = torch.isinf(log_prob).sum().item()
-            n_pos_inf = (log_prob == float('inf')).sum().item()
-            n_neg_inf = (log_prob == float('-inf')).sum().item()
-            print(f"[ERROR] log_prob contains {n_inf} Inf values ({n_pos_inf} +Inf, {n_neg_inf} -Inf)")
-
-        # Check intermediate values
-        if not torch.isfinite(p).all():
-            print(f"[ERROR] p (sigmoid output) contains {(~torch.isfinite(p)).sum().item()} non-finite values")
-            print(f"[DEBUG] logit_final range: [{logit_final.min().item():.2f}, {logit_final.max().item():.2f}]")
-            if alpha_y_full is not None and not torch.isfinite(alpha_y_used).all():
-                print(f"[ERROR] alpha_y_used contains {(~torch.isfinite(alpha_y_used)).sum().item()} non-finite values")
-
-        # Replace invalid values with very negative log-prob (low probability, but won't crash)
-        print(f"[WARNING] Replacing {n_invalid}/{n_total} non-finite log_prob values with -1000.0")
-        log_prob = torch.where(torch.isfinite(log_prob), log_prob, torch.full_like(log_prob, -1000.0))
+    # # DEFENSIVE CODE (commented out per user request - was masking underlying issues)
+    # # Check for NaN/Inf before passing to pyro.factor
+    # if not torch.isfinite(log_prob).all():
+    #     n_invalid = (~torch.isfinite(log_prob)).sum().item()
+    #     n_total = log_prob.numel()
+    #
+    #     # Debug info about the invalid values
+    #     if torch.isnan(log_prob).any():
+    #         print(f"[ERROR] log_prob contains {torch.isnan(log_prob).sum().item()} NaN values")
+    #     if torch.isinf(log_prob).any():
+    #         n_inf = torch.isinf(log_prob).sum().item()
+    #         n_pos_inf = (log_prob == float('inf')).sum().item()
+    #         n_neg_inf = (log_prob == float('-inf')).sum().item()
+    #         print(f"[ERROR] log_prob contains {n_inf} Inf values ({n_pos_inf} +Inf, {n_neg_inf} -Inf)")
+    #
+    #     # Check intermediate values
+    #     if not torch.isfinite(p).all():
+    #         print(f"[ERROR] p (sigmoid output) contains {(~torch.isfinite(p)).sum().item()} non-finite values")
+    #         print(f"[DEBUG] logit_final range: [{logit_final.min().item():.2f}, {logit_final.max().item():.2f}]")
+    #         if alpha_y_full is not None and not torch.isfinite(alpha_y_used).all():
+    #             print(f"[ERROR] alpha_y_used contains {(~torch.isfinite(alpha_y_used)).sum().item()} non-finite values")
+    #
+    #     # Replace invalid values with very negative log-prob (low probability, but won't crash)
+    #     print(f"[WARNING] Replacing {n_invalid}/{n_total} non-finite log_prob values with -1000.0")
+    #     log_prob = torch.where(torch.isfinite(log_prob), log_prob, torch.full_like(log_prob, -1000.0))
 
     # Attach as factor (summed over all observations)
     with pyro.plate("obs_plate", N * T):
