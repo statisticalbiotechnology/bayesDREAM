@@ -2408,12 +2408,22 @@ def plot_xy_data(
             "Example: model.fit_cis(sum_factor_col='sum_factor')"
         )
 
-    # Check technical_group_code is set
+    # Check technical_group_code is set (only required if showing correction)
+    # Auto-fallback to uncorrected if technical groups not available
+    if show_correction in ['corrected', 'both']:
+        if 'technical_group_code' not in model.meta.columns:
+            import warnings
+            warnings.warn(
+                f"technical_group_code not set, falling back to show_correction='uncorrected'. "
+                f"To show correction, run model.set_technical_groups(['cell_line']) first.",
+                UserWarning
+            )
+            show_correction = 'uncorrected'
+
+    # If technical_group_code still doesn't exist, create dummy column (all cells in group 0)
+    # This allows plotting code to work without special-casing
     if 'technical_group_code' not in model.meta.columns:
-        raise ValueError(
-            "technical_group_code not set. Must run set_technical_groups() first.\n"
-            "Example: model.set_technical_groups(['cell_line'])"
-        )
+        model.meta['technical_group_code'] = 0
 
     # Get x_true
     x2d = _to_2d(model.x_true)
