@@ -919,9 +919,31 @@ class TransFitter:
             modality_cells = self.model.meta['cell'].values[:counts_to_fit.shape[modality.cells_axis]]
 
         # Get technical fit results from modality (NOT self.model.alpha_y_prefit!)
-        alpha_y_prefit = modality.alpha_y_prefit
-        # alpha_y_type is always 'posterior' since it came from fit_technical
-        alpha_y_type = 'posterior' if alpha_y_prefit is not None else None
+        # DEFENSIVE: Use distribution-specific attributes first (like plot_xy_data does)
+        # This is more robust than the generic alpha_y_prefit
+        alpha_y_prefit = None
+        alpha_y_type = None
+
+        if distribution == 'negbinom':
+            # For negbinom, use multiplicative correction
+            if hasattr(modality, 'alpha_y_prefit_mult') and modality.alpha_y_prefit_mult is not None:
+                alpha_y_prefit = modality.alpha_y_prefit_mult
+                alpha_y_type = getattr(modality, 'alpha_y_type', 'posterior')
+                print(f"[INFO] Using distribution-specific alpha_y_prefit_mult for {distribution}")
+        else:
+            # For binomial, multinomial, normal, studentt: use additive correction
+            if hasattr(modality, 'alpha_y_prefit_add') and modality.alpha_y_prefit_add is not None:
+                alpha_y_prefit = modality.alpha_y_prefit_add
+                alpha_y_type = getattr(modality, 'alpha_y_type', 'posterior')
+                print(f"[INFO] Using distribution-specific alpha_y_prefit_add for {distribution}")
+
+        # Fallback to generic attribute if distribution-specific not available
+        if alpha_y_prefit is None and hasattr(modality, 'alpha_y_prefit') and modality.alpha_y_prefit is not None:
+            alpha_y_prefit = modality.alpha_y_prefit
+            alpha_y_type = getattr(modality, 'alpha_y_type', 'posterior')
+            print(f"[WARNING] Distribution-specific alpha_y not found, falling back to generic alpha_y_prefit. "
+                  f"This may be incorrect if using old technical fit results. "
+                  f"Consider re-running fit_technical with current code.")
 
         print(f"[INFO] Fitting trans model for modality '{modality_name}' (distribution: {distribution})")
 
