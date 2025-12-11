@@ -347,7 +347,27 @@ def sample_binomial_trans(
 
     # Apply technical group effects on logit scale (additive)
     if alpha_y_full is not None and groups_tensor is not None:
-        alpha_y_used = alpha_y_full[groups_tensor, :]  # [N, T]
+        # Handle both training (2D/3D) and Predictive (3D/4D) modes
+        # Training: alpha_y_full is [C, T], mu_y is [N, T] or [T]
+        # Predictive: alpha_y_full is [S, C, T], mu_y is [S, C, T] or similar
+
+        if alpha_y_full.ndim >= 3 and alpha_y_full.shape[0] > C:
+            # Predictive mode: first dimension is sample dimension
+            # alpha_y_full: [S, C, T], groups_tensor: [N]
+            # We need: [S, N, T]
+            alpha_y_used = alpha_y_full[:, groups_tensor, :]  # [S, N, T]
+
+            # Expand logit_mu to match if needed
+            if logit_mu.ndim == 2:
+                # logit_mu is [N, T], expand to [S, N, T]
+                logit_mu = logit_mu.unsqueeze(0).expand(alpha_y_used.shape)
+            elif logit_mu.shape[1] == 1:
+                # logit_mu is [S, 1, T], broadcast to [S, N, T]
+                pass  # Broadcasting will handle it
+        else:
+            # Training mode: [C, T]
+            alpha_y_used = alpha_y_full[groups_tensor, :]  # [N, T]
+
         logit_final = logit_mu + alpha_y_used
     else:
         logit_final = logit_mu

@@ -19,6 +19,10 @@ import torch
 
 
 # ============================================================================
+# Helper Functions
+# ============================================================================
+
+# ============================================================================
 # Cell Alignment Utilities
 # ============================================================================
 
@@ -636,7 +640,13 @@ def _labels_by_code_for_df(model, df) -> dict[int, str]:
     """
     Return {technical_group_code -> human-readable label} *for codes present in df*.
     Prefers 'cell_line' if available, else falls back to a stable generic label.
+
+    If technical_group_code doesn't exist, returns {0: 'All'} (single group).
     """
+    # Handle case where technical groups don't exist
+    if 'technical_group_code' not in df.columns:
+        return {0: 'All'}
+
     present = np.sort(df['technical_group_code'].unique())
     label_col = 'cell_line' if 'cell_line' in model.meta.columns else None
 
@@ -1045,13 +1055,18 @@ def plot_negbinom_xy(
     )
 
     # Build dataframe
-    df = pd.DataFrame({
+    df_data = {
         'x_true': x_true_aligned,
         'y_obs': y_obs_aligned,
-        'technical_group_code': meta_aligned['technical_group_code'].values,
         'target': meta_aligned['target'].values,
         'sum_factor': meta_aligned[sum_factor_col].values
-    })
+    }
+
+    # Conditionally add technical_group_code if it exists
+    if 'technical_group_code' in meta_aligned.columns:
+        df_data['technical_group_code'] = meta_aligned['technical_group_code'].values
+
+    df = pd.DataFrame(df_data)
 
     # Technical correction
     has_technical_fit = modality.alpha_y_prefit is not None
@@ -1075,9 +1090,15 @@ def plot_negbinom_xy(
         axes = [ax]
 
     # Map technical_group_code → label using only codes present in this df
+    # If no technical groups, treat as single group
     code_to_label = _labels_by_code_for_df(model, df)
-    group_codes   = np.sort(df['technical_group_code'].unique())
-    group_labels  = [code_to_label[int(c)] for c in group_codes]
+
+    if 'technical_group_code' in df.columns:
+        group_codes = np.sort(df['technical_group_code'].unique())
+    else:
+        group_codes = np.array([0])  # Single group
+
+    group_labels = [code_to_label[int(c)] for c in group_codes]
 
     # Detect NTC cells for gradient coloring
     is_ntc = df['target'].str.lower() == 'ntc'
@@ -1103,7 +1124,12 @@ def plot_negbinom_xy(
         for idx, group_code in enumerate(group_codes):
             group_code = int(group_code)
             group_label = code_to_label[group_code]
-            df_group = df[df['technical_group_code'] == group_code].copy()
+
+            # Filter by technical group if column exists
+            if 'technical_group_code' in df.columns:
+                df_group = df[df['technical_group_code'] == group_code].copy()
+            else:
+                df_group = df.copy()
 
             if corrected and has_technical_fit:
                 # Apply alpha_y correction
@@ -1278,13 +1304,18 @@ def plot_binomial_xy(
     valid_mask = denom_aligned >= min_counts
 
     # Build dataframe
-    df = pd.DataFrame({
+    df_data = {
         'x_true': x_true_aligned[valid_mask],
         'counts': counts_aligned[valid_mask],
         'denominator': denom_aligned[valid_mask],
-        'technical_group_code': meta_aligned['technical_group_code'].values[valid_mask],
         'target': meta_aligned['target'].values[valid_mask]
-    })
+    }
+
+    # Conditionally add technical_group_code if it exists
+    if 'technical_group_code' in meta_aligned.columns:
+        df_data['technical_group_code'] = meta_aligned['technical_group_code'].values[valid_mask]
+
+    df = pd.DataFrame(df_data)
 
     # Keep counts and denominators for binning (don't compute PSI per-cell)
     # Filter valid
@@ -1326,7 +1357,13 @@ def plot_binomial_xy(
 
     # Get technical group labels
     code_to_label = _labels_by_code_for_df(model, df)
-    group_codes   = np.sort(df['technical_group_code'].unique())
+
+    if 'technical_group_code' in df.columns:
+        group_codes = np.sort(df['technical_group_code'].unique())
+    else:
+        group_codes = np.array([0])  # Single group
+
+    group_labels = [code_to_label[int(c)] for c in group_codes]
 
     # Detect NTC cells for gradient coloring
     is_ntc = df['target'].str.lower() == 'ntc'
@@ -1353,7 +1390,11 @@ def plot_binomial_xy(
             color = _color_for_label(group_label, fallback_idx=idx, palette=color_palette)
 
             # Get data for this group
-            group_mask = df['technical_group_code'] == group_code
+            if 'technical_group_code' in df.columns:
+                group_mask = df['technical_group_code'] == group_code
+            else:
+                group_mask = pd.Series([True] * len(df), index=df.index)
+
             if group_mask.sum() == 0:
                 continue
 
@@ -1541,11 +1582,16 @@ def plot_multinomial_xy(
     valid_mask = total_counts >= min_counts
 
     # Build dataframe
-    df = pd.DataFrame({
+    df_data = {
         'x_true': x_true_aligned[valid_mask],
-        'technical_group_code': meta_aligned['technical_group_code'].values[valid_mask],
         'target': meta_aligned['target'].values[valid_mask]
-    })
+    }
+
+    # Conditionally add technical_group_code if it exists
+    if 'technical_group_code' in meta_aligned.columns:
+        df_data['technical_group_code'] = meta_aligned['technical_group_code'].values[valid_mask]
+
+    df = pd.DataFrame(df_data)
 
     # Store raw counts for each category (needed for binning)
     counts_filtered = counts_3d[valid_mask, :]  # (n_cells_filtered, K)
@@ -1591,7 +1637,13 @@ def plot_multinomial_xy(
 
     # Get technical group labels
     code_to_label = _labels_by_code_for_df(model, df)
-    group_codes   = np.sort(df['technical_group_code'].unique())
+
+    if 'technical_group_code' in df.columns:
+        group_codes = np.sort(df['technical_group_code'].unique())
+    else:
+        group_codes = np.array([0])  # Single group
+
+    group_labels = [code_to_label[int(c)] for c in group_codes]
 
     # Plot each non-zero category
     for plot_idx, k in enumerate(non_zero_cats):
@@ -1612,7 +1664,11 @@ def plot_multinomial_xy(
                     color = _color_for_label(group_label, fallback_idx=idx, palette=color_palette)
 
                     # Get data for this group
-                    group_mask = df['technical_group_code'] == group_code
+                    if 'technical_group_code' in df.columns:
+                        group_mask = df['technical_group_code'] == group_code
+                    else:
+                        group_mask = pd.Series([True] * len(df), index=df.index)
+
                     if group_mask.sum() == 0:
                         continue
 
@@ -1671,7 +1727,11 @@ def plot_multinomial_xy(
                 color = _color_for_label(group_label, fallback_idx=idx, palette=color_palette)
 
                 # Get data for this group
-                group_mask = df['technical_group_code'] == group_code
+                if 'technical_group_code' in df.columns:
+                    group_mask = df['technical_group_code'] == group_code
+                else:
+                    group_mask = pd.Series([True] * len(df), index=df.index)
+
                 if group_mask.sum() == 0:
                     continue
 
@@ -1768,12 +1828,17 @@ def plot_normal_xy(
     )
 
     # Build dataframe
-    df = pd.DataFrame({
+    df_data = {
         'x_true': x_true_aligned,
         'y_val': y_vals_aligned,
-        'technical_group_code': meta_aligned['technical_group_code'].values,
         'target': meta_aligned['target'].values
-    })
+    }
+
+    # Conditionally add technical_group_code if it exists
+    if 'technical_group_code' in meta_aligned.columns:
+        df_data['technical_group_code'] = meta_aligned['technical_group_code'].values
+
+    df = pd.DataFrame(df_data)
 
     # Filter valid
     valid = (df['x_true'] > 0) & np.isfinite(df['y_val'])
@@ -1811,7 +1876,13 @@ def plot_normal_xy(
 
     # Get technical group labels
     code_to_label = _labels_by_code_for_df(model, df)
-    group_codes   = np.sort(df['technical_group_code'].unique())
+
+    if 'technical_group_code' in df.columns:
+        group_codes = np.sort(df['technical_group_code'].unique())
+    else:
+        group_codes = np.array([0])  # Single group
+
+    group_labels = [code_to_label[int(c)] for c in group_codes]
 
     # Detect NTC cells for gradient coloring
     is_ntc = df['target'].str.lower() == 'ntc'
@@ -2064,8 +2135,12 @@ def _plot_multinomial_multifeature(
     axes_dict = {}
 
     # Get technical group labels
-    group_labels = get_technical_group_labels(model)
-    group_codes = sorted(model.meta['technical_group_code'].unique())
+    if 'technical_group_code' in model.meta.columns:
+        group_labels = get_technical_group_labels(model)
+        group_codes = sorted(model.meta['technical_group_code'].unique())
+    else:
+        group_labels = ['All']
+        group_codes = [0]
 
     # Track current row position for GridSpec
     current_row = 0
@@ -2106,17 +2181,23 @@ def _plot_multinomial_multifeature(
         # Build dataframe
         if subset_mask is not None:
             meta_subset = model.meta[subset_mask]
-            df = pd.DataFrame({
+            df_data = {
                 'x_true': x_true[valid_mask],
-                'technical_group_code': meta_subset['technical_group_code'].values[valid_mask],
                 'target': meta_subset['target'].values[valid_mask]
-            })
+            }
+            # Conditionally add technical_group_code if it exists
+            if 'technical_group_code' in meta_subset.columns:
+                df_data['technical_group_code'] = meta_subset['technical_group_code'].values[valid_mask]
+            df = pd.DataFrame(df_data)
         else:
-            df = pd.DataFrame({
+            df_data = {
                 'x_true': x_true[valid_mask],
-                'technical_group_code': model.meta['technical_group_code'].values[valid_mask],
                 'target': model.meta['target'].values[valid_mask]
-            })
+            }
+            # Conditionally add technical_group_code if it exists
+            if 'technical_group_code' in model.meta.columns:
+                df_data['technical_group_code'] = model.meta['technical_group_code'].values[valid_mask]
+            df = pd.DataFrame(df_data)
 
         # Keep raw counts for binning (don't compute proportions per-cell)
         counts_filtered = counts_3d[valid_mask, :]
@@ -2137,8 +2218,13 @@ def _plot_multinomial_multifeature(
 
         # Map technical_group_code → label for THIS feature (after all filters)
         code_to_label = _labels_by_code_for_df(model, df)
-        group_codes   = np.sort(df['technical_group_code'].unique())
-        group_labels  = [code_to_label[int(c)] for c in group_codes]
+
+        if 'technical_group_code' in df.columns:
+            group_codes = np.sort(df['technical_group_code'].unique())
+        else:
+            group_codes = np.array([0])  # Single group
+
+        group_labels = [code_to_label[int(c)] for c in group_codes]
 
         # Plot each non-zero category
         for cat_plot_idx, k in enumerate(non_zero_cats):
@@ -2220,7 +2306,11 @@ def _plot_multinomial_multifeature(
                     color = _color_for_label(group_label, fallback_idx=idx, palette=color_palette)
 
                     # Get data for this group
-                    group_mask = df['technical_group_code'] == group_code
+                    if 'technical_group_code' in df.columns:
+                        group_mask = df['technical_group_code'] == group_code
+                    else:
+                        group_mask = pd.Series([True] * len(df), index=df.index)
+
                     if group_mask.sum() == 0:
                         continue
 
@@ -2410,8 +2500,10 @@ def plot_xy_data(
 
     # Check technical_group_code is set (only required if showing correction)
     # Auto-fallback to uncorrected if technical groups not available
+    has_technical_groups = 'technical_group_code' in model.meta.columns
+
     if show_correction in ['corrected', 'both']:
-        if 'technical_group_code' not in model.meta.columns:
+        if not has_technical_groups:
             import warnings
             warnings.warn(
                 f"technical_group_code not set, falling back to show_correction='uncorrected'. "
@@ -2419,11 +2511,6 @@ def plot_xy_data(
                 UserWarning
             )
             show_correction = 'uncorrected'
-
-    # If technical_group_code still doesn't exist, create dummy column (all cells in group 0)
-    # This allows plotting code to work without special-casing
-    if 'technical_group_code' not in model.meta.columns:
-        model.meta['technical_group_code'] = 0
 
     # Get x_true
     x2d = _to_2d(model.x_true)
