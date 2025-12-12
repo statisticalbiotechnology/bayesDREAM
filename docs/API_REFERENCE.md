@@ -273,6 +273,62 @@ model.add_custom_modality(
 
 ---
 
+#### add_atac_modality()
+
+```python
+model.add_atac_modality(
+    atac_counts,
+    region_meta,
+    name='atac',
+    cis_region=None,
+    cell_names=None,
+    overwrite=False
+)
+```
+
+Add ATAC-seq modality with genomic region annotations.
+
+**Parameters:**
+- `atac_counts` (np.ndarray or pd.DataFrame): Fragment counts per region (regions × cells)
+- `region_meta` (pd.DataFrame): Region metadata with required columns:
+  - `region_id`: Unique region identifier
+  - `region_type`: One of `['promoter', 'gene_body', 'distal']`
+  - `chrom`: Chromosome
+  - `start`, `end`: Coordinates (0-based)
+  - `gene`: Associated gene (NA for distal regions)
+  - Optional: `gene_name`, `gene_id`, `strand`, `tss_distance`
+- `name` (str): Modality name. Default: `'atac'`
+- `cis_region` (str, optional): Region ID to use as cis proxy
+  - Only creates 'cis' modality if no 'cis' modality exists
+  - Otherwise ignored with warning
+- `cell_names` (list, optional): Cell identifiers (only for np.ndarray counts)
+- `overwrite` (bool): Overwrite existing modality. Default: False
+
+**Notes:**
+- ATAC counts are treated as negative binomial data (like gene expression)
+- Zero-std regions are automatically filtered
+- Cis extraction only happens if no 'cis' modality exists AND `cis_region` is specified
+
+**Examples:**
+```python
+# Add ATAC as secondary modality (gene expression is primary/cis)
+model = bayesDREAM(meta=meta, counts=gene_counts, cis_gene='GFI1B')
+model.add_atac_modality(
+    atac_counts=atac_counts,
+    region_meta=region_meta
+)
+
+# Use ATAC region as cis proxy (creates 'cis' modality)
+model = bayesDREAM(meta=meta, counts=gene_counts)  # No cis_gene specified
+model.add_atac_modality(
+    atac_counts=atac_counts,
+    region_meta=region_meta,
+    cis_region='chr9:132283881-132284881'  # Creates 'cis' from this region
+)
+```
+
+---
+
 ### Accessing Modalities
 
 #### get_modality()
