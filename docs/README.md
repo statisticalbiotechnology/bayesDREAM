@@ -22,8 +22,8 @@ Comprehensive documentation for the bayesDREAM multi-modal Bayesian framework.
 ### Technical Documentation
 
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - System architecture and design patterns
-- **[HIGH_MOI_DESIGN.md](HIGH_MOI_DESIGN.md)** - High MOI technical design and implementation
 - **[INITIALIZATION.md](INITIALIZATION.md)** - Technical fitting initialization strategies for all distributions
+- **[HILL_FUNCTION_PRIORS.md](HILL_FUNCTION_PRIORS.md)** - Hill function prior computation for trans effects
 - **[OUTSTANDING_TASKS.md](OUTSTANDING_TASKS.md)** - Current development priorities and known issues
 
 ### HPC and Resource Planning

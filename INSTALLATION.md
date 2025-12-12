@@ -13,7 +13,6 @@ bayesDREAM provides architecture-specific conda environments:
 | `environment_cpu.yml` | CPU-only | Local dev, login nodes, M1/M2 Mac |
 | `environment_cuda.yml` | NVIDIA GPU | CUDA 12.1 (most GPU clusters) |
 | `environment_rocm.yml` | AMD GPU | ROCm 6.0 (AMD GPU clusters) |
-| `environment.yml` | NVIDIA GPU | Legacy (same as CUDA) |
 
 **Quick reference:**
 - **NVIDIA GPU cluster** → `environment_cuda.yml`
