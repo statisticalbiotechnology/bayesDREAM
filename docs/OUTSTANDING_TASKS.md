@@ -2,13 +2,26 @@
 
 This document tracks remaining implementation tasks and known issues.
 
-Last updated: 2025-01-07
+Last updated: 2025-12-12
 
 ---
 
 ## Recent Changes
 
-### Cis Modality Design (2025-01-22)
+### Binomial/Multinomial Trans Fitting Bug Fixes (2025-12-12)
+
+**Status**: Fixed in commits 204efc7, 1db8b2a, 59f08d9, b7b53da
+
+**Changes**:
+- Fixed critical alpha_y_full construction bug in binomial trans fitting (was using ones instead of zeros)
+- Enabled multinomial technical correction (matching binomial behavior)
+- Fixed losses_trans storage on model/modality objects
+- Added diagnostic output for non-finite log_prob issues
+- Improved Hill function plotting for binomial/multinomial distributions
+
+See `docs/archive/2025-12/commits/` for detailed analysis of these fixes.
+
+### Cis Modality Design (2025-11-10)
 
 **Change**: bayesDREAM now uses a separate 'cis' modality for cis gene/feature modeling.
 
@@ -56,7 +69,7 @@ model = bayesDREAM(
 # Creates: 'cis' modality (feature_123) + 'my_custom_modality' (other features)
 ```
 
-### API Refactoring (2025-01-07)
+### API Refactoring (2025-11-07)
 
 **Change**: Cleaned up initialization parameters for clarity and extensibility.
 
@@ -179,14 +192,16 @@ model = bayesDREAM(
 **Status**: Mostly complete
 
 **What's Done**:
-- CLAUDE.md updated with modular structure and new API
-- README.md updated with refactoring note and new API examples
-- REFACTORING_PLAN.md marked complete
-- API_REFERENCE.md updated with new initialization parameters (2025-01-07)
-- QUICKSTART_MULTIMODAL.md updated with new API examples (2025-01-07)
-- ARCHITECTURE.md updated with new parameter references (2025-01-07)
-- INITIALIZATION.md updated with new API examples (2025-01-07)
-- OUTSTANDING_TASKS.md updated with recent changes (2025-01-07)
+- CLAUDE.md updated with modular structure and new API (2025-11-19)
+- README.md updated with refactoring note and new API examples (2025-11-24)
+- API_REFERENCE.md updated with new initialization parameters (2025-11-10)
+- QUICKSTART_MULTIMODAL.md updated with new API examples (2025-11-10)
+- ARCHITECTURE.md updated with new parameter references (2025-11-10)
+- INITIALIZATION.md updated with new API examples (2025-11-07)
+- OUTSTANDING_TASKS.md updated with recent changes (2025-12-12)
+- HILL_FUNCTION_PRIORS.md documents all Hill priors (2025-11-26)
+- TECHNICAL_CORRECTION_IN_PRIORS.md archived (2025-12-12)
+- Repository cleanup and documentation archiving (2025-12-12)
 
 **What's Needed**:
 - Add comprehensive API reference for all public methods
@@ -239,22 +254,31 @@ model = bayesDREAM(
 
 ## Completed Recently ✓
 
-- ✅ Modular refactoring (reduced model.py from 4537 to 311 lines)
-- ✅ Delegation pattern for fitters, savers, loaders
-- ✅ Multi-modal infrastructure
-- ✅ Distribution registry system
-- ✅ Per-modality save/load
-- ✅ Test cleanup and updates
-- ✅ Import fixes in trans.py (find_beta, Hill_based_positive, etc.)
-- ✅ Model-level posterior_samples_trans storage fix
-- ✅ Multinomial per-group zero-category masking (2025-01-05)
-- ✅ Binomial per-group boundary checking (2025-01-05)
-- ✅ Empirical Bayes initialization for binomial and multinomial (2025-01-04)
-- ✅ Feature_names preservation bug fix in get_cell_subset() (2025-01-07)
-- ✅ Plotting double-subsetting bug fix in xy_plots.py (2025-01-07)
-- ✅ API refactoring: modality_name, feature_meta, guide_covariates parameters (2025-01-07)
-- ✅ Generic negbinom modality creation - ATAC/custom as primary now supported (2025-01-07)
-- ✅ Documentation updates for new API across 5 major docs (2025-01-07)
+- ✅ Binomial/multinomial trans fitting bug fixes (2025-12-12)
+  - Fixed critical alpha_y_full construction (ones → zeros)
+  - Fixed Hill function plotting for binomial/multinomial
+  - Enabled multinomial technical correction
+  - Fixed losses_trans storage on model/modality objects
+- ✅ Repository cleanup and documentation archiving (2025-12-12)
+  - Moved historical technical docs to docs/archive/technical/
+  - Deleted legacy environment.yml
+  - Updated documentation index
+- ✅ Technical correction in trans priors (2025-11-27)
+  - Apply inverse correction before computing guide means for A/Vmax priors
+  - Prevents biased priors from confounding technical and biological variation
+- ✅ Modular refactoring (2025-10-22)
+  - Reduced model.py from 4537 to 311 lines
+  - Delegation pattern for fitters, savers, loaders
+  - Multi-modal infrastructure
+  - Distribution registry system
+  - Per-modality save/load
+- ✅ API refactoring (2025-11-07)
+  - modality_name, feature_meta, guide_covariates parameters
+  - Generic negbinom modality creation - ATAC/custom as primary now supported
+  - Documentation updates for new API across major docs
+- ✅ Empirical Bayes initialization for binomial and multinomial (2025-11-04)
+- ✅ Multinomial per-group zero-category masking (2025-11-05)
+- ✅ Binomial per-group boundary checking (2025-11-05)
 
 ---
 
