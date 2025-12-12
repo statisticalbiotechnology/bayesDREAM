@@ -161,22 +161,27 @@ def test_summary_export_simple():
 
         model.function_type = 'additive_hill'
 
-        # params_pos should be [n_samples, n_features, 3] where last dim is [B, K, xc]
-        # Legacy format: params_pos/params_neg (backwards compatibility)
-        params_pos = torch.zeros((n_samples, n_features_trans, 3), device=model.device)
-        params_pos[:, :, 0] = torch.randn((n_samples, n_features_trans), device=model.device)  # Vmax
-        params_pos[:, :, 1] = torch.abs(torch.randn((n_samples, n_features_trans), device=model.device)) + 1.5  # n
-        params_pos[:, :, 2] = torch.randn((n_samples, n_features_trans), device=model.device) + 5  # EC50
+        # Individual parameter format (actual architecture)
+        # Component A
+        Vmax_a = torch.randn((n_samples, n_features_trans), device=model.device)
+        K_a = torch.randn((n_samples, n_features_trans), device=model.device) + 5  # EC50
+        n_a = torch.abs(torch.randn((n_samples, n_features_trans), device=model.device)) + 1.5  # Hill coefficient
 
-        params_neg = torch.zeros((n_samples, n_features_trans, 3), device=model.device)
-        params_neg[:, :, 0] = torch.randn((n_samples, n_features_trans), device=model.device)  # Vmax
-        params_neg[:, :, 1] = torch.abs(torch.randn((n_samples, n_features_trans), device=model.device)) + 1.5  # n
-        params_neg[:, :, 2] = torch.randn((n_samples, n_features_trans), device=model.device) + 5  # EC50
+        # Component B
+        Vmax_b = torch.randn((n_samples, n_features_trans), device=model.device)
+        K_b = torch.randn((n_samples, n_features_trans), device=model.device) + 5  # EC50
+        n_b = torch.abs(torch.randn((n_samples, n_features_trans), device=model.device)) + 1.5  # Hill coefficient
 
         model.posterior_samples_trans = {
-            'params_pos': params_pos,
-            'params_neg': params_neg,
-            'pi_y': torch.rand((n_samples, n_features_trans), device=model.device) * 0.5 + 0.5
+            'Vmax_a': Vmax_a,
+            'K_a': K_a,
+            'n_a': n_a,
+            'Vmax_b': Vmax_b,
+            'K_b': K_b,
+            'n_b': n_b,
+            'pi_y': torch.rand((n_samples, n_features_trans), device=model.device) * 0.5 + 0.5,
+            'alpha': torch.rand((n_features_trans,), device=model.device),
+            'beta': torch.rand((n_features_trans,), device=model.device)
         }
 
         # Export trans summary

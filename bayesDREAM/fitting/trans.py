@@ -329,8 +329,8 @@ class TransFitter:
 
                 if distribution in ['binomial', 'multinomial']:
                     # For binomial/multinomial: Vmax_sum from Beta/Dirichlet reparameterization
-                    # (Vmax_sum already computed from upper_limit - A, no need to register again)
-                    Vmax_a = Vmax_sum  # [T] or [T, K]
+                    # Both Hill components share the same amplitude (Vmax_sum)
+                    Vmax_a = pyro.deterministic("Vmax_a", Vmax_sum)  # [T] or [T, K]
 
                     # K_a: unified Log-Normal
                     if distribution == 'multinomial' and K is not None:
@@ -405,7 +405,7 @@ class TransFitter:
                     if distribution in ['binomial', 'multinomial']:
                         # For binomial/multinomial: SAME Vmax_sum for both Hills
                         # y = A + Vmax_sum * (alpha * Hill_a + beta * Hill_b)
-                        Vmax_b = Vmax_sum  # Same as Vmax_a
+                        Vmax_b = pyro.deterministic("Vmax_b", Vmax_sum)  # Same as Vmax_a
 
                         # K_b: unified Log-Normal (same parameterization as K_a)
                         if distribution == 'multinomial' and K is not None:

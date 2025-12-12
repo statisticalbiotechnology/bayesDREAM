@@ -352,17 +352,16 @@ class ModelSummarizer:
 
         # Determine function type from posterior keys
         if 'Vmax_a' in posterior and 'Vmax_b' in posterior:
-            # New individual parameter architecture
-            function_type = 'additive_hill'
-        elif 'params_pos' in posterior and 'params_neg' in posterior:
-            # Legacy composite parameter architecture
             function_type = 'additive_hill'
         elif 'params' in posterior:
             function_type = 'single_hill'
         elif 'poly_coefs' in posterior:
             function_type = 'polynomial'
         else:
-            raise ValueError("Cannot determine function_type from posterior_samples_trans keys")
+            raise ValueError(
+                f"Cannot determine function_type from posterior_samples_trans keys. "
+                f"Found: {list(posterior.keys())}"
+            )
 
         # Initialize DataFrame with basic info
         data = {
@@ -447,21 +446,21 @@ class ModelSummarizer:
         """
         Add additive Hill parameters to data dict.
 
-        Supports two architectures:
-        1. New individual parameter architecture: Vmax_a, K_a (EC50), n_a, Vmax_b, K_b, n_b
-        2. Legacy composite architecture: params_pos, params_neg
+        Uses individual parameter architecture: Vmax_a, K_a (EC50), n_a, Vmax_b, K_b, n_b.
 
-        Exports with _a/_b naming (component A and B) instead of _pos/_neg.
+        For binomial/multinomial: Vmax_a and Vmax_b both equal Vmax_sum (shared amplitude),
+        with actual magnitudes determined by alpha and beta weights.
+
+        For negbinom/normal/studentt: Vmax_a and Vmax_b are independent magnitudes.
         """
-        # Check architecture
-        if 'Vmax_a' in posterior:
-            # New individual parameter architecture
-            return self._add_additive_hill_params_individual(data, posterior, n_features, compute_inflection, compute_full_log2fc)
-        elif 'params_pos' in posterior:
-            # Legacy composite parameter architecture
-            return self._add_additive_hill_params_legacy(data, posterior, n_features, compute_inflection, compute_full_log2fc)
-        else:
-            raise ValueError("Cannot find additive Hill parameters in posterior. Expected 'Vmax_a'/'Vmax_b' or 'params_pos'/'params_neg'")
+        # All additive Hill models use individual parameters (Vmax_a, K_a, n_a, etc.)
+        if 'Vmax_a' not in posterior:
+            raise ValueError(
+                f"Cannot find additive Hill parameters in posterior. Expected 'Vmax_a', 'K_a', 'n_a', etc. "
+                f"Found keys: {list(posterior.keys())}"
+            )
+
+        return self._add_additive_hill_params_individual(data, posterior, n_features, compute_inflection, compute_full_log2fc)
 
     def _add_additive_hill_params_individual(self, data, posterior, n_features, compute_inflection, compute_full_log2fc):
         """Add additive Hill parameters from individual parameter architecture (Vmax_a, K_a, n_a, etc.)."""
@@ -562,143 +561,6 @@ class ModelSummarizer:
         if compute_full_log2fc:
             # Full effect = Vmax_a + Vmax_b (total amplitude)
             full_log2fc_mean = Vmax_a_mean + Vmax_b_mean
-            full_log2fc_lower = Vmax_a_lower + Vmax_b_lower
-            full_log2fc_upper = Vmax_a_upper + Vmax_b_upper
-
-            data['full_log2fc_mean'] = full_log2fc_mean
-            data['full_log2fc_lower'] = full_log2fc_lower
-            data['full_log2fc_upper'] = full_log2fc_upper
-
-        return data
-
-    def _add_additive_hill_params_legacy(self, data, posterior, n_features, compute_inflection, compute_full_log2fc):
-        """
-        Add additive Hill parameters from legacy composite architecture (params_pos, params_neg).
-
-        This method maintains backwards compatibility with older code that used composite parameters.
-        New exports will use _a/_b naming, but this preserves the old params_pos/params_neg structure.
-        """
-        # Component A (legacy "positive" Hill)
-        params_a = posterior['params_pos']  # [n_samples, n_features, 3] or [n_features, 3]
-        if isinstance(params_a, torch.Tensor):
-            params_a = params_a.cpu().numpy()
-
-        if params_a.ndim == 3:
-            # Posterior samples
-            Vmax_a_mean = params_a[:, :, 0].mean(axis=0)
-            Vmax_a_lower = np.quantile(params_a[:, :, 0], 0.025, axis=0)
-            Vmax_a_upper = np.quantile(params_a[:, :, 0], 0.975, axis=0)
-
-            n_a_mean = params_a[:, :, 1].mean(axis=0)
-            n_a_lower = np.quantile(params_a[:, :, 1], 0.025, axis=0)
-            n_a_upper = np.quantile(params_a[:, :, 1], 0.975, axis=0)
-
-            EC50_a_mean = params_a[:, :, 2].mean(axis=0)
-            EC50_a_lower = np.quantile(params_a[:, :, 2], 0.025, axis=0)
-            EC50_a_upper = np.quantile(params_a[:, :, 2], 0.975, axis=0)
-        else:
-            # Point estimate
-            Vmax_a_mean = params_a[:, 0]
-            Vmax_a_lower = Vmax_a_mean
-            Vmax_a_upper = Vmax_a_mean
-
-            n_a_mean = params_a[:, 1]
-            n_a_lower = n_a_mean
-            n_a_upper = n_a_mean
-
-            EC50_a_mean = params_a[:, 2]
-            EC50_a_lower = EC50_a_mean
-            EC50_a_upper = EC50_a_mean
-
-        data['Vmax_a_mean'] = Vmax_a_mean
-        data['Vmax_a_lower'] = Vmax_a_lower
-        data['Vmax_a_upper'] = Vmax_a_upper
-        data['n_a_mean'] = n_a_mean
-        data['n_a_lower'] = n_a_lower
-        data['n_a_upper'] = n_a_upper
-        data['EC50_a_mean'] = EC50_a_mean
-        data['EC50_a_lower'] = EC50_a_lower
-        data['EC50_a_upper'] = EC50_a_upper
-
-        # Component B (legacy "negative" Hill)
-        params_b = posterior['params_neg']
-        if isinstance(params_b, torch.Tensor):
-            params_b = params_b.cpu().numpy()
-
-        if params_b.ndim == 3:
-            Vmax_b_mean = params_b[:, :, 0].mean(axis=0)
-            Vmax_b_lower = np.quantile(params_b[:, :, 0], 0.025, axis=0)
-            Vmax_b_upper = np.quantile(params_b[:, :, 0], 0.975, axis=0)
-
-            n_b_mean = params_b[:, :, 1].mean(axis=0)
-            n_b_lower = np.quantile(params_b[:, :, 1], 0.025, axis=0)
-            n_b_upper = np.quantile(params_b[:, :, 1], 0.975, axis=0)
-
-            EC50_b_mean = params_b[:, :, 2].mean(axis=0)
-            EC50_b_lower = np.quantile(params_b[:, :, 2], 0.025, axis=0)
-            EC50_b_upper = np.quantile(params_b[:, :, 2], 0.975, axis=0)
-        else:
-            Vmax_b_mean = params_b[:, 0]
-            Vmax_b_lower = Vmax_b_mean
-            Vmax_b_upper = Vmax_b_mean
-
-            n_b_mean = params_b[:, 1]
-            n_b_lower = n_b_mean
-            n_b_upper = n_b_mean
-
-            EC50_b_mean = params_b[:, 2]
-            EC50_b_lower = EC50_b_mean
-            EC50_b_upper = EC50_b_mean
-
-        data['Vmax_b_mean'] = Vmax_b_mean
-        data['Vmax_b_lower'] = Vmax_b_lower
-        data['Vmax_b_upper'] = Vmax_b_upper
-        data['n_b_mean'] = n_b_mean
-        data['n_b_lower'] = n_b_lower
-        data['n_b_upper'] = n_b_upper
-        data['EC50_b_mean'] = EC50_b_mean
-        data['EC50_b_lower'] = EC50_b_lower
-        data['EC50_b_upper'] = EC50_b_upper
-
-        # Pi_y (sparsity weight)
-        if 'pi_y' in posterior:
-            pi_y = posterior['pi_y']
-            if isinstance(pi_y, torch.Tensor):
-                pi_y = pi_y.cpu().numpy()
-
-            if pi_y.ndim == 2:
-                pi_y_mean = pi_y.mean(axis=0)
-                pi_y_lower = np.quantile(pi_y, 0.025, axis=0)
-                pi_y_upper = np.quantile(pi_y, 0.975, axis=0)
-            else:
-                pi_y_mean = pi_y
-                pi_y_lower = pi_y
-                pi_y_upper = pi_y
-
-            data['pi_y_mean'] = pi_y_mean
-            data['pi_y_lower'] = pi_y_lower
-            data['pi_y_upper'] = pi_y_upper
-
-        # Compute inflection points
-        if compute_inflection:
-            inflection_a_mean = self._compute_hill_inflection(n_a_mean, EC50_a_mean)
-            inflection_a_lower = self._compute_hill_inflection(n_a_lower, EC50_a_lower)
-            inflection_a_upper = self._compute_hill_inflection(n_a_upper, EC50_a_upper)
-
-            inflection_b_mean = self._compute_hill_inflection(n_b_mean, EC50_b_mean)
-            inflection_b_lower = self._compute_hill_inflection(n_b_lower, EC50_b_lower)
-            inflection_b_upper = self._compute_hill_inflection(n_b_upper, EC50_b_upper)
-
-            data['inflection_a_mean'] = inflection_a_mean
-            data['inflection_a_lower'] = inflection_a_lower
-            data['inflection_a_upper'] = inflection_a_upper
-            data['inflection_b_mean'] = inflection_b_mean
-            data['inflection_b_lower'] = inflection_b_lower
-            data['inflection_b_upper'] = inflection_b_upper
-
-        # Compute full log2FC
-        if compute_full_log2fc:
-            full_log2fc_mean = Vmax_a_mean + Vmax_b_mean  # Total effect magnitude
             full_log2fc_lower = Vmax_a_lower + Vmax_b_lower
             full_log2fc_upper = Vmax_a_upper + Vmax_b_upper
 
