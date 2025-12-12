@@ -162,15 +162,16 @@ def test_summary_export_simple():
         model.function_type = 'additive_hill'
 
         # params_pos should be [n_samples, n_features, 3] where last dim is [B, K, xc]
+        # Legacy format: params_pos/params_neg (backwards compatibility)
         params_pos = torch.zeros((n_samples, n_features_trans, 3), device=model.device)
-        params_pos[:, :, 0] = torch.randn((n_samples, n_features_trans), device=model.device)  # B
-        params_pos[:, :, 1] = torch.abs(torch.randn((n_samples, n_features_trans), device=model.device)) + 1.5  # K
-        params_pos[:, :, 2] = torch.randn((n_samples, n_features_trans), device=model.device) + 5  # xc
+        params_pos[:, :, 0] = torch.randn((n_samples, n_features_trans), device=model.device)  # Vmax
+        params_pos[:, :, 1] = torch.abs(torch.randn((n_samples, n_features_trans), device=model.device)) + 1.5  # n
+        params_pos[:, :, 2] = torch.randn((n_samples, n_features_trans), device=model.device) + 5  # EC50
 
         params_neg = torch.zeros((n_samples, n_features_trans, 3), device=model.device)
-        params_neg[:, :, 0] = torch.randn((n_samples, n_features_trans), device=model.device)  # B
-        params_neg[:, :, 1] = torch.abs(torch.randn((n_samples, n_features_trans), device=model.device)) + 1.5  # K
-        params_neg[:, :, 2] = torch.randn((n_samples, n_features_trans), device=model.device) + 5  # xc
+        params_neg[:, :, 0] = torch.randn((n_samples, n_features_trans), device=model.device)  # Vmax
+        params_neg[:, :, 1] = torch.abs(torch.randn((n_samples, n_features_trans), device=model.device)) + 1.5  # n
+        params_neg[:, :, 2] = torch.randn((n_samples, n_features_trans), device=model.device) + 5  # EC50
 
         model.posterior_samples_trans = {
             'params_pos': params_pos,

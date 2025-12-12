@@ -171,15 +171,17 @@ model.save_trans_summary(
 - `observed_log2fc_se`: Standard error of observed log2FC
 
 **Additive Hill parameters:**
-- `B_pos_mean`, `B_pos_lower`, `B_pos_upper`: Positive Hill magnitude
-- `K_pos_mean`, `K_pos_lower`, `K_pos_upper`: Positive Hill coefficient
-- `EC50_pos_mean`, `EC50_pos_lower`, `EC50_pos_upper`: Positive Hill EC50
-- `B_neg_mean`, `B_neg_lower`, `B_neg_upper`: Negative Hill magnitude
-- `K_neg_mean`, `K_neg_lower`, `K_neg_upper`: Negative Hill coefficient
-- `IC50_neg_mean`, `IC50_neg_lower`, `IC50_neg_upper`: Negative Hill IC50
-- `pi_y_mean`, `pi_y_lower`, `pi_y_upper`: Sparsity weight
-- `inflection_pos_mean`, `inflection_pos_lower`, `inflection_pos_upper`: Positive inflection x
-- `inflection_neg_mean`, `inflection_neg_lower`, `inflection_neg_upper`: Negative inflection x
+- `Vmax_a_mean`, `Vmax_a_lower`, `Vmax_a_upper`: Component A magnitude
+- `EC50_a_mean`, `EC50_a_lower`, `EC50_a_upper`: Component A half-max point
+- `n_a_mean`, `n_a_lower`, `n_a_upper`: Component A Hill coefficient (cooperativity)
+- `Vmax_b_mean`, `Vmax_b_lower`, `Vmax_b_upper`: Component B magnitude
+- `EC50_b_mean`, `EC50_b_lower`, `EC50_b_upper`: Component B half-max point
+- `n_b_mean`, `n_b_lower`, `n_b_upper`: Component B Hill coefficient (cooperativity)
+- `pi_y_mean`, `pi_y_lower`, `pi_y_upper`: Sparsity weight (optional)
+- `alpha_mean`, `alpha_lower`, `alpha_upper`: Component A weight (optional)
+- `beta_mean`, `beta_lower`, `beta_upper`: Component B weight (optional)
+- `inflection_a_mean`, `inflection_a_lower`, `inflection_a_upper`: Component A inflection x
+- `inflection_b_mean`, `inflection_b_lower`, `inflection_b_upper`: Component B inflection x
 - `full_log2fc_mean`, `full_log2fc_lower`, `full_log2fc_upper`: Full dynamic range
 
 **Single Hill parameters:**

@@ -486,13 +486,15 @@ if hasattr(model, 'posterior_samples_trans'):
     # Available parameters depend on function_type
     # For 'additive_hill':
     print(posterior.keys())
-    # ['params_pos', 'params_neg', 'pi_y', ...]
+    # ['Vmax_a', 'K_a', 'n_a', 'Vmax_b', 'K_b', 'n_b', 'pi_y', 'alpha', 'beta', ...]
 
-    # Get positive Hill parameters
-    params_pos = posterior['params_pos']  # (n_trans_genes, 3) for [B, K, EC50]
-    print(f"B (magnitude): {params_pos[:, 0]}")
-    print(f"K (Hill coefficient): {params_pos[:, 1]}")
-    print(f"EC50: {params_pos[:, 2]}")
+    # Get component A Hill parameters
+    Vmax_a = posterior['Vmax_a']  # (n_trans_genes,) - magnitude
+    EC50_a = posterior['K_a']  # (n_trans_genes,) - half-max point
+    n_a = posterior['n_a']  # (n_trans_genes,) - Hill coefficient
+    print(f"Component A Vmax (magnitude): {Vmax_a}")
+    print(f"Component A EC50 (half-max): {EC50_a}")
+    print(f"Component A n (Hill coefficient): {n_a}")
 ```
 
 ---
@@ -508,9 +510,9 @@ x_true_mean = x_true_samples.mean(dim=0)  # Mean across samples
 x_true_std = x_true_samples.std(dim=0)    # Std across samples
 
 # Trans posterior (additive_hill)
-params_pos = model.posterior_samples_trans['params_pos']  # (n_samples, n_genes, 3)
-B_mean = params_pos[:, :, 0].mean(dim=0)  # Mean B across samples
-B_std = params_pos[:, :, 0].std(dim=0)    # Std B across samples
+Vmax_a = model.posterior_samples_trans['Vmax_a']  # (n_samples, n_genes)
+Vmax_a_mean = Vmax_a.mean(dim=0)  # Mean Vmax_a across samples
+Vmax_a_std = Vmax_a.std(dim=0)    # Std Vmax_a across samples
 ```
 
 ### Credible Intervals
@@ -550,7 +552,7 @@ posteriors = torch.load('posteriors.pt')
 ### Reconstruct Predictions
 
 ```python
-from bayesDREAM import Hill_based_positive, Hill_based_negative
+import torch
 
 # For additive Hill model
 x_grid = torch.linspace(
@@ -559,14 +561,23 @@ x_grid = torch.linspace(
     100
 )
 
-params_pos = model.posterior_samples_trans['params_pos'].mean(dim=0)  # (n_genes, 3)
-params_neg = model.posterior_samples_trans['params_neg'].mean(dim=0)
+# Get mean parameters for component A and B
+Vmax_a_mean = model.posterior_samples_trans['Vmax_a'].mean(dim=0)  # (n_genes,)
+EC50_a_mean = model.posterior_samples_trans['K_a'].mean(dim=0)
+n_a_mean = model.posterior_samples_trans['n_a'].mean(dim=0)
+
+Vmax_b_mean = model.posterior_samples_trans['Vmax_b'].mean(dim=0)
+EC50_b_mean = model.posterior_samples_trans['K_b'].mean(dim=0)
+n_b_mean = model.posterior_samples_trans['n_b'].mean(dim=0)
 
 # Predict for first gene
 gene_idx = 0
-y_pos = Hill_based_positive(x_grid, params_pos[gene_idx])
-y_neg = Hill_based_negative(x_grid, params_neg[gene_idx])
-y_pred = y_pos + y_neg
+# Component A
+Hill_a = Vmax_a_mean[gene_idx] * (x_grid ** n_a_mean[gene_idx]) / (EC50_a_mean[gene_idx] ** n_a_mean[gene_idx] + x_grid ** n_a_mean[gene_idx])
+# Component B
+Hill_b = Vmax_b_mean[gene_idx] * (x_grid ** n_b_mean[gene_idx]) / (EC50_b_mean[gene_idx] ** n_b_mean[gene_idx] + x_grid ** n_b_mean[gene_idx])
+# Total effect
+y_pred = Hill_a + Hill_b
 
 # Plot
 import matplotlib.pyplot as plt
