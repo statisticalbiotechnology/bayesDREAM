@@ -655,28 +655,54 @@ class TransFitter:
 
         # Prepare alpha_y_full (full C technical groups, including reference)
         # This will be passed to samplers, which apply technical groups themselves
-        # Note: Multinomial sampler doesn't currently support technical groups, skip for now
-        if alpha_y is not None and groups_tensor is not None and distribution != 'multinomial':
+        # Multinomial now supported (additive on logit scale, like binomial)
+        if alpha_y is not None and groups_tensor is not None:
             # CRITICAL: Check if alpha_y already includes reference group
             # If alpha_y.shape[0 or 1] == C, it already has reference, don't add it!
-            if alpha_y.dim() == 3:  # Predictive: Could be (S, C-1, T) or (S, C, T)
+
+            if alpha_y.dim() == 4:  # Predictive multinomial: Could be (S, C-1, T, K) or (S, C, T, K)
                 if alpha_y.shape[1] == C:
                     # Already includes reference
                     alpha_y_full = alpha_y
                 else:
-                    # Need to add reference (should be zeros for additive, ones for multiplicative)
-                    ones_shape = (alpha_y.shape[0], 1, T)
-                    if distribution == 'negbinom':
-                        baseline = torch.ones(ones_shape, device=self.model.device)
-                    else:
-                        baseline = torch.zeros(ones_shape, device=self.model.device)
+                    # Need to add reference (zeros for additive on logit scale)
+                    baseline_shape = (alpha_y.shape[0], 1, alpha_y.shape[2], alpha_y.shape[3])
+                    baseline = torch.zeros(baseline_shape, device=self.model.device)
                     alpha_y_full = torch.cat([baseline, alpha_y], dim=1)
-            elif alpha_y.dim() == 2:  # Training: Could be (C-1, T) or (C, T)
+
+            elif alpha_y.dim() == 3:
+                # Could be Predictive 2D (S, C-1, T) or Training multinomial (C-1, T, K) or (C, T, K)
+                # Check if last dimension matches K (multinomial) or T (2D predictive)
+                if distribution == 'multinomial' and K is not None and alpha_y.shape[-1] == K:
+                    # Training multinomial: (C-1, T, K) or (C, T, K)
+                    if alpha_y.shape[0] == C:
+                        # Already includes reference
+                        alpha_y_full = alpha_y
+                    else:
+                        # Need to add reference (zeros for additive on logit scale)
+                        baseline_shape = (1, alpha_y.shape[1], alpha_y.shape[2])
+                        baseline = torch.zeros(baseline_shape, device=self.model.device)
+                        alpha_y_full = torch.cat([baseline, alpha_y], dim=0)
+                else:
+                    # Predictive 2D: (S, C-1, T) or (S, C, T)
+                    if alpha_y.shape[1] == C:
+                        # Already includes reference
+                        alpha_y_full = alpha_y
+                    else:
+                        # Need to add reference (zeros for additive, ones for multiplicative)
+                        ones_shape = (alpha_y.shape[0], 1, T)
+                        if distribution == 'negbinom':
+                            baseline = torch.ones(ones_shape, device=self.model.device)
+                        else:
+                            baseline = torch.zeros(ones_shape, device=self.model.device)
+                        alpha_y_full = torch.cat([baseline, alpha_y], dim=1)
+
+            elif alpha_y.dim() == 2:  # Training 2D: Could be (C-1, T) or (C, T)
                 if alpha_y.shape[0] == C:
                     # Already includes reference
                     alpha_y_full = alpha_y
                 else:
-                    # Need to add reference (should be zeros for additive, ones for multiplicative)
+                    # Need to add reference (zeros for additive, ones for multiplicative)
                     ones_shape = (1, T)
                     if distribution == 'negbinom':
                         baseline = torch.ones(ones_shape, device=self.model.device)
@@ -755,7 +781,7 @@ class TransFitter:
             observation_sampler(
                 y_obs_tensor=y_obs_tensor,
                 mu_y=mu_y,  # Should be [N, T, K] probabilities
-                alpha_y_full=alpha_y_full,  # Currently None for multinomial (not yet implemented)
+                alpha_y_full=alpha_y_full,  # [C, T, K] or [S, C, T, K] - additive on logit scale
                 groups_tensor=groups_tensor,
                 N=N,
                 T=T,
