@@ -172,18 +172,25 @@ model = bayesDREAM(
 
 ## Low Priority / Future Work
 
-### 4. Polynomial Degree Configuration
+### 4. ~~Polynomial Degree Configuration~~ ✅ COMPLETED
 
-**Status**: Hardcoded, should be configurable
+**Status**: ✅ Already implemented
 
-**Location**: `bayesDREAM/fitting/trans.py` line 344
+**Location**: `bayesDREAM/fitting/trans.py` line 839
 
-**Description**: Polynomial degree is currently hardcoded to 6. Should be a user-configurable parameter.
+**Description**: Polynomial degree is configurable via `polynomial_degree` parameter in `fit_trans()` with default value of 6.
 
-**What's Needed**:
-- Expose `polynomial_degree` parameter in `fit_trans()`
-- Update documentation
-- Add tests for different polynomial degrees
+**Usage**:
+```python
+model.fit_trans(
+    sum_factor_col='sum_factor',
+    function_type='polynomial',
+    polynomial_degree=8  # Change from default of 6
+)
+```
+
+**What's Still Needed**:
+- Add tests for different polynomial degrees in test suite
 
 ---
 
