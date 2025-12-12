@@ -102,9 +102,9 @@ For multinomial distributions, observed counts [N, T, K] are normalized by the t
 
 **Technical Correction:**
 ```
-Not yet implemented for multinomial
+log(p_final[k]) = log(p_baseline[k]) + alpha_y[group, k]
 ```
-(Currently no technical group correction for multinomial distributions)
+Applied on log scale for each category k, similar to binomial logit correction. Implemented in commit 59f08d9 (December 2025).
 
 ---
 

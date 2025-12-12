@@ -532,6 +532,259 @@ model.fit_trans(
 
 ---
 
+### Save/Load Methods
+
+#### save_technical_fit()
+
+```python
+model.save_technical_fit(
+    file_path=None,
+    modalities=None,
+    metadata=None
+)
+```
+
+Save technical fitting results to HDF5 file.
+
+**Parameters:**
+- `file_path` (str, optional): Custom save path. Defaults to `{output_dir}/{label}/technical_fit.h5`
+- `modalities` (list, optional): Modalities to save. Defaults to all with technical fits
+- `metadata` (dict, optional): Additional metadata to store
+
+**Saves:**
+- Posterior samples for alpha_y (overdispersion)
+- Loss history
+- Modality-specific alpha_y parameters (mult/add)
+- Technical group information
+
+**Example:**
+```python
+model.save_technical_fit()
+# Saves to: ./output/my_run/technical_fit.h5
+```
+
+---
+
+#### load_technical_fit()
+
+```python
+model.load_technical_fit(
+    file_path=None,
+    modalities=None
+)
+```
+
+Load technical fitting results from HDF5 file.
+
+**Parameters:**
+- `file_path` (str, optional): Path to load from. Defaults to `{output_dir}/{label}/technical_fit.h5`
+- `modalities` (list, optional): Modalities to load. Defaults to all in file
+
+**Restores:**
+- `self.posterior_samples_technical`
+- `self.loss_technical`
+- `modality.alpha_y_prefit_mult` and `modality.alpha_y_prefit_add`
+
+**Example:**
+```python
+model.load_technical_fit()
+```
+
+---
+
+#### save_cis_fit()
+
+```python
+model.save_cis_fit(
+    file_path=None,
+    metadata=None
+)
+```
+
+Save cis fitting results to HDF5 file.
+
+**Parameters:**
+- `file_path` (str, optional): Custom save path. Defaults to `{output_dir}/{label}/cis_fit.h5`
+- `metadata` (dict, optional): Additional metadata
+
+**Saves:**
+- Posterior samples for x_true (cis expression per guide)
+- Posterior samples for cis model parameters
+- Loss history
+
+**Example:**
+```python
+model.save_cis_fit()
+```
+
+---
+
+#### load_cis_fit()
+
+```python
+model.load_cis_fit(
+    file_path=None
+)
+```
+
+Load cis fitting results from HDF5 file.
+
+**Parameters:**
+- `file_path` (str, optional): Path to load from
+
+**Restores:**
+- `self.x_true`
+- `self.posterior_samples_cis`
+- `self.loss_cis`
+
+**Example:**
+```python
+model.load_cis_fit()
+```
+
+---
+
+#### save_trans_fit()
+
+```python
+model.save_trans_fit(
+    file_path=None,
+    modalities=None,
+    suffix=None,
+    metadata=None
+)
+```
+
+Save trans fitting results to HDF5 file.
+
+**Parameters:**
+- `file_path` (str, optional): Custom save path. Defaults to `{output_dir}/{label}/trans_fit_{suffix}.h5`
+- `modalities` (list, optional): Modalities to save. Defaults to last fit modality
+- `suffix` (str, optional): Filename suffix (e.g., function type). Default: 'default'
+- `metadata` (dict, optional): Additional metadata
+
+**Saves:**
+- Posterior samples for dose-response parameters (A, K, n, etc.)
+- Loss history
+- Function type and modality information
+
+**Example:**
+```python
+# Save with descriptive suffix
+model.save_trans_fit(suffix='additive_hill')
+# Saves to: ./output/my_run/trans_fit_additive_hill.h5
+```
+
+---
+
+#### load_trans_fit()
+
+```python
+model.load_trans_fit(
+    file_path=None,
+    modalities=None,
+    suffix='default'
+)
+```
+
+Load trans fitting results from HDF5 file.
+
+**Parameters:**
+- `file_path` (str, optional): Path to load from
+- `modalities` (list, optional): Modalities to load
+- `suffix` (str): Filename suffix to load. Default: 'default'
+
+**Restores:**
+- `self.posterior_samples_trans`
+- `self.loss_trans`
+- Modality-specific posterior samples
+
+**Example:**
+```python
+model.load_trans_fit(suffix='additive_hill')
+```
+
+---
+
+#### save_technical_summary()
+
+```python
+model.save_technical_summary(
+    output_dir=None,
+    modalities=None
+)
+```
+
+Export technical fit results as CSV files for downstream analysis (e.g., R plotting).
+
+**Parameters:**
+- `output_dir` (str, optional): Directory for CSV files. Defaults to `{output_dir}/{label}/summaries/technical/`
+- `modalities` (list, optional): Modalities to export. Defaults to all with technical fits
+
+**Exports (per modality):**
+- `alpha_y_summary.csv`: Overdispersion parameter summaries (mean, SD, quantiles)
+- Modality-specific parameter files
+
+**Example:**
+```python
+model.save_technical_summary()
+```
+
+---
+
+#### save_cis_summary()
+
+```python
+model.save_cis_summary(
+    output_dir=None
+)
+```
+
+Export cis fit results as CSV files.
+
+**Parameters:**
+- `output_dir` (str, optional): Directory for CSV files. Defaults to `{output_dir}/{label}/summaries/cis/`
+
+**Exports:**
+- `x_true_summary.csv`: Cis expression summaries per guide
+
+**Example:**
+```python
+model.save_cis_summary()
+```
+
+---
+
+#### save_trans_summary()
+
+```python
+model.save_trans_summary(
+    output_dir=None,
+    modalities=None,
+    suffix='default'
+)
+```
+
+Export trans fit results as CSV files.
+
+**Parameters:**
+- `output_dir` (str, optional): Directory for CSV files. Defaults to `{output_dir}/{label}/summaries/trans_{suffix}/`
+- `modalities` (list, optional): Modalities to export. Defaults to last fit modality
+- `suffix` (str): Identifier for this fit. Default: 'default'
+
+**Exports (varies by function_type):**
+- `A_summary.csv`: Amplitude parameters
+- `K_summary.csv`: EC50/IC50 parameters
+- `n_summary.csv`: Hill coefficients
+- Feature metadata with statistical summaries
+
+**Example:**
+```python
+model.save_trans_summary(suffix='additive_hill')
+```
+
+---
+
 ### Utility Methods
 
 #### adjust_ntc_sum_factor()
