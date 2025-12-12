@@ -657,12 +657,32 @@ class TransFitter:
         # This will be passed to samplers, which apply technical groups themselves
         # Note: Multinomial sampler doesn't currently support technical groups, skip for now
         if alpha_y is not None and groups_tensor is not None and distribution != 'multinomial':
-            if alpha_y.dim() == 3:  # Predictive: (S, C-1, T)
-                ones_shape = (alpha_y.shape[0], 1, T)
-                alpha_y_full = torch.cat([torch.ones(ones_shape, device=self.model.device), alpha_y], dim=1)
-            elif alpha_y.dim() == 2:  # Training: (C-1, T)
-                ones_shape = (1, T)
-                alpha_y_full = torch.cat([torch.ones(ones_shape, device=self.model.device), alpha_y], dim=0)
+            # CRITICAL: Check if alpha_y already includes reference group
+            # If alpha_y.shape[0 or 1] == C, it already has reference, don't add it!
+            if alpha_y.dim() == 3:  # Predictive: Could be (S, C-1, T) or (S, C, T)
+                if alpha_y.shape[1] == C:
+                    # Already includes reference
+                    alpha_y_full = alpha_y
+                else:
+                    # Need to add reference (should be zeros for additive, ones for multiplicative)
+                    ones_shape = (alpha_y.shape[0], 1, T)
+                    if distribution == 'negbinom':
+                        baseline = torch.ones(ones_shape, device=self.model.device)
+                    else:
+                        baseline = torch.zeros(ones_shape, device=self.model.device)
+                    alpha_y_full = torch.cat([baseline, alpha_y], dim=1)
+            elif alpha_y.dim() == 2:  # Training: Could be (C-1, T) or (C, T)
+                if alpha_y.shape[0] == C:
+                    # Already includes reference
+                    alpha_y_full = alpha_y
+                else:
+                    # Need to add reference (should be zeros for additive, ones for multiplicative)
+                    ones_shape = (1, T)
+                    if distribution == 'negbinom':
+                        baseline = torch.ones(ones_shape, device=self.model.device)
+                    else:
+                        baseline = torch.zeros(ones_shape, device=self.model.device)
+                    alpha_y_full = torch.cat([baseline, alpha_y], dim=0)
             else:
                 raise ValueError(f"Unexpected alpha_y shape: {alpha_y.shape}")
         else:
@@ -1217,6 +1237,25 @@ class TransFitter:
                 y_obs_for_prior = torch.sigmoid(logit_baseline)
                 print(f"[INFO] binomial: Applied inverse logit correction (subtract alpha_y_add on logit scale)")
 
+                # DIAGNOSTIC: Check correction for specific feature
+                sj_check_idx = 1298  # User's specific SJ position
+                if sj_check_idx < T:
+                    # Get uncorrected values (observed PSI)
+                    y_uncorrected = y_obs_factored[:, sj_check_idx]
+
+                    # Get corrected values (baseline PSI)
+                    y_corrected = y_obs_for_prior[:, sj_check_idx]
+
+                    # Check by group
+                    print(f"[DEBUG] Checking inverse correction for feature {sj_check_idx} (chr6:34236964:34237203):")
+                    for grp in range(C):
+                        grp_mask = groups_tensor == grp
+                        if grp_mask.sum() > 0:
+                            uncorr_mean = y_uncorrected[grp_mask].mean().item()
+                            corr_mean = y_corrected[grp_mask].mean().item()
+                            alpha_val = alpha_y_prefit[grp, sj_check_idx].item() if alpha_y_prefit.ndim == 2 else alpha_y_prefit[0, grp, sj_check_idx].mean().item()
+                            print(f"  Group {grp} (n={grp_mask.sum()}): α={alpha_val:.4f}, Observed PSI={uncorr_mean:.4f}, Baseline PSI={corr_mean:.4f}")
+
             elif distribution == 'multinomial':
                 # Technical effect: log scale (log(probs_corrected) = log(probs) + alpha_y_add)
                 # Inverse: log(probs_baseline) = log(probs_observed) - alpha_y_add
@@ -1511,6 +1550,14 @@ class TransFitter:
         print("[DEBUG] Vmax_mean:", Vmax_mean_tensor.min().item(), Vmax_mean_tensor.max().item())
         print("[DEBUG] Mean within-guide variance:", mean_within_guide_var.min().item(), mean_within_guide_var.max().item())
         print("[DEBUG] x_true CV:", x_true_CV.item(), "K_max:", K_max_tensor.item())
+
+        # Diagnostic: Verify alpha_y_prefit is correctly structured
+        if alpha_y_prefit is not None and groups_tensor is not None:
+            print(f"[INFO] Technical correction setup: alpha_y_prefit.shape={alpha_y_prefit.shape}, C={C}")
+            if alpha_y_prefit.shape[0] == C if alpha_y_prefit.ndim == 2 else alpha_y_prefit.shape[1] == C:
+                print(f"[INFO] alpha_y_prefit already includes reference group (correct!)")
+            else:
+                print(f"[WARNING] alpha_y_prefit shape mismatch - may need to add reference group")
 
         # Ensure x_true is on the correct device (may have been loaded from CPU)
         if self.model.x_true.device != self.model.device:
@@ -1894,6 +1941,7 @@ class TransFitter:
         # Store results
         # Store in modality
         modality.posterior_samples_trans = posterior_samples_y
+        modality.losses_trans = self.losses_trans  # Store loss history
 
         # Update alpha_y_prefit in modality if it was None and alpha_y was sampled
         if modality.alpha_y_prefit is None and groups_tensor is not None and "alpha_y" in posterior_samples_y:
@@ -1903,6 +1951,7 @@ class TransFitter:
         # If primary modality, also store at model level (backward compatibility)
         if modality_name == self.model.primary_modality:
             self.model.posterior_samples_trans = posterior_samples_y
+            self.model.losses_trans = self.losses_trans  # Store loss history at model level
             if self.model.alpha_y_prefit is None and groups_tensor is not None and "alpha_y" in posterior_samples_y:
                 self.model.alpha_y_prefit = posterior_samples_y["alpha_y"].mean(dim=0)
             print(f"[INFO] Stored results in modality '{modality_name}' and at model level (primary modality)")
