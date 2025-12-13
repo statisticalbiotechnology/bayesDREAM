@@ -329,8 +329,15 @@ class TransFitter:
 
                 if distribution in ['binomial', 'multinomial']:
                     # For binomial/multinomial: Vmax_sum from Beta/Dirichlet reparameterization
-                    # Both Hill components share the same amplitude (Vmax_sum)
-                    Vmax_a = pyro.deterministic("Vmax_a", Vmax_sum)  # [T] or [T, K]
+                    # Actual magnitudes are Vmax_sum * alpha and Vmax_sum * beta
+                    # Note: alpha is sampled earlier (line 260), shape [T]
+                    # For multinomial, Vmax_sum is [T, K], so we need to broadcast
+                    if distribution == 'multinomial' and Vmax_sum.ndim > 1:
+                        # Vmax_sum is [T, K], alpha is [T] -> broadcast to [T, K]
+                        Vmax_a = pyro.deterministic("Vmax_a", Vmax_sum * alpha.unsqueeze(-1))  # [T, K]
+                    else:
+                        # Binomial: Vmax_sum is [T], alpha is [T] -> [T]
+                        Vmax_a = pyro.deterministic("Vmax_a", Vmax_sum * alpha)  # [T]
 
                     # K_a: unified Log-Normal
                     if distribution == 'multinomial' and K is not None:
@@ -403,9 +410,15 @@ class TransFitter:
 
                     # Vmax_b and K_b: UNIFIED priors (same as Vmax_a and K_a)
                     if distribution in ['binomial', 'multinomial']:
-                        # For binomial/multinomial: SAME Vmax_sum for both Hills
+                        # For binomial/multinomial: Actual magnitude is Vmax_sum * beta
                         # y = A + Vmax_sum * (alpha * Hill_a + beta * Hill_b)
-                        Vmax_b = pyro.deterministic("Vmax_b", Vmax_sum)  # Same as Vmax_a
+                        # Note: beta is sampled earlier (line 378), shape [T]
+                        if distribution == 'multinomial' and Vmax_sum.ndim > 1:
+                            # Vmax_sum is [T, K], beta is [T] -> broadcast to [T, K]
+                            Vmax_b = pyro.deterministic("Vmax_b", Vmax_sum * beta.unsqueeze(-1))  # [T, K]
+                        else:
+                            # Binomial: Vmax_sum is [T], beta is [T] -> [T]
+                            Vmax_b = pyro.deterministic("Vmax_b", Vmax_sum * beta)  # [T]
 
                         # K_b: unified Log-Normal (same parameterization as K_a)
                         if distribution == 'multinomial' and K is not None:

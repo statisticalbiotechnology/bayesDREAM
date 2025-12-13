@@ -299,17 +299,19 @@ class ModelSummarizer:
 
         For additive_hill:
         - Vmax_a_mean, Vmax_a_lower, Vmax_a_upper: Component A magnitude
+          (For binomial/multinomial: Vmax_sum * alpha; For negbinom/normal/studentt: independent)
         - EC50_a_mean, EC50_a_lower, EC50_a_upper: Component A half-max point
         - n_a_mean, n_a_lower, n_a_upper: Component A Hill coefficient (cooperativity)
         - Vmax_b_mean, Vmax_b_lower, Vmax_b_upper: Component B magnitude
+          (For binomial/multinomial: Vmax_sum * beta; For negbinom/normal/studentt: independent)
         - EC50_b_mean, EC50_b_lower, EC50_b_upper: Component B half-max point
         - n_b_mean, n_b_lower, n_b_upper: Component B Hill coefficient (cooperativity)
         - pi_y_mean, pi_y_lower, pi_y_upper: Sparsity weight (optional)
-        - alpha_mean, alpha_lower, alpha_upper: Component A weight (optional)
-        - beta_mean, beta_lower, beta_upper: Component B weight (optional)
+        - alpha_mean, alpha_lower, alpha_upper: Component A weight (optional, binomial/multinomial)
+        - beta_mean, beta_lower, beta_upper: Component B weight (optional, binomial/multinomial)
         - inflection_a_mean, inflection_a_lower, inflection_a_upper: Component A inflection x
         - inflection_b_mean, inflection_b_lower, inflection_b_upper: Component B inflection x
-        - full_log2fc_mean, full_log2fc_lower, full_log2fc_upper: Full dynamic range
+        - full_log2fc_mean, full_log2fc_lower, full_log2fc_upper: Full dynamic range (Vmax_a + Vmax_b)
 
         For single_hill:
         - B_mean, B_lower, B_upper: Hill magnitude
@@ -448,10 +450,14 @@ class ModelSummarizer:
 
         Uses individual parameter architecture: Vmax_a, K_a (EC50), n_a, Vmax_b, K_b, n_b.
 
-        For binomial/multinomial: Vmax_a and Vmax_b both equal Vmax_sum (shared amplitude),
-        with actual magnitudes determined by alpha and beta weights.
+        For binomial/multinomial:
+        - Vmax_a = Vmax_sum * alpha (effective magnitude for component A)
+        - Vmax_b = Vmax_sum * beta (effective magnitude for component B)
+        - Where Vmax_sum comes from Beta/Dirichlet prior
+        - Model: y = A + Vmax_sum * (alpha * Hill_a + beta * Hill_b)
 
-        For negbinom/normal/studentt: Vmax_a and Vmax_b are independent magnitudes.
+        For negbinom/normal/studentt:
+        - Vmax_a and Vmax_b are independent magnitudes sampled from log-normal priors
         """
         # All additive Hill models use individual parameters (Vmax_a, K_a, n_a, etc.)
         if 'Vmax_a' not in posterior:
