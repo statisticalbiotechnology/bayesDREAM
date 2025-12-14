@@ -327,31 +327,31 @@ class TransFitter:
                 K_log_sigma = torch.sqrt(torch.log1p(ratio_K ** 2))
                 K_log_mu = torch.log(K_mean_prior) - 0.5 * K_log_sigma ** 2
 
-                if distribution == 'multinomial':
-                    # For multinomial: Use Vmax_sum from Dirichlet reparameterization
-                    # Categories must sum to 1, so sharing Vmax_sum makes sense
-                    Vmax_a = pyro.deterministic("Vmax_a", Vmax_sum)  # [T, K]
-
-                    # K_a: Log-Normal
-                    if K is not None:
-                        K_minus_1 = K - 1
-                        with pyro.plate("category_plate_K_a", K_minus_1, dim=-1):
-                            log_K_a = pyro.sample("log_K_a", dist.Normal(K_log_mu, K_log_sigma))  # [T, K-1]
-                            K_a = pyro.deterministic("K_a", torch.exp(log_K_a))  # [T, K-1]
-
-                elif distribution == 'binomial':
-                    # For binomial: Sample Vmax_a INDEPENDENTLY (like BCD1C4F)
+                if distribution in ['binomial', 'multinomial']:
+                    # For binomial/multinomial: Sample Vmax_a INDEPENDENTLY (like BCD1C4F)
+                    # Even for multinomial, the Kth category is residual, so we can have independent Vmax
                     # This gives Vmax_a direct gradient signal, not mediated through alpha
                     # Avoids chicken-and-egg: alpha needs signal → signal needs Vmax → Vmax needs alpha
                     Vmax_mean_clamped = Vmax_mean_tensor.clamp(min=0.01, max=0.99)
                     concentration_vmax = self._t(10.0)
                     alpha_vmax = Vmax_mean_clamped * concentration_vmax
                     beta_vmax = (1 - Vmax_mean_clamped) * concentration_vmax
-                    Vmax_a = pyro.sample("Vmax_a", dist.Beta(alpha_vmax, beta_vmax))  # Independent!
 
-                    # K_a: Log-Normal (keeping 3D09BF1 improvement)
-                    log_K_a = pyro.sample("log_K_a", dist.Normal(K_log_mu, K_log_sigma))
-                    K_a = pyro.deterministic("K_a", torch.exp(log_K_a))
+                    if distribution == 'multinomial' and K is not None:
+                        # For multinomial: Sample Vmax_a for K-1 categories (Kth is residual)
+                        K_minus_1 = K - 1
+                        with pyro.plate("category_plate_Vmax_a", K_minus_1, dim=-1):
+                            Vmax_a = pyro.sample("Vmax_a", dist.Beta(alpha_vmax, beta_vmax))  # [T, K-1]
+
+                        # K_a: Log-Normal for K-1 categories
+                        with pyro.plate("category_plate_K_a", K_minus_1, dim=-1):
+                            log_K_a = pyro.sample("log_K_a", dist.Normal(K_log_mu, K_log_sigma))  # [T, K-1]
+                            K_a = pyro.deterministic("K_a", torch.exp(log_K_a))  # [T, K-1]
+                    else:
+                        # For binomial: per-feature Vmax_a and K_a
+                        Vmax_a = pyro.sample("Vmax_a", dist.Beta(alpha_vmax, beta_vmax))  # [T]
+                        log_K_a = pyro.sample("log_K_a", dist.Normal(K_log_mu, K_log_sigma))  # [T]
+                        K_a = pyro.deterministic("K_a", torch.exp(log_K_a))  # [T]
 
                 else:
                     # For negbinom/normal/studentt: Learn Vmax using Log-Normal with data-driven variance
@@ -411,24 +411,22 @@ class TransFitter:
                         )
 
                     # Vmax_b and K_b: same structure as Vmax_a and K_a
-                    if distribution == 'multinomial':
-                        # For multinomial: Use Vmax_sum from Dirichlet
-                        Vmax_b = pyro.deterministic("Vmax_b", Vmax_sum)  # [T, K]
-
-                        # K_b: Log-Normal
-                        if K is not None:
+                    if distribution in ['binomial', 'multinomial']:
+                        if distribution == 'multinomial' and K is not None:
+                            # For multinomial: Sample Vmax_b for K-1 categories (Kth is residual)
                             K_minus_1 = K - 1
+                            with pyro.plate("category_plate_Vmax_b", K_minus_1, dim=-1):
+                                Vmax_b = pyro.sample("Vmax_b", dist.Beta(alpha_vmax, beta_vmax))  # [T, K-1]
+
+                            # K_b: Log-Normal for K-1 categories
                             with pyro.plate("category_plate_K_b", K_minus_1, dim=-1):
                                 log_K_b = pyro.sample("log_K_b", dist.Normal(K_log_mu, K_log_sigma))  # [T, K-1]
                                 K_b = pyro.deterministic("K_b", torch.exp(log_K_b))  # [T, K-1]
-
-                    elif distribution == 'binomial':
-                        # For binomial: Sample Vmax_b INDEPENDENTLY (like BCD1C4F)
-                        Vmax_b = pyro.sample("Vmax_b", dist.Beta(alpha_vmax, beta_vmax))  # Independent!
-
-                        # K_b: Log-Normal
-                        log_K_b = pyro.sample("log_K_b", dist.Normal(K_log_mu, K_log_sigma))
-                        K_b = pyro.deterministic("K_b", torch.exp(log_K_b))
+                        else:
+                            # For binomial: per-feature Vmax_b and K_b
+                            Vmax_b = pyro.sample("Vmax_b", dist.Beta(alpha_vmax, beta_vmax))  # [T]
+                            log_K_b = pyro.sample("log_K_b", dist.Normal(K_log_mu, K_log_sigma))  # [T]
+                            K_b = pyro.deterministic("K_b", torch.exp(log_K_b))  # [T]
 
                     else:
                         # For negbinom/normal/studentt: Vmax_b and K_b use Log-Normal (same as Vmax_a and K_a)
@@ -443,11 +441,11 @@ class TransFitter:
                 # We compute: y = A + alpha * Hill + beta * Hill (for additive)
 
                 if distribution == 'multinomial' and K is not None:
-                    # NEW FORMULATION for multinomial:
-                    # A and Vmax_sum are K-dimensional (from Dirichlet, sum to 1)
-                    # Fit K-1 independent Hill functions
+                    # NEW FORMULATION for multinomial (matching binomial structure):
+                    # Sample A from Dirichlet (sum to 1)
+                    # Sample Vmax_a and Vmax_b INDEPENDENTLY for K-1 categories (Kth is residual)
                     # For each category k in K-1:
-                    #   y_k = A_k + Vmax_sum_k * (alpha * Hill_a_k + beta * Hill_b_k)
+                    #   y_k = A_k + (alpha * Hill_a_k(Vmax=Vmax_a_k)) + (beta * Hill_b_k(Vmax=Vmax_b_k))
                     # Then: y_K = 1 - sum(y_1, ..., y_{K-1})
                     # This ensures probabilities sum to 1, and Kth category gets whatever is left
 
@@ -455,38 +453,36 @@ class TransFitter:
                     K_minus_1 = K - 1
                     x_expanded = x_true.unsqueeze(-1)  # [N, 1]
 
-                    # A and Vmax_sum are [T, K] from Dirichlet
+                    # A is [T, K] from Dirichlet
                     # Extract K-1 for fitting Hills (Kth doesn't get a Hill function)
                     A_kminus1 = A[..., :K_minus_1]  # [T, K-1]
-                    Vmax_sum_kminus1 = Vmax_sum[..., :K_minus_1]  # [T, K-1]
 
                     # Expand for broadcasting
                     A_kminus1_expanded = A_kminus1.unsqueeze(0)  # [1, T, K-1]
-                    Vmax_sum_kminus1_expanded = Vmax_sum_kminus1.unsqueeze(0)  # [1, T, K-1]
 
                     if function_type == 'single_hill':
-                        # Compute Hills for K-1 categories
+                        # Compute Hills for K-1 categories using Vmax_a directly
                         Hilla_list = []
                         for k in range(K_minus_1):
-                            hill_k = Hill_based_positive(x_expanded, Vmax=self._t(1.0), A=0,
+                            hill_k = Hill_based_positive(x_expanded, Vmax=Vmax_a[:, k], A=0,
                                                         K=K_a[:, k], n=n_a[:, k],  # [T]
                                                         epsilon=epsilon_tensor)  # [N, T]
                             Hilla_list.append(hill_k.unsqueeze(-1))  # [N, T, 1]
                         Hilla_kminus1 = torch.cat(Hilla_list, dim=-1)  # [N, T, K-1]
 
-                        # Combine: y = A + Vmax_sum * alpha * Hill
+                        # Combine: y = A + alpha * Hill_a(Vmax=Vmax_a)
                         combined_hill = alpha.unsqueeze(0).unsqueeze(-1) * Hilla_kminus1  # [N, T, K-1]
-                        y_kminus1 = A_kminus1_expanded + Vmax_sum_kminus1_expanded * combined_hill  # [N, T, K-1]
+                        y_kminus1 = A_kminus1_expanded + combined_hill  # [N, T, K-1]
 
                     elif function_type == 'additive_hill':
-                        # Compute Hills for K-1 categories
+                        # Compute Hills for K-1 categories using Vmax_a and Vmax_b directly
                         Hilla_list = []
                         Hillb_list = []
                         for k in range(K_minus_1):
-                            hill_a_k = Hill_based_positive(x_expanded, Vmax=self._t(1.0), A=0,
+                            hill_a_k = Hill_based_positive(x_expanded, Vmax=Vmax_a[:, k], A=0,
                                                           K=K_a[:, k], n=n_a[:, k],  # [T]
                                                           epsilon=epsilon_tensor)  # [N, T]
-                            hill_b_k = Hill_based_positive(x_expanded, Vmax=self._t(1.0), A=0,
+                            hill_b_k = Hill_based_positive(x_expanded, Vmax=Vmax_b[:, k], A=0,
                                                           K=K_b[:, k], n=n_b[:, k],  # [T]
                                                           epsilon=epsilon_tensor)  # [N, T]
                             Hilla_list.append(hill_a_k.unsqueeze(-1))  # [N, T, 1]
@@ -494,26 +490,26 @@ class TransFitter:
                         Hilla_kminus1 = torch.cat(Hilla_list, dim=-1)  # [N, T, K-1]
                         Hillb_kminus1 = torch.cat(Hillb_list, dim=-1)  # [N, T, K-1]
 
-                        # Combine
+                        # Combine: y = A + (alpha * Hill_a) + (beta * Hill_b)
                         combined_hill = (alpha.unsqueeze(0).unsqueeze(-1) * Hilla_kminus1 +
                                        beta.unsqueeze(0).unsqueeze(-1) * Hillb_kminus1)  # [N, T, K-1]
-                        y_kminus1 = A_kminus1_expanded + Vmax_sum_kminus1_expanded * combined_hill  # [N, T, K-1]
+                        y_kminus1 = A_kminus1_expanded + combined_hill  # [N, T, K-1]
 
                     elif function_type == 'nested_hill':
-                        # Compute nested Hills for K-1 categories
+                        # Compute nested Hills for K-1 categories using Vmax_a and Vmax_b directly
                         Hillb_list = []
                         for k in range(K_minus_1):
-                            hill_a_k = Hill_based_positive(x_expanded, Vmax=self._t(1.0), A=0,
+                            hill_a_k = Hill_based_positive(x_expanded, Vmax=Vmax_a[:, k], A=0,
                                                           K=K_a[:, k], n=n_a[:, k],
                                                           epsilon=epsilon_tensor)  # [N, T]
-                            hill_b_k = Hill_based_positive(hill_a_k.unsqueeze(-1), Vmax=self._t(1.0), A=0,
+                            hill_b_k = Hill_based_positive(hill_a_k.unsqueeze(-1), Vmax=Vmax_b[:, k], A=0,
                                                           K=K_b[:, k], n=n_b[:, k],
                                                           epsilon=epsilon_tensor)  # [N, T]
                             Hillb_list.append(hill_b_k.unsqueeze(-1))  # [N, T, 1]
                         Hillb_kminus1 = torch.cat(Hillb_list, dim=-1)  # [N, T, K-1]
 
                         combined_hill = alpha.unsqueeze(0).unsqueeze(-1) * Hillb_kminus1  # [N, T, K-1]
-                        y_kminus1 = A_kminus1_expanded + Vmax_sum_kminus1_expanded * combined_hill  # [N, T, K-1]
+                        y_kminus1 = A_kminus1_expanded + combined_hill  # [N, T, K-1]
 
                     # Clamp K-1 probabilities to [epsilon, 1-epsilon] to ensure valid residual
                     y_kminus1 = torch.clamp(y_kminus1, min=epsilon_tensor, max=1.0 - epsilon_tensor)
@@ -536,31 +532,28 @@ class TransFitter:
 
                 else:
                     # For non-multinomial: standard Hill computation
-                    if distribution in ['binomial', 'multinomial']:
-                        # NEW FORMULATION for binomial:
-                        # Compute Hills with Vmax=1 (output [0, 1])
-                        # Then scale by Vmax_sum: y = A + Vmax_sum * (alpha * Hill_a + beta * Hill_b)
-                        # Hills output [0,1], alpha and beta are [0,1] from RelaxedBernoulli
-                        # So combined_hill naturally stays in valid range without clamps
+                    if distribution == 'binomial':
+                        # For binomial: Use Vmax_a and Vmax_b directly (sampled independently)
+                        # y = A + (alpha * Hill_a(Vmax=Vmax_a)) + (beta * Hill_b(Vmax=Vmax_b))
+                        # Note: Vmax_a + Vmax_b CAN exceed 1 - we'll try without clamp first
 
                         if function_type == 'single_hill':
-                            Hilla = Hill_based_positive(x_true.unsqueeze(-1), Vmax=self._t(1.0), A=0, K=K_a, n=n_a, epsilon=epsilon_tensor)
-                            combined_hill = alpha * Hilla
-                            y_dose_response = A + Vmax_sum * combined_hill
+                            Hilla = Hill_based_positive(x_true.unsqueeze(-1), Vmax=Vmax_a, A=0, K=K_a, n=n_a, epsilon=epsilon_tensor)
+                            y_dose_response = A + (alpha * Hilla)
 
                         elif function_type == 'additive_hill':
-                            Hilla = Hill_based_positive(x_true.unsqueeze(-1), Vmax=self._t(1.0), A=0, K=K_a, n=n_a, epsilon=epsilon_tensor)
-                            Hillb = Hill_based_positive(x_true.unsqueeze(-1), Vmax=self._t(1.0), A=0, K=K_b, n=n_b, epsilon=epsilon_tensor)
-                            combined_hill = alpha * Hilla + beta * Hillb
-                            y_dose_response = A + Vmax_sum * combined_hill
+                            Hilla = Hill_based_positive(x_true.unsqueeze(-1), Vmax=Vmax_a, A=0, K=K_a, n=n_a, epsilon=epsilon_tensor)
+                            Hillb = Hill_based_positive(x_true.unsqueeze(-1), Vmax=Vmax_b, A=0, K=K_b, n=n_b, epsilon=epsilon_tensor)
+                            y_dose_response = A + (alpha * Hilla) + (beta * Hillb)
 
                         elif function_type == 'nested_hill':
-                            Hilla = Hill_based_positive(x_true.unsqueeze(-1), Vmax=self._t(1.0), A=0, K=K_a, n=n_a, epsilon=epsilon_tensor)
-                            Hillb = Hill_based_positive(Hilla, Vmax=self._t(1.0), A=0, K=K_b, n=n_b, epsilon=epsilon_tensor)
-                            combined_hill = alpha * Hillb
-                            y_dose_response = A + Vmax_sum * combined_hill
+                            Hilla = Hill_based_positive(x_true.unsqueeze(-1), Vmax=Vmax_a, A=0, K=K_a, n=n_a, epsilon=epsilon_tensor)
+                            Hillb = Hill_based_positive(Hilla, Vmax=Vmax_b, A=0, K=K_b, n=n_b, epsilon=epsilon_tensor)
+                            y_dose_response = A + (alpha * Hillb)
 
-                        # NO clamp on combined_hill or y_dose_response
+                        # OPTIONAL CLAMP (commented out for now - try without first):
+                        # If Vmax_a + Vmax_b > 1 causes issues, uncomment:
+                        # y_dose_response = torch.clamp(y_dose_response, min=epsilon_tensor, max=1.0 - epsilon_tensor)
 
                     else:
                         # For negbinom/normal/studentt: use standard formulation with learned Vmax_a/Vmax_b
