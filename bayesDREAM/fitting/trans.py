@@ -239,15 +239,6 @@ class TransFitter:
                         A = pyro.sample("A", dist.Beta(alpha_A, beta_A).expand([T]))  # [T]
                         upper_limit = pyro.sample("upper_limit", dist.Beta(alpha_upper, beta_upper).expand([T]))  # [T]
 
-                # Compute Vmax_sum (total amplitude available for Hills)
-                # For multinomial: Both A and upper_limit are K-dimensional from Dirichlet (sum to 1)
-                # Vmax_sum = upper_limit - A gives amplitude for each category
-                # Just clamp to ensure non-negative, don't enforce ordering with min/max
-                Vmax_sum = (upper_limit - A).clamp_min(epsilon_tensor)
-
-                # Store Vmax_sum for use in Hill computation
-                Vmax_sum = pyro.deterministic("Vmax_sum", Vmax_sum)  # [T] or [T, K]
-
             else:
                 # For negbinom: A must be positive count
                 Amean_for_A = Amean_tensor  # [T]
@@ -284,16 +275,16 @@ class TransFitter:
                     K_minus_1 = K - 1
                     # Sample parameters for K-1 categories
                     # Each category gets its own Hill function parameters
-                    with pyro.plate("category_plate", K_minus_1, dim=-2):
-                        n_a_raw = pyro.sample("n_a_raw", dist.Normal(n_mu_tensor, sigma_n_a))  # [K-1, T]
+                    with pyro.plate("category_plate_n_a", K_minus_1, dim=-1):
+                        n_a_raw = pyro.sample("n_a_raw", dist.Normal(n_mu_tensor, sigma_n_a))  # [T, K-1]
                         BOX_LOW  = self._t(-20.0)
                         BOX_HIGH = self._t( 20.0)
                         low  = torch.maximum(nmin, BOX_LOW)
                         high = torch.minimum(nmax, BOX_HIGH)
                         n_a = pyro.deterministic(
                             "n_a",
-                            (alpha.unsqueeze(-2) * n_a_raw).clamp(min=low.item(), max=high.item())
-                        )  # [K-1, T] * [1, T] -> [K-1, T]
+                            (alpha.unsqueeze(-1) * n_a_raw).clamp(min=low.item(), max=high.item())
+                        )  # [T, 1] * [T, K-1] -> [T, K-1]
                 else:
                     # For non-multinomial: single set of parameters per feature
                     n_a_raw = pyro.sample("n_a_raw", dist.Normal(n_mu_tensor, sigma_n_a))
@@ -389,16 +380,16 @@ class TransFitter:
                     # n_b: per-category for multinomial, single for others
                     if distribution == 'multinomial' and K is not None:
                         K_minus_1 = K - 1
-                        with pyro.plate("category_plate_b", K_minus_1, dim=-2):
-                            n_b_raw = pyro.sample("n_b_raw", dist.Normal(n_mu_tensor, sigma_n_b))  # [K-1, T]
+                        with pyro.plate("category_plate_n_b", K_minus_1, dim=-1):
+                            n_b_raw = pyro.sample("n_b_raw", dist.Normal(n_mu_tensor, sigma_n_b))  # [T, K-1]
                             BOX_LOW  = self._t(-20.0)
                             BOX_HIGH = self._t( 20.0)
                             low  = torch.maximum(nmin, BOX_LOW)
                             high = torch.minimum(nmax, BOX_HIGH)
                             n_b = pyro.deterministic(
                                 "n_b",
-                                (beta.unsqueeze(-2) * n_b_raw).clamp(min=low.item(), max=high.item())
-                            )  # [K-1, T]
+                                (beta.unsqueeze(-1) * n_b_raw).clamp(min=low.item(), max=high.item())
+                            )  # [T, 1] * [T, K-1] -> [T, K-1]
                     else:
                         n_b_raw = pyro.sample("n_b_raw", dist.Normal(n_mu_tensor, sigma_n_b))
                         BOX_LOW  = self._t(-20.0)
