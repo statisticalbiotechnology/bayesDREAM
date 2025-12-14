@@ -327,24 +327,31 @@ class TransFitter:
                 K_log_sigma = torch.sqrt(torch.log1p(ratio_K ** 2))
                 K_log_mu = torch.log(K_mean_prior) - 0.5 * K_log_sigma ** 2
 
-                if distribution in ['binomial', 'multinomial']:
-                    # For binomial/multinomial: Use Vmax_sum directly (NOT multiplied by alpha)
-                    # The alpha/beta sparsity is applied later in: y = A + (alpha * Hill_a) + (beta * Hill_b)
-                    # Multiplying Vmax by alpha here causes DOUBLE PENALIZATION: y ≈ alpha² * ...
-                    # This was causing n_a/n_b to collapse to ~0 (no power)
-                    Vmax_a = pyro.deterministic("Vmax_a", Vmax_sum)  # [T] or [T, K]
+                if distribution == 'multinomial':
+                    # For multinomial: Use Vmax_sum from Dirichlet reparameterization
+                    # Categories must sum to 1, so sharing Vmax_sum makes sense
+                    Vmax_a = pyro.deterministic("Vmax_a", Vmax_sum)  # [T, K]
 
-                    # K_a: unified Log-Normal
-                    if distribution == 'multinomial' and K is not None:
-                        # For multinomial: K-1 parameters (Kth category is residual)
+                    # K_a: Log-Normal
+                    if K is not None:
                         K_minus_1 = K - 1
                         with pyro.plate("category_plate_K_a", K_minus_1, dim=-1):
                             log_K_a = pyro.sample("log_K_a", dist.Normal(K_log_mu, K_log_sigma))  # [T, K-1]
                             K_a = pyro.deterministic("K_a", torch.exp(log_K_a))  # [T, K-1]
-                    else:
-                        # For binomial: K parameters are per-feature [T]
-                        log_K_a = pyro.sample("log_K_a", dist.Normal(K_log_mu, K_log_sigma))
-                        K_a = pyro.deterministic("K_a", torch.exp(log_K_a))
+
+                elif distribution == 'binomial':
+                    # For binomial: Sample Vmax_a INDEPENDENTLY (like BCD1C4F)
+                    # This gives Vmax_a direct gradient signal, not mediated through alpha
+                    # Avoids chicken-and-egg: alpha needs signal → signal needs Vmax → Vmax needs alpha
+                    Vmax_mean_clamped = Vmax_mean_tensor.clamp(min=0.01, max=0.99)
+                    concentration_vmax = self._t(10.0)
+                    alpha_vmax = Vmax_mean_clamped * concentration_vmax
+                    beta_vmax = (1 - Vmax_mean_clamped) * concentration_vmax
+                    Vmax_a = pyro.sample("Vmax_a", dist.Beta(alpha_vmax, beta_vmax))  # Independent!
+
+                    # K_a: Log-Normal (keeping 3D09BF1 improvement)
+                    log_K_a = pyro.sample("log_K_a", dist.Normal(K_log_mu, K_log_sigma))
+                    K_a = pyro.deterministic("K_a", torch.exp(log_K_a))
 
                 else:
                     # For negbinom/normal/studentt: Learn Vmax using Log-Normal with data-driven variance
@@ -403,25 +410,25 @@ class TransFitter:
                             (beta * n_b_raw).clamp(min=low.item(), max=high.item())
                         )
 
-                    # Vmax_b and K_b: UNIFIED priors (same as Vmax_a and K_a)
-                    if distribution in ['binomial', 'multinomial']:
-                        # For binomial/multinomial: Actual magnitude is Vmax_sum * beta
-                        # y = A + Vmax_sum * (alpha * Hill_a + beta * Hill_b)
-                        # Use Vmax_sum directly (NOT multiplied by beta) - same as Vmax_a
-                        # The beta sparsity is applied later in: y = A + (alpha * Hill_a) + (beta * Hill_b)
-                        Vmax_b = pyro.deterministic("Vmax_b", Vmax_sum)  # [T] or [T, K]
+                    # Vmax_b and K_b: same structure as Vmax_a and K_a
+                    if distribution == 'multinomial':
+                        # For multinomial: Use Vmax_sum from Dirichlet
+                        Vmax_b = pyro.deterministic("Vmax_b", Vmax_sum)  # [T, K]
 
-                        # K_b: unified Log-Normal (same parameterization as K_a)
-                        if distribution == 'multinomial' and K is not None:
-                            # For multinomial: K-1 parameters (Kth category is residual)
+                        # K_b: Log-Normal
+                        if K is not None:
                             K_minus_1 = K - 1
                             with pyro.plate("category_plate_K_b", K_minus_1, dim=-1):
                                 log_K_b = pyro.sample("log_K_b", dist.Normal(K_log_mu, K_log_sigma))  # [T, K-1]
                                 K_b = pyro.deterministic("K_b", torch.exp(log_K_b))  # [T, K-1]
-                        else:
-                            # For binomial: K parameters are per-feature [T]
-                            log_K_b = pyro.sample("log_K_b", dist.Normal(K_log_mu, K_log_sigma))
-                            K_b = pyro.deterministic("K_b", torch.exp(log_K_b))
+
+                    elif distribution == 'binomial':
+                        # For binomial: Sample Vmax_b INDEPENDENTLY (like BCD1C4F)
+                        Vmax_b = pyro.sample("Vmax_b", dist.Beta(alpha_vmax, beta_vmax))  # Independent!
+
+                        # K_b: Log-Normal
+                        log_K_b = pyro.sample("log_K_b", dist.Normal(K_log_mu, K_log_sigma))
+                        K_b = pyro.deterministic("K_b", torch.exp(log_K_b))
 
                     else:
                         # For negbinom/normal/studentt: Vmax_b and K_b use Log-Normal (same as Vmax_a and K_a)
