@@ -328,16 +328,11 @@ class TransFitter:
                 K_log_mu = torch.log(K_mean_prior) - 0.5 * K_log_sigma ** 2
 
                 if distribution in ['binomial', 'multinomial']:
-                    # For binomial/multinomial: Vmax_sum from Beta/Dirichlet reparameterization
-                    # Actual magnitudes are Vmax_sum * alpha and Vmax_sum * beta
-                    # Note: alpha is sampled earlier (line 260), shape [T]
-                    # For multinomial, Vmax_sum is [T, K], so we need to broadcast
-                    if distribution == 'multinomial' and Vmax_sum.ndim > 1:
-                        # Vmax_sum is [T, K], alpha is [T] -> broadcast to [T, K]
-                        Vmax_a = pyro.deterministic("Vmax_a", Vmax_sum * alpha.unsqueeze(-1))  # [T, K]
-                    else:
-                        # Binomial: Vmax_sum is [T], alpha is [T] -> [T]
-                        Vmax_a = pyro.deterministic("Vmax_a", Vmax_sum * alpha)  # [T]
+                    # For binomial/multinomial: Use Vmax_sum directly (NOT multiplied by alpha)
+                    # The alpha/beta sparsity is applied later in: y = A + (alpha * Hill_a) + (beta * Hill_b)
+                    # Multiplying Vmax by alpha here causes DOUBLE PENALIZATION: y ≈ alpha² * ...
+                    # This was causing n_a/n_b to collapse to ~0 (no power)
+                    Vmax_a = pyro.deterministic("Vmax_a", Vmax_sum)  # [T] or [T, K]
 
                     # K_a: unified Log-Normal
                     if distribution == 'multinomial' and K is not None:
@@ -412,13 +407,9 @@ class TransFitter:
                     if distribution in ['binomial', 'multinomial']:
                         # For binomial/multinomial: Actual magnitude is Vmax_sum * beta
                         # y = A + Vmax_sum * (alpha * Hill_a + beta * Hill_b)
-                        # Note: beta is sampled earlier (line 378), shape [T]
-                        if distribution == 'multinomial' and Vmax_sum.ndim > 1:
-                            # Vmax_sum is [T, K], beta is [T] -> broadcast to [T, K]
-                            Vmax_b = pyro.deterministic("Vmax_b", Vmax_sum * beta.unsqueeze(-1))  # [T, K]
-                        else:
-                            # Binomial: Vmax_sum is [T], beta is [T] -> [T]
-                            Vmax_b = pyro.deterministic("Vmax_b", Vmax_sum * beta)  # [T]
+                        # Use Vmax_sum directly (NOT multiplied by beta) - same as Vmax_a
+                        # The beta sparsity is applied later in: y = A + (alpha * Hill_a) + (beta * Hill_b)
+                        Vmax_b = pyro.deterministic("Vmax_b", Vmax_sum)  # [T] or [T, K]
 
                         # K_b: unified Log-Normal (same parameterization as K_a)
                         if distribution == 'multinomial' and K is not None:
