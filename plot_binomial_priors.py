@@ -77,13 +77,24 @@ def plot_additive_hill_priors(model, sj_id, modality_name='splicing_sj',
             return x.cpu().numpy()
         return x
 
+    # Detect function type
+    is_additive_hill = 'Vmax_b' in posterior
+    function_type = 'additive_hill' if is_additive_hill else 'single_hill'
+    print(f"\nDetected function type: {function_type}")
+
+    # Extract posteriors (only for parameters that exist)
     A_post = to_numpy(posterior['A'][:, sj_position])
     Vmax_a_post = to_numpy(posterior['Vmax_a'][:, sj_position])
-    Vmax_b_post = to_numpy(posterior['Vmax_b'][:, sj_position])
     K_a_post = to_numpy(posterior['K_a'][:, sj_position])
-    K_b_post = to_numpy(posterior['K_b'][:, sj_position])
 
-    # Get beta if available
+    if is_additive_hill:
+        Vmax_b_post = to_numpy(posterior['Vmax_b'][:, sj_position])
+        K_b_post = to_numpy(posterior['K_b'][:, sj_position])
+    else:
+        Vmax_b_post = None
+        K_b_post = None
+
+    # Get beta if available (only for additive_hill)
     if 'beta' in posterior:
         beta_post = to_numpy(posterior['beta'][:, sj_position]) if posterior['beta'].ndim > 1 else to_numpy(posterior['beta'][sj_position])
     else:
@@ -92,9 +103,11 @@ def plot_additive_hill_priors(model, sj_id, modality_name='splicing_sj',
     print(f"\nPosterior samples: {len(A_post)} samples")
     print(f"A: [{A_post.min():.4f}, {A_post.max():.4f}], mean={A_post.mean():.4f}")
     print(f"Vmax_a: [{Vmax_a_post.min():.4f}, {Vmax_a_post.max():.4f}], mean={Vmax_a_post.mean():.4f}")
-    print(f"Vmax_b: [{Vmax_b_post.min():.4f}, {Vmax_b_post.max():.4f}], mean={Vmax_b_post.mean():.4f}")
+    if is_additive_hill:
+        print(f"Vmax_b: [{Vmax_b_post.min():.4f}, {Vmax_b_post.max():.4f}], mean={Vmax_b_post.mean():.4f}")
     print(f"K_a: [{K_a_post.min():.2f}, {K_a_post.max():.2f}], mean={K_a_post.mean():.2f}")
-    print(f"K_b: [{K_b_post.min():.2f}, {K_b_post.max():.2f}], mean={K_b_post.mean():.2f}")
+    if is_additive_hill:
+        print(f"K_b: [{K_b_post.min():.2f}, {K_b_post.max():.2f}], mean={K_b_post.mean():.2f}")
     if beta_post is not None:
         print(f"beta: [{beta_post.min():.4f}, {beta_post.max():.4f}], mean={beta_post.mean():.4f}")
 
@@ -221,8 +234,11 @@ def plot_additive_hill_priors(model, sj_id, modality_name='splicing_sj',
         print(f"  K_max (fallback): {K_max_est:.2f}")
         print(f"  x_true CV (fallback): {x_true_CV:.4f}")
 
-    # Create figure with 2 rows, 3 columns
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+    # Create figure with appropriate layout
+    if is_additive_hill:
+        fig, axes = plt.subplots(2, 3, figsize=(15, 10))  # 6 subplots for additive_hill
+    else:
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))  # 4 subplots for single_hill
 
     # ==========================================
     # Plot 1: A (baseline)
@@ -291,35 +307,36 @@ def plot_additive_hill_priors(model, sj_id, modality_name='splicing_sj',
                 fontsize=10, fontweight='bold')
 
     # ==========================================
-    # Plot 3: Vmax_b
+    # Plot 3: Vmax_b (only for additive_hill)
     # ==========================================
-    ax = axes[0, 2]
-    ax.hist(Vmax_b_post, bins=50, density=True, alpha=0.7, label='Posterior', color='purple')
+    if is_additive_hill:
+        ax = axes[0, 2]
+        ax.hist(Vmax_b_post, bins=50, density=True, alpha=0.7, label='Posterior', color='purple')
 
-    # Prior for Vmax_b: same as Vmax_a
-    if use_data_driven_priors and Vmax_mean_est > 0 and Vmax_mean_est < 1:
-        # Data-driven
-        prior_Vmax = stats.beta.pdf(x, alpha_Vmax, beta_Vmax)
-        ax.plot(x, prior_Vmax, 'r-', linewidth=2, label=f'Prior Beta({alpha_Vmax:.1f}, {beta_Vmax:.1f})')
-        ax.axvline(Vmax_mean_est, color='red', linestyle='--', linewidth=2, label='Prior mean')
-    else:
-        # Uniform
-        prior_Vmax = stats.beta.pdf(x, 1.0, 1.0)
-        ax.plot(x, prior_Vmax, 'r-', linewidth=2, label=f'Prior Beta(1.0, 1.0) [Uniform]')
+        # Prior for Vmax_b: same as Vmax_a
+        if use_data_driven_priors and Vmax_mean_est > 0 and Vmax_mean_est < 1:
+            # Data-driven
+            prior_Vmax = stats.beta.pdf(x, alpha_Vmax, beta_Vmax)
+            ax.plot(x, prior_Vmax, 'r-', linewidth=2, label=f'Prior Beta({alpha_Vmax:.1f}, {beta_Vmax:.1f})')
+            ax.axvline(Vmax_mean_est, color='red', linestyle='--', linewidth=2, label='Prior mean')
+        else:
+            # Uniform
+            prior_Vmax = stats.beta.pdf(x, 1.0, 1.0)
+            ax.plot(x, prior_Vmax, 'r-', linewidth=2, label=f'Prior Beta(1.0, 1.0) [Uniform]')
 
-    ax.axvline(Vmax_b_post.mean(), color='purple', linestyle='--', linewidth=2, label='Posterior mean')
-    ax.set_xlabel('Vmax_b')
-    ax.set_ylabel('Density')
-    ax.set_title(f'Vmax_b for {sj_id}')
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
+        ax.axvline(Vmax_b_post.mean(), color='purple', linestyle='--', linewidth=2, label='Posterior mean')
+        ax.set_xlabel('Vmax_b')
+        ax.set_ylabel('Density')
+        ax.set_title(f'Vmax_b for {sj_id}')
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
 
-    # Check if stuck at floor
-    if Vmax_b_post.mean() < 1e-4:
-        ax.text(0.5, 0.9, 'WARNING: Stuck at floor!',
-                transform=ax.transAxes, ha='center',
-                bbox=dict(boxstyle='round', facecolor='red', alpha=0.5),
-                fontsize=10, fontweight='bold')
+        # Check if stuck at floor
+        if Vmax_b_post.mean() < 1e-4:
+            ax.text(0.5, 0.9, 'WARNING: Stuck at floor!',
+                    transform=ax.transAxes, ha='center',
+                    bbox=dict(boxstyle='round', facecolor='red', alpha=0.5),
+                    fontsize=10, fontweight='bold')
 
     # ==========================================
     # Plot 4: K_a (EC50 for component a)
@@ -352,27 +369,29 @@ def plot_additive_hill_priors(model, sj_id, modality_name='splicing_sj',
     ax.grid(True, alpha=0.3)
 
     # ==========================================
-    # Plot 5: K_b (EC50 for component b)
+    # Plot 5: K_b (EC50 for component b) (only for additive_hill)
     # ==========================================
-    ax = axes[1, 1]
-    ax.hist(K_b_post, bins=50, density=True, alpha=0.7, label='Posterior', color='brown')
+    if is_additive_hill:
+        ax = axes[1, 1]
+        ax.hist(K_b_post, bins=50, density=True, alpha=0.7, label='Posterior', color='brown')
 
-    # Same prior as K_a (LogNormal)
-    ax.plot(x, prior_K, 'r-', linewidth=2, label=f'Prior LogNormal(μ={K_log_mu:.2f}, σ={K_log_sigma:.2f})')
+        # Same prior as K_a (LogNormal)
+        ax.plot(x, prior_K, 'r-', linewidth=2, label=f'Prior LogNormal(μ={K_log_mu:.2f}, σ={K_log_sigma:.2f})')
 
-    ax.axvline(K_b_post.mean(), color='brown', linestyle='--', linewidth=2, label='Posterior mean')
-    ax.axvline(K_mean_prior, color='red', linestyle='--', linewidth=2, label=f'Prior mean={K_mean_prior:.1f}')
-    ax.axvline(K_max_est, color='darkred', linestyle=':', linewidth=1.5, alpha=0.6, label=f'K_max={K_max_est:.1f}')
-    ax.set_xlabel('K_b (EC50)')
-    ax.set_ylabel('Density')
-    ax.set_title(f'K_b for {sj_id}')
-    ax.legend(fontsize=7)
-    ax.grid(True, alpha=0.3)
+        ax.axvline(K_b_post.mean(), color='brown', linestyle='--', linewidth=2, label='Posterior mean')
+        ax.axvline(K_mean_prior, color='red', linestyle='--', linewidth=2, label=f'Prior mean={K_mean_prior:.1f}')
+        ax.axvline(K_max_est, color='darkred', linestyle=':', linewidth=1.5, alpha=0.6, label=f'K_max={K_max_est:.1f}')
+        ax.set_xlabel('K_b (EC50)')
+        ax.set_ylabel('Density')
+        ax.set_title(f'K_b for {sj_id}')
+        ax.legend(fontsize=7)
+        ax.grid(True, alpha=0.3)
 
     # ==========================================
     # Plot 6: Data overview
     # ==========================================
-    ax = axes[1, 2]
+    # Position depends on function type
+    ax = axes[1, 2] if is_additive_hill else axes[1, 1]
 
     # Plot guide-level means
     if len(guide_means) > 0:
@@ -384,13 +403,19 @@ def plot_additive_hill_priors(model, sj_id, modality_name='splicing_sj',
         ax.axvline(A_post.mean(), color='blue', linestyle=':', linewidth=2,
                    label=f'Fit A = {A_post.mean():.3f}')
 
-        # Show Vmax_a + Vmax_b
-        if beta_post is not None:
-            vmax_sum = Vmax_a_post.mean() + beta_post.mean() * Vmax_b_post.mean()
+        # Show Vmax_a + Vmax_b (or just Vmax_a for single_hill)
+        if is_additive_hill:
+            if beta_post is not None:
+                vmax_sum = Vmax_a_post.mean() + beta_post.mean() * Vmax_b_post.mean()
+            else:
+                vmax_sum = Vmax_a_post.mean() + Vmax_b_post.mean()
+            label_text = f'Fit A+Vmax_sum = {A_post.mean() + vmax_sum:.3f}'
         else:
-            vmax_sum = Vmax_a_post.mean() + Vmax_b_post.mean()
+            vmax_sum = Vmax_a_post.mean()
+            label_text = f'Fit A+Vmax_a = {A_post.mean() + vmax_sum:.3f}'
+
         ax.axvline(A_post.mean() + vmax_sum, color='purple', linestyle=':', linewidth=2,
-                   label=f'Fit A+Vmax_sum = {A_post.mean() + vmax_sum:.3f}')
+                   label=label_text)
 
     ax.set_xlabel('PSI value')
     ax.set_ylabel('Count')
