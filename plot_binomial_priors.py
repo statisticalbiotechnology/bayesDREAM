@@ -10,14 +10,19 @@ import matplotlib.pyplot as plt
 from scipy import stats
 
 
-def plot_additive_hill_priors(model, sj_id, modality_name='splicing_sj', save_path=None):
+def plot_additive_hill_priors(model, sj_id, modality_name='splicing_sj',
+                              min_denominator=None, use_data_driven_priors=True, save_path=None):
     """
     Plot prior vs posterior distributions for additive Hill parameters.
 
     For binomial distributions, priors are:
-    - A: Beta(1, (1-A_mean)/A_mean) - pushes toward 0
-    - Vmax_a, Vmax_b: Beta(Vmax_mean * 10, (1-Vmax_mean) * 10) - independent sampling
+    - A: Beta(1, (1-A_mean)/A_mean) - pushes toward 0 (if data-driven)
+    - Vmax_a, Vmax_b: Beta(Vmax_mean * 10, (1-Vmax_mean) * 10) - independent (if data-driven)
     - K_a, K_b: LogNormal(log_mu, log_sigma) where mean = K_max, std = K_max/(2*sqrt(2))
+
+    If use_data_driven_priors=False, uses uniform Beta(1,1) for A and Vmax.
+
+    IMPORTANT: min_denominator and use_data_driven_priors should match what was used in fit_trans!
 
     Parameters
     ----------
@@ -27,6 +32,11 @@ def plot_additive_hill_priors(model, sj_id, modality_name='splicing_sj', save_pa
         Splice junction ID (coord.intron value)
     modality_name : str
         Name of modality (default: 'splicing_sj')
+    min_denominator : int, optional
+        Minimum denominator for filtering observations (should match fit_trans)
+        If None, tries to infer from fitting parameters
+    use_data_driven_priors : bool
+        Whether data-driven priors were used (default: True)
     save_path : str, optional
         Path to save figure
 
@@ -97,33 +107,91 @@ def plot_additive_hill_priors(model, sj_id, modality_name='splicing_sj', save_pa
         denom = modality.denominator[sj_position, :]
         if isinstance(denom, torch.Tensor):
             denom = denom.cpu().numpy()
-        psi = counts / np.maximum(denom, 1)
+
+        # Apply min_denominator filtering (matching fit_trans lines 1158-1159)
+        if min_denominator is None:
+            # Try to infer from common values
+            min_denominator = 0
+            print(f"[INFO] min_denominator not specified, using {min_denominator}")
+        else:
+            print(f"[INFO] Using min_denominator={min_denominator}")
+
+        valid_mask = denom >= min_denominator
+        n_valid = valid_mask.sum()
+        n_total = len(denom)
+        print(f"[INFO] Using {n_valid}/{n_total} ({100*n_valid/n_total:.1f}%) observations with denominator >= {min_denominator}")
+
+        # Compute PSI (matching fit_trans line 1155)
+        psi = counts / np.maximum(denom, 1e-6)
+
+        # Apply technical correction (INVERSE) if available (matching fit_trans lines 1239-1263)
+        if hasattr(modality, 'alpha_y_prefit_add') and modality.alpha_y_prefit_add is not None:
+            print(f"[INFO] Applying inverse technical correction")
+            alpha_y_prefit = modality.alpha_y_prefit_add
+            if isinstance(alpha_y_prefit, torch.Tensor):
+                alpha_y_prefit = alpha_y_prefit.cpu().numpy()
+
+            # Get technical groups
+            if 'technical_group_code' in model.meta.columns:
+                groups = model.meta['technical_group_code'].values
+                epsilon = 1e-6
+
+                # Apply inverse correction on logit scale (matching fit_trans lines 1245-1262)
+                p_obs_clamped = np.clip(psi, epsilon, 1.0 - epsilon)
+                logit_obs = np.log(p_obs_clamped) - np.log(1.0 - p_obs_clamped)
+
+                # Get alpha_y for each cell
+                if alpha_y_prefit.ndim == 3:
+                    # Posterior: [S, C, T] - use mean over samples
+                    alpha_y_expanded = alpha_y_prefit[:, groups, sj_position].mean(axis=0)
+                elif alpha_y_prefit.ndim == 2:
+                    # Point estimate: [C, T]
+                    alpha_y_expanded = alpha_y_prefit[groups, sj_position]
+                else:
+                    raise ValueError(f"Unexpected alpha_y_prefit shape: {alpha_y_prefit.shape}")
+
+                # Inverse correction: subtract alpha_y (matching fit_trans line 1253)
+                logit_baseline = logit_obs - alpha_y_expanded
+
+                # Convert back to probability
+                psi = 1.0 / (1.0 + np.exp(-logit_baseline))
+            else:
+                print(f"[WARNING] alpha_y_prefit exists but no technical_group_code found")
+
     else:
         psi = counts
+        valid_mask = np.ones(len(counts), dtype=bool)
+        print(f"[WARNING] No denominator found for binomial distribution")
 
     # Get guide information
     guides = model.meta['guide'].values
     unique_guides = np.unique(guides)
 
-    # Compute guide-level means (5th and 95th percentiles)
+    # Compute guide-level means (5th and 95th percentiles) from VALID observations only
     guide_means = []
     for g in unique_guides:
-        guide_mask = guides == g
-        guide_psi = psi[guide_mask]
-        # Filter out invalid values
-        guide_psi = guide_psi[np.isfinite(guide_psi)]
-        if len(guide_psi) > 0:
-            guide_means.append(np.mean(guide_psi))
+        guide_mask = (guides == g) & valid_mask
+        if guide_mask.sum() > 0:
+            guide_psi = psi[guide_mask]
+            # Filter out invalid values
+            guide_psi = guide_psi[np.isfinite(guide_psi)]
+            if len(guide_psi) > 0:
+                guide_means.append(np.mean(guide_psi))
 
     guide_means = np.array(guide_means)
     guide_means = guide_means[np.isfinite(guide_means)]
 
     if len(guide_means) > 0:
+        # Matching fit_trans lines 1415-1416
         Amean_est = np.percentile(guide_means, 5)
         Vmax_mean_est = np.percentile(guide_means, 95)
+        # Clamp to valid Beta range (matching fit_trans lines 1483-1485)
+        Amean_est = np.clip(Amean_est, 1e-3, 1.0 - 1e-6)
+        Vmax_mean_est = np.clip(Vmax_mean_est, 1e-3, 1.0 - 1e-6)
         print(f"\nEstimated prior parameters (from data):")
         print(f"  Amean (5th percentile): {Amean_est:.4f}")
         print(f"  Vmax_mean (95th percentile): {Vmax_mean_est:.4f}")
+        print(f"  use_data_driven_priors: {use_data_driven_priors}")
     else:
         Amean_est = 0.1
         Vmax_mean_est = 0.5
@@ -150,16 +218,23 @@ def plot_additive_hill_priors(model, sj_id, modality_name='splicing_sj', save_pa
     ax = axes[0, 0]
     ax.hist(A_post, bins=50, density=True, alpha=0.7, label='Posterior', color='steelblue')
 
-    # Prior for A: Beta(alpha=1, beta=(1-Amean)/Amean)
-    if Amean_est > 0 and Amean_est < 1:
+    # Prior for A depends on use_data_driven_priors
+    x = np.linspace(0.001, 0.999, 1000)
+    if use_data_driven_priors and Amean_est > 0 and Amean_est < 1:
+        # Data-driven: Beta(alpha=1, beta=(1-Amean)/Amean)
         beta_A = (1 - Amean_est) / Amean_est
         alpha_A = 1.0
-        x = np.linspace(0.001, 0.999, 1000)
         prior_A = stats.beta.pdf(x, alpha_A, beta_A)
         ax.plot(x, prior_A, 'r-', linewidth=2, label=f'Prior Beta({alpha_A:.1f}, {beta_A:.2f})')
+        ax.axvline(Amean_est, color='red', linestyle='--', linewidth=2, label='Prior mean')
+    else:
+        # Uniform: Beta(1, 1)
+        alpha_A = 1.0
+        beta_A = 1.0
+        prior_A = stats.beta.pdf(x, alpha_A, beta_A)
+        ax.plot(x, prior_A, 'r-', linewidth=2, label=f'Prior Beta({alpha_A:.1f}, {beta_A:.1f}) [Uniform]')
 
     ax.axvline(A_post.mean(), color='steelblue', linestyle='--', linewidth=2, label='Posterior mean')
-    ax.axvline(Amean_est, color='red', linestyle='--', linewidth=2, label='Prior mean')
     ax.set_xlabel('A (baseline)')
     ax.set_ylabel('Density')
     ax.set_title(f'A (baseline) for {sj_id}')
@@ -172,17 +247,24 @@ def plot_additive_hill_priors(model, sj_id, modality_name='splicing_sj', save_pa
     ax = axes[0, 1]
     ax.hist(Vmax_a_post, bins=50, density=True, alpha=0.7, label='Posterior', color='darkgreen')
 
-    # Prior for Vmax_a: Beta(Vmax_mean * 10, (1 - Vmax_mean) * 10)
-    if Vmax_mean_est > 0 and Vmax_mean_est < 1:
+    # Prior for Vmax_a depends on use_data_driven_priors
+    x = np.linspace(0.001, 0.999, 1000)
+    if use_data_driven_priors and Vmax_mean_est > 0 and Vmax_mean_est < 1:
+        # Data-driven: Beta(Vmax_mean * 10, (1 - Vmax_mean) * 10)
         concentration = 10.0
         alpha_Vmax = Vmax_mean_est * concentration
         beta_Vmax = (1 - Vmax_mean_est) * concentration
-        x = np.linspace(0.001, 0.999, 1000)
         prior_Vmax = stats.beta.pdf(x, alpha_Vmax, beta_Vmax)
         ax.plot(x, prior_Vmax, 'r-', linewidth=2, label=f'Prior Beta({alpha_Vmax:.1f}, {beta_Vmax:.1f})')
+        ax.axvline(Vmax_mean_est, color='red', linestyle='--', linewidth=2, label='Prior mean')
+    else:
+        # Uniform: Beta(1, 1)
+        alpha_Vmax = 1.0
+        beta_Vmax = 1.0
+        prior_Vmax = stats.beta.pdf(x, alpha_Vmax, beta_Vmax)
+        ax.plot(x, prior_Vmax, 'r-', linewidth=2, label=f'Prior Beta({alpha_Vmax:.1f}, {beta_Vmax:.1f}) [Uniform]')
 
     ax.axvline(Vmax_a_post.mean(), color='darkgreen', linestyle='--', linewidth=2, label='Posterior mean')
-    ax.axvline(Vmax_mean_est, color='red', linestyle='--', linewidth=2, label='Prior mean')
     ax.set_xlabel('Vmax_a')
     ax.set_ylabel('Density')
     ax.set_title(f'Vmax_a for {sj_id}')
@@ -202,14 +284,18 @@ def plot_additive_hill_priors(model, sj_id, modality_name='splicing_sj', save_pa
     ax = axes[0, 2]
     ax.hist(Vmax_b_post, bins=50, density=True, alpha=0.7, label='Posterior', color='purple')
 
-    # Prior for Vmax_b: same as Vmax_a - Beta(Vmax_mean * 10, (1 - Vmax_mean) * 10)
-    if Vmax_mean_est > 0 and Vmax_mean_est < 1:
-        x = np.linspace(0.001, 0.999, 1000)
+    # Prior for Vmax_b: same as Vmax_a
+    if use_data_driven_priors and Vmax_mean_est > 0 and Vmax_mean_est < 1:
+        # Data-driven
         prior_Vmax = stats.beta.pdf(x, alpha_Vmax, beta_Vmax)
         ax.plot(x, prior_Vmax, 'r-', linewidth=2, label=f'Prior Beta({alpha_Vmax:.1f}, {beta_Vmax:.1f})')
+        ax.axvline(Vmax_mean_est, color='red', linestyle='--', linewidth=2, label='Prior mean')
+    else:
+        # Uniform
+        prior_Vmax = stats.beta.pdf(x, 1.0, 1.0)
+        ax.plot(x, prior_Vmax, 'r-', linewidth=2, label=f'Prior Beta(1.0, 1.0) [Uniform]')
 
     ax.axvline(Vmax_b_post.mean(), color='purple', linestyle='--', linewidth=2, label='Posterior mean')
-    ax.axvline(Vmax_mean_est, color='red', linestyle='--', linewidth=2, label='Prior mean')
     ax.set_xlabel('Vmax_b')
     ax.set_ylabel('Density')
     ax.set_title(f'Vmax_b for {sj_id}')
