@@ -1015,9 +1015,15 @@ class TransFitter:
                 self.log2_x_true_type = self.model.x_true_type
 
         # Handle cell subsetting
-        # Subset meta to cells in this modality (work with copy)
-        modality_cell_set = set(modality_cells)
-        meta_subset = self.model.meta[self.model.meta['cell'].isin(modality_cell_set)].copy()
+        # CRITICAL: Preserve exact modality cell order when subsetting meta
+        # Use .set_index().loc[] to ensure meta_subset has same order as modality_cells
+        meta_with_index = self.model.meta.set_index('cell')
+        meta_subset = meta_with_index.loc[modality_cells].reset_index()
+
+        # Verify we got all cells (debugging)
+        if len(meta_subset) != len(modality_cells):
+            missing = set(modality_cells) - set(meta_subset['cell'].values)
+            raise ValueError(f"Some modality cells not found in meta: {missing}")
 
         # Check if technical_group_code exists (for correction)
         if "technical_group_code" in meta_subset.columns:
@@ -1030,24 +1036,22 @@ class TransFitter:
             if alpha_y_prefit is None:
                 warnings.warn("no alpha_y_prefit and no technical_group_code, assuming no confounding effect.")
 
-        # Get cell indices for this modality
-        cell_indices = [i for i, c in enumerate(modality_cells) if c in modality_cell_set]
-        N = len(cell_indices)
+        # All cells are already in correct order, no need for cell_indices
+        N = len(modality_cells)
 
-        # Subset counts to modality cells
+        # Modality counts are already in correct order matching modality_cells
         # Handle both 2D and 3D arrays
         if counts_to_fit.ndim == 2:
             if modality.cells_axis == 1:
-                y_obs = counts_to_fit[:, cell_indices].T  # [T, N] -> [N, T]
+                y_obs = counts_to_fit.T  # [T, N] -> [N, T]
             else:
-                y_obs = counts_to_fit[cell_indices, :]  # Already [N, T]
+                y_obs = counts_to_fit  # Already [N, T]
             T = y_obs.shape[1]
         elif counts_to_fit.ndim == 3:
             # 3D data: (features, cells, categories/dimensions)
-            # Subset and transpose to (cells, features, categories/dimensions)
-            counts_subset = counts_to_fit[:, cell_indices, :]  # [T, N, K]
-            y_obs = counts_subset.transpose(1, 0, 2)  # [T, N, K] -> [N, T, K]
-            T = counts_subset.shape[0]
+            # Transpose to (cells, features, categories/dimensions)
+            y_obs = counts_to_fit.transpose(1, 0, 2)  # [T, N, K] -> [N, T, K]
+            T = counts_to_fit.shape[0]
         else:
             raise ValueError(f"Unexpected number of dimensions: {counts_to_fit.ndim}")
 
@@ -1062,13 +1066,13 @@ class TransFitter:
         if denominator is not None:
             if denominator.ndim == 2:
                 if modality.cells_axis == 1:
-                    denominator_subset = denominator[:, cell_indices].T  # [T, N] -> [N, T]
+                    denominator_subset = denominator.T  # [T, N] -> [N, T]
                 else:
-                    denominator_subset = denominator[cell_indices, :]  # [N, T]
+                    denominator_subset = denominator  # Already [N, T]
                 denominator_tensor = torch.tensor(denominator_subset, dtype=torch.float32, device=self.model.device)
             elif denominator.ndim == 3:
                 # 3D denominator (shouldn't happen for current distributions, but handle it)
-                denominator_subset = denominator[:, cell_indices, :].transpose(1, 0, 2)
+                denominator_subset = denominator.transpose(1, 0, 2)
                 denominator_tensor = torch.tensor(denominator_subset, dtype=torch.float32, device=self.model.device)
 
             # Apply min_denominator filter if specified
@@ -1136,8 +1140,8 @@ class TransFitter:
         # ensure proper ordering just in case
         nmin = torch.minimum(nmin, nmax)
 
-
-        guides_tensor = torch.tensor(self.model.meta['guide_code'].values, dtype=torch.long, device=self.model.device)
+        # CRITICAL: Use meta_subset (correctly ordered) instead of full self.model.meta
+        guides_tensor = torch.tensor(meta_subset['guide_code'].values, dtype=torch.long, device=self.model.device)
 
         # Distribution-specific normalization for data-driven priors
         # For building priors later:
