@@ -1521,8 +1521,10 @@ class TransFitter:
                 print(f"[INFO] Using fallback: mean={valid_mean.item():.3f}, var={valid_var.item():.3f}")
 
                 # Replace NaN with fallback
+                # Assume range from 50% to 150% of typical value
                 fallback_A = valid_mean * 0.5  # A = 50% of mean (minimum)
-                fallback_Vmax = valid_mean * 1.5  # Vmax = 150% of mean (maximum)
+                fallback_max = valid_mean * 1.5  # Upper bound (maximum)
+                fallback_Vmax = fallback_max - fallback_A  # Vmax = RANGE (not maximum!)
                 fallback_A = torch.clamp(fallback_A, min=0.01, max=0.99)  # Keep in valid Beta range
                 fallback_Vmax = torch.clamp(fallback_Vmax, min=0.01, max=0.99)
 
@@ -1554,8 +1556,10 @@ class TransFitter:
                 print(f"[INFO] Using fallback: mean={valid_mean.item():.3f}, var={valid_var.item():.3f}")
 
                 # Replace NaN with fallback
+                # Assume range from 50% to 150% of typical value
                 fallback_A = valid_mean * 0.5  # A = 50% of mean (minimum)
-                fallback_Vmax = valid_mean * 1.5  # Vmax = 150% of mean (maximum)
+                fallback_max = valid_mean * 1.5  # Upper bound (maximum)
+                fallback_Vmax = fallback_max - fallback_A  # Vmax = RANGE (not maximum!)
                 fallback_A = torch.clamp(fallback_A, min=1e-3)  # Ensure positive
                 fallback_Vmax = torch.clamp(fallback_Vmax, min=1e-3)
 
