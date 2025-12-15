@@ -14,6 +14,11 @@ def plot_additive_hill_priors(model, sj_id, modality_name='splicing_sj', save_pa
     """
     Plot prior vs posterior distributions for additive Hill parameters.
 
+    For binomial distributions, priors are:
+    - A: Beta(1, (1-A_mean)/A_mean) - pushes toward 0
+    - Vmax_a, Vmax_b: Beta(Vmax_mean * 10, (1-Vmax_mean) * 10) - independent sampling
+    - K_a, K_b: LogNormal(log_mu, log_sigma) where mean = K_max, std = K_max/(2*sqrt(2))
+
     Parameters
     ----------
     model : bayesDREAM
@@ -167,13 +172,14 @@ def plot_additive_hill_priors(model, sj_id, modality_name='splicing_sj', save_pa
     ax = axes[0, 1]
     ax.hist(Vmax_a_post, bins=50, density=True, alpha=0.7, label='Posterior', color='darkgreen')
 
-    # Prior for Vmax_a: Beta(alpha=Vmax/(1-Vmax), beta=1)
+    # Prior for Vmax_a: Beta(Vmax_mean * 10, (1 - Vmax_mean) * 10)
     if Vmax_mean_est > 0 and Vmax_mean_est < 1:
-        alpha_Vmax = Vmax_mean_est / (1 - Vmax_mean_est)
-        beta_Vmax = 1.0
+        concentration = 10.0
+        alpha_Vmax = Vmax_mean_est * concentration
+        beta_Vmax = (1 - Vmax_mean_est) * concentration
         x = np.linspace(0.001, 0.999, 1000)
         prior_Vmax = stats.beta.pdf(x, alpha_Vmax, beta_Vmax)
-        ax.plot(x, prior_Vmax, 'r-', linewidth=2, label=f'Prior Beta({alpha_Vmax:.2f}, {beta_Vmax:.1f})')
+        ax.plot(x, prior_Vmax, 'r-', linewidth=2, label=f'Prior Beta({alpha_Vmax:.1f}, {beta_Vmax:.1f})')
 
     ax.axvline(Vmax_a_post.mean(), color='darkgreen', linestyle='--', linewidth=2, label='Posterior mean')
     ax.axvline(Vmax_mean_est, color='red', linestyle='--', linewidth=2, label='Prior mean')
@@ -196,11 +202,11 @@ def plot_additive_hill_priors(model, sj_id, modality_name='splicing_sj', save_pa
     ax = axes[0, 2]
     ax.hist(Vmax_b_post, bins=50, density=True, alpha=0.7, label='Posterior', color='purple')
 
-    # Prior for Vmax_b: same as Vmax_a
+    # Prior for Vmax_b: same as Vmax_a - Beta(Vmax_mean * 10, (1 - Vmax_mean) * 10)
     if Vmax_mean_est > 0 and Vmax_mean_est < 1:
         x = np.linspace(0.001, 0.999, 1000)
         prior_Vmax = stats.beta.pdf(x, alpha_Vmax, beta_Vmax)
-        ax.plot(x, prior_Vmax, 'r-', linewidth=2, label=f'Prior Beta({alpha_Vmax:.2f}, {beta_Vmax:.1f})')
+        ax.plot(x, prior_Vmax, 'r-', linewidth=2, label=f'Prior Beta({alpha_Vmax:.1f}, {beta_Vmax:.1f})')
 
     ax.axvline(Vmax_b_post.mean(), color='purple', linestyle='--', linewidth=2, label='Posterior mean')
     ax.axvline(Vmax_mean_est, color='red', linestyle='--', linewidth=2, label='Prior mean')
@@ -223,20 +229,28 @@ def plot_additive_hill_priors(model, sj_id, modality_name='splicing_sj', save_pa
     ax = axes[1, 0]
     ax.hist(K_a_post, bins=50, density=True, alpha=0.7, label='Posterior', color='orange')
 
-    # Prior for K: Gamma(K_alpha, K_alpha/K_max)
+    # Prior for K: LogNormal(K_log_mu, K_log_sigma)
+    # K_mean_prior = K_max, K_std_prior = K_max / (2 * sqrt(K_alpha))
     # Default K_alpha = 2.0
-    K_alpha = 2.0
-    K_rate = K_alpha / K_max_est
+    K_alpha_param = 2.0
+    K_mean_prior = K_max_est
+    K_std_prior = K_max_est / (2.0 * np.sqrt(K_alpha_param))
+
+    # LogNormal parameterization
+    ratio_K = K_std_prior / K_mean_prior
+    K_log_sigma = np.sqrt(np.log1p(ratio_K ** 2))
+    K_log_mu = np.log(K_mean_prior) - 0.5 * K_log_sigma ** 2
+
     x = np.linspace(0.01, K_max_est * 3, 1000)
-    prior_K = stats.gamma.pdf(x, K_alpha, scale=1/K_rate)
-    ax.plot(x, prior_K, 'r-', linewidth=2, label=f'Prior Gamma({K_alpha:.1f}, rate={K_rate:.3f})')
+    prior_K = stats.lognorm.pdf(x, s=K_log_sigma, scale=np.exp(K_log_mu))
+    ax.plot(x, prior_K, 'r-', linewidth=2, label=f'Prior LogNormal(μ={K_log_mu:.2f}, σ={K_log_sigma:.2f})')
 
     ax.axvline(K_a_post.mean(), color='orange', linestyle='--', linewidth=2, label='Posterior mean')
     ax.axvline(K_max_est, color='red', linestyle='--', linewidth=2, label=f'K_max={K_max_est:.1f}')
     ax.set_xlabel('K_a (EC50)')
     ax.set_ylabel('Density')
     ax.set_title(f'K_a for {sj_id}')
-    ax.legend(fontsize=8)
+    ax.legend(fontsize=7)
     ax.grid(True, alpha=0.3)
 
     # ==========================================
@@ -245,15 +259,15 @@ def plot_additive_hill_priors(model, sj_id, modality_name='splicing_sj', save_pa
     ax = axes[1, 1]
     ax.hist(K_b_post, bins=50, density=True, alpha=0.7, label='Posterior', color='brown')
 
-    # Same prior as K_a
-    ax.plot(x, prior_K, 'r-', linewidth=2, label=f'Prior Gamma({K_alpha:.1f}, rate={K_rate:.3f})')
+    # Same prior as K_a (LogNormal)
+    ax.plot(x, prior_K, 'r-', linewidth=2, label=f'Prior LogNormal(μ={K_log_mu:.2f}, σ={K_log_sigma:.2f})')
 
     ax.axvline(K_b_post.mean(), color='brown', linestyle='--', linewidth=2, label='Posterior mean')
     ax.axvline(K_max_est, color='red', linestyle='--', linewidth=2, label=f'K_max={K_max_est:.1f}')
     ax.set_xlabel('K_b (EC50)')
     ax.set_ylabel('Density')
     ax.set_title(f'K_b for {sj_id}')
-    ax.legend(fontsize=8)
+    ax.legend(fontsize=7)
     ax.grid(True, alpha=0.3)
 
     # ==========================================
