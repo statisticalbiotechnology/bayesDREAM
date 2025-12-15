@@ -182,15 +182,18 @@ def plot_additive_hill_priors(model, sj_id, modality_name='splicing_sj',
     guide_means = guide_means[np.isfinite(guide_means)]
 
     if len(guide_means) > 0:
-        # Matching fit_trans lines 1415-1416
+        # Matching fit_trans lines 1415-1424
         Amean_est = np.percentile(guide_means, 5)
-        Vmax_mean_est = np.percentile(guide_means, 95)
-        # Clamp to valid Beta range (matching fit_trans lines 1483-1485)
+        upper_quantile = np.percentile(guide_means, 95)
+        # Clamp A_mean to valid Beta range (matching fit_trans line 1419)
         Amean_est = np.clip(Amean_est, 1e-3, 1.0 - 1e-6)
+        # Vmax is the RANGE (amplitude): y = A + Vmax_a * Hill_a, so Vmax_a = y_max - A
+        Vmax_mean_est = upper_quantile - Amean_est
         Vmax_mean_est = np.clip(Vmax_mean_est, 1e-3, 1.0 - 1e-6)
         print(f"\nEstimated prior parameters (from data):")
         print(f"  Amean (5th percentile): {Amean_est:.4f}")
-        print(f"  Vmax_mean (95th percentile): {Vmax_mean_est:.4f}")
+        print(f"  Upper quantile (95th percentile): {upper_quantile:.4f}")
+        print(f"  Vmax_mean (range = 95th - 5th): {Vmax_mean_est:.4f}")
         print(f"  use_data_driven_priors: {use_data_driven_priors}")
     else:
         Amean_est = 0.1

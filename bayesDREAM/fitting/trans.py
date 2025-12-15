@@ -1413,10 +1413,15 @@ class TransFitter:
 
             # For A and Vmax: use 5th and 95th percentiles of guide means
             Amean_tensor = nanquantile(guide_means, 0.05, dim=0)  # [T] or [T, K]
-            Vmax_mean_tensor = nanquantile(guide_means, 0.95, dim=0)  # [T] or [T, K]
+            upper_quantile = nanquantile(guide_means, 0.95, dim=0)  # [T] or [T, K]
 
             # Ensure A_mean >= 1e-3
             Amean_tensor = Amean_tensor.clamp_min(self._t(1e-3))
+
+            # Vmax is the RANGE (amplitude), not the absolute value
+            # Model: y = A + Vmax_a * Hill_a, so Vmax_a = y_max - A
+            Vmax_mean_tensor = upper_quantile - Amean_tensor  # [T] or [T, K]
+            Vmax_mean_tensor = Vmax_mean_tensor.clamp_min(self._t(1e-3))  # Ensure positive
 
             # For variances: use mean variance across guides (average within-guide variability)
             # This captures how much variability exists around each guide's mean
@@ -1478,6 +1483,12 @@ class TransFitter:
 
             # Ensure A_mean >= 1e-3
             Amean_tensor = Amean_tensor.clamp_min(self._t(1e-3))
+
+            # Vmax is the RANGE (amplitude), not the absolute value
+            # Model: y = A + Vmax_a * Hill_a, so Vmax_a = y_max - A
+            # (upper_quantile is stored in Vmax_mean_tensor before this line)
+            Vmax_mean_tensor = Vmax_mean_tensor - Amean_tensor  # [T] or [T, K]
+            Vmax_mean_tensor = Vmax_mean_tensor.clamp_min(self._t(1e-3))  # Ensure positive
 
         # For binomial/multinomial: clamp Vmax_mean to valid Beta range
         if distribution in ['binomial', 'multinomial']:
