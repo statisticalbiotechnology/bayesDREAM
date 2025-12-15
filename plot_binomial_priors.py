@@ -204,10 +204,19 @@ def plot_additive_hill_priors(model, sj_id, modality_name='splicing_sj',
         else:
             x_true_mean = to_numpy(model.x_true)
         K_max_est = x_true_mean.max()
+
+        # Calculate CV (coefficient of variation) of x_true (matching fit_trans lines 1563-1565)
+        x_true_mean_global = x_true_mean.mean()
+        x_true_std_global = x_true_mean.std()
+        x_true_CV = x_true_std_global / max(x_true_mean_global, 1e-6)
+
         print(f"  K_max (from x_true): {K_max_est:.2f}")
+        print(f"  x_true CV: {x_true_CV:.4f}")
     else:
         K_max_est = 10.0
+        x_true_CV = 0.5  # Fallback CV
         print(f"  K_max (fallback): {K_max_est:.2f}")
+        print(f"  x_true CV (fallback): {x_true_CV:.4f}")
 
     # Create figure with 2 rows, 3 columns
     fig, axes = plt.subplots(2, 3, figsize=(15, 10))
@@ -316,11 +325,10 @@ def plot_additive_hill_priors(model, sj_id, modality_name='splicing_sj',
     ax.hist(K_a_post, bins=50, density=True, alpha=0.7, label='Posterior', color='orange')
 
     # Prior for K: LogNormal(K_log_mu, K_log_sigma)
-    # K_mean_prior = K_max, K_std_prior = K_max / (2 * sqrt(K_alpha))
-    # Default K_alpha = 2.0
-    K_alpha_param = 2.0
-    K_mean_prior = K_max_est
-    K_std_prior = K_max_est / (2.0 * np.sqrt(K_alpha_param))
+    # K_mean_prior = K_max / 2, K_std_prior = K_mean_prior * CV(x_true)
+    # (matching fit_trans lines 309-319)
+    K_mean_prior = K_max_est / 2.0
+    K_std_prior = K_mean_prior * x_true_CV
 
     # LogNormal parameterization
     ratio_K = K_std_prior / K_mean_prior
@@ -332,7 +340,8 @@ def plot_additive_hill_priors(model, sj_id, modality_name='splicing_sj',
     ax.plot(x, prior_K, 'r-', linewidth=2, label=f'Prior LogNormal(μ={K_log_mu:.2f}, σ={K_log_sigma:.2f})')
 
     ax.axvline(K_a_post.mean(), color='orange', linestyle='--', linewidth=2, label='Posterior mean')
-    ax.axvline(K_max_est, color='red', linestyle='--', linewidth=2, label=f'K_max={K_max_est:.1f}')
+    ax.axvline(K_mean_prior, color='red', linestyle='--', linewidth=2, label=f'Prior mean={K_mean_prior:.1f}')
+    ax.axvline(K_max_est, color='darkred', linestyle=':', linewidth=1.5, alpha=0.6, label=f'K_max={K_max_est:.1f}')
     ax.set_xlabel('K_a (EC50)')
     ax.set_ylabel('Density')
     ax.set_title(f'K_a for {sj_id}')
@@ -349,7 +358,8 @@ def plot_additive_hill_priors(model, sj_id, modality_name='splicing_sj',
     ax.plot(x, prior_K, 'r-', linewidth=2, label=f'Prior LogNormal(μ={K_log_mu:.2f}, σ={K_log_sigma:.2f})')
 
     ax.axvline(K_b_post.mean(), color='brown', linestyle='--', linewidth=2, label='Posterior mean')
-    ax.axvline(K_max_est, color='red', linestyle='--', linewidth=2, label=f'K_max={K_max_est:.1f}')
+    ax.axvline(K_mean_prior, color='red', linestyle='--', linewidth=2, label=f'Prior mean={K_mean_prior:.1f}')
+    ax.axvline(K_max_est, color='darkred', linestyle=':', linewidth=1.5, alpha=0.6, label=f'K_max={K_max_est:.1f}')
     ax.set_xlabel('K_b (EC50)')
     ax.set_ylabel('Density')
     ax.set_title(f'K_b for {sj_id}')
