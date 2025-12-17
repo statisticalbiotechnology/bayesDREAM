@@ -1730,11 +1730,11 @@ class TransFitter:
 
             # Sample from posterior
             x_true_sample = (
-                self.model.x_true[samp] if samp < self.model.x_true.shape[0] else self.model.x_true.mean(dim=0)
+                (self.model.x_true[samp] if samp < self.model.x_true.shape[0] else self.model.x_true.mean(dim=0))
                 if self.model.x_true_type == "posterior" else self.model.x_true
             )
             log2_x_true_sample = (
-                self.log2_x_true[samp] if samp < self.log2_x_true.shape[0] else self.log2_x_true.mean(dim=0)
+                (self.log2_x_true[samp] if samp < self.log2_x_true.shape[0] else self.log2_x_true.mean(dim=0))
                 if self.log2_x_true_type == "posterior" else self.log2_x_true
             )
             # For alpha_y_sample: check actual dimensions instead of just alpha_y_type
