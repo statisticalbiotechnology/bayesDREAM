@@ -424,32 +424,53 @@ def plot_three_steps(
                    c=tech_colors[i], alpha=alpha, s=s, label=label)
 
     # Overlay Hill function if available
-    if 'A' in model.posterior_samples_trans:
+    # Check both model-level and modality-level posteriors
+    posterior = None
+    if hasattr(model, 'posterior_samples_trans') and model.posterior_samples_trans is not None:
+        posterior = model.posterior_samples_trans
+    elif hasattr(primary_mod, 'posterior_samples_trans') and primary_mod.posterior_samples_trans is not None:
+        posterior = primary_mod.posterior_samples_trans
+
+    if posterior is not None and 'A' in posterior:
         try:
             # Get posterior means
-            A_samps = model.posterior_samples_trans['A']
-            A = A_samps.mean(dim=0)[trans_idx].item() if hasattr(A_samps, 'mean') else A_samps.mean(axis=0)[trans_idx]
+            A_samps = posterior['A']
+
+            # For modality-level posteriors, shape is (samples, cis_genes, trans_features)
+            # For model-level, shape is (samples, trans_features)
+            if hasattr(A_samps, 'mean'):
+                A_mean = A_samps.mean(dim=0)
+            else:
+                A_mean = A_samps.mean(axis=0)
+
+            # If 2D (modality-level), squeeze out cis dimension
+            if A_mean.ndim == 2:
+                A_mean = A_mean.squeeze(0)  # Assume single cis gene
+
+            A = A_mean[trans_idx].item() if hasattr(A_mean, 'item') else A_mean[trans_idx]
 
             # Check if additive Hill
-            if 'n_a' in model.posterior_samples_trans and 'n_b' in model.posterior_samples_trans:
-                Vmax_a_samps = model.posterior_samples_trans['Vmax_a']
-                Vmax_b_samps = model.posterior_samples_trans['Vmax_b']
-                K_a_samps = model.posterior_samples_trans['K_a']
-                K_b_samps = model.posterior_samples_trans['K_b']
-                n_a_samps = model.posterior_samples_trans['n_a']
-                n_b_samps = model.posterior_samples_trans['n_b']
-                alpha_samps = model.posterior_samples_trans['alpha']
-                beta_samps = model.posterior_samples_trans['beta']
+            if 'n_a' in posterior and 'n_b' in posterior:
+                def extract_mean(param_samps, idx):
+                    """Extract mean for a parameter, handling 2D and 3D shapes."""
+                    if hasattr(param_samps, 'mean'):
+                        param_mean = param_samps.mean(dim=0)
+                    else:
+                        param_mean = param_samps.mean(axis=0)
+                    # Squeeze if 2D (modality-level)
+                    if param_mean.ndim == 2:
+                        param_mean = param_mean.squeeze(0)
+                    return param_mean[idx].item() if hasattr(param_mean, 'item') else param_mean[idx]
 
-                # Extract means
-                Vmax_a = Vmax_a_samps.mean(dim=0)[trans_idx].item() if hasattr(Vmax_a_samps, 'mean') else Vmax_a_samps.mean(axis=0)[trans_idx]
-                Vmax_b = Vmax_b_samps.mean(dim=0)[trans_idx].item() if hasattr(Vmax_b_samps, 'mean') else Vmax_b_samps.mean(axis=0)[trans_idx]
-                K_a = K_a_samps.mean(dim=0)[trans_idx].item() if hasattr(K_a_samps, 'mean') else K_a_samps.mean(axis=0)[trans_idx]
-                K_b = K_b_samps.mean(dim=0)[trans_idx].item() if hasattr(K_b_samps, 'mean') else K_b_samps.mean(axis=0)[trans_idx]
-                n_a = n_a_samps.mean(dim=0)[trans_idx].item() if hasattr(n_a_samps, 'mean') else n_a_samps.mean(axis=0)[trans_idx]
-                n_b = n_b_samps.mean(dim=0)[trans_idx].item() if hasattr(n_b_samps, 'mean') else n_b_samps.mean(axis=0)[trans_idx]
-                alpha_val = alpha_samps.mean(dim=0)[trans_idx].item() if hasattr(alpha_samps, 'mean') else alpha_samps.mean(axis=0)[trans_idx]
-                beta_val = beta_samps.mean(dim=0)[trans_idx].item() if hasattr(beta_samps, 'mean') else beta_samps.mean(axis=0)[trans_idx]
+                # Extract all Hill parameters
+                Vmax_a = extract_mean(posterior['Vmax_a'], trans_idx)
+                Vmax_b = extract_mean(posterior['Vmax_b'], trans_idx)
+                K_a = extract_mean(posterior['K_a'], trans_idx)
+                K_b = extract_mean(posterior['K_b'], trans_idx)
+                n_a = extract_mean(posterior['n_a'], trans_idx)
+                n_b = extract_mean(posterior['n_b'], trans_idx)
+                alpha_val = extract_mean(posterior['alpha'], trans_idx)
+                beta_val = extract_mean(posterior['beta'], trans_idx)
 
                 # Compute Hill function
                 x_range = np.linspace(log2_x_true.min(), log2_x_true.max(), 200)
@@ -466,6 +487,8 @@ def plot_three_steps(
                 ax4.plot(x_range, y_pred_log, 'k-', lw=2.5, alpha=0.8, label='Fitted Hill function')
         except Exception as e:
             warnings.warn(f"Could not plot Hill function: {e}")
+            import traceback
+            traceback.print_exc()
 
     ax4.set_xlabel(f"log2(x_true)", fontsize=10)
     ax4.set_ylabel(f"log2({trans_feature} + 1) [k={k_smooth} smoothed]", fontsize=10)
