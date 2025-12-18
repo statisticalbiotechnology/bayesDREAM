@@ -224,10 +224,29 @@ def plot_three_steps(
 
     # Get technical groups
     tech_groups = model.meta['technical_group_code'].values
-    tech_labels = model.meta['technical_group_label'].values
     unique_groups = sorted(model.meta['technical_group_code'].unique())
-    unique_labels = [model.meta[model.meta['technical_group_code'] == g]['technical_group_label'].iloc[0]
-                     for g in unique_groups]
+
+    # Get labels - check if technical_group_label column exists
+    if 'technical_group_label' in model.meta.columns:
+        tech_labels = model.meta['technical_group_label'].values
+        unique_labels = [model.meta[model.meta['technical_group_code'] == g]['technical_group_label'].iloc[0]
+                         for g in unique_groups]
+    else:
+        # Use the code directly as label (or try to get from cell_line/group columns)
+        if 'cell_line' in model.meta.columns:
+            # Map code to cell_line (assumes they're aligned)
+            code_to_label = {}
+            for code in unique_groups:
+                mask = model.meta['technical_group_code'] == code
+                # Get most common cell_line for this code
+                cell_line = model.meta[mask]['cell_line'].mode()[0] if mask.sum() > 0 else f"Group_{code}"
+                code_to_label[code] = cell_line
+            unique_labels = [code_to_label[g] for g in unique_groups]
+            tech_labels = np.array([code_to_label[code] for code in tech_groups])
+        else:
+            # Fallback: use codes as labels
+            unique_labels = [f"Group_{g}" for g in unique_groups]
+            tech_labels = np.array([f"Group_{code}" for code in tech_groups])
 
     # Get guide information
     if 'guide' not in model.meta.columns:
