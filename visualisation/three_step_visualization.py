@@ -126,6 +126,8 @@ def plot_three_steps(
     k_smooth: int = 30,
     show_correction_vector: bool = True,
     reference_group: Optional[str] = None,
+    technical_subsample_frac: float = 0.1,
+    n_guides_cis: int = 10,
     figsize: Tuple[int, int] = (18, 5),
     alpha: float = 0.5,
     s: float = 5,
@@ -148,6 +150,11 @@ def plot_three_steps(
         Show correction vector in step 1 (default: True)
     reference_group : str, optional
         Name of reference technical group (will be grey)
+    technical_subsample_frac : float
+        Fraction of cells to randomly sample per technical group in step 1 (default: 0.1)
+    n_guides_cis : int
+        Number of guides to show in step 2 cis plot (default: 10)
+        Randomly samples from all available guides
     figsize : tuple
         Figure size (default: (18, 5))
     alpha : float
@@ -294,17 +301,33 @@ def plot_three_steps(
     # ========================================================================
     ax1.set_title("Step 1: Fit technical", fontsize=12, fontweight='bold')
 
-    # Plot each technical group
+    # Subsample cells per technical group
+    np.random.seed(42)  # For reproducibility
+    sampled_indices = []
+    for group_code in unique_groups:
+        group_mask = tech_groups == group_code
+        group_indices = np.where(group_mask)[0]
+        n_sample = max(1, int(len(group_indices) * technical_subsample_frac))
+        sampled_idx = np.random.choice(group_indices, size=n_sample, replace=False)
+        sampled_indices.extend(sampled_idx)
+
+    sampled_indices = np.array(sampled_indices)
+
+    # Plot each technical group (subsampled)
     for i, (group_code, label) in enumerate(zip(unique_groups, unique_labels)):
-        mask = tech_groups == group_code
-        ax1.scatter(cis_norm[mask], trans_norm[mask],
-                   c=tech_colors[i], alpha=alpha, s=s, label=label)
+        mask = tech_groups[sampled_indices] == group_code
+        # Lighter alpha for better visibility of correction vector
+        ax1.scatter(cis_norm[sampled_indices][mask], trans_norm[sampled_indices][mask],
+                   c=tech_colors[i], alpha=alpha * 0.7, s=s, label=label)
 
     # Show correction vector if requested
+    correction_handle = None
     if show_correction_vector and len(unique_groups) > 1:
-        # Pick two example points from different groups
-        group0_pts = np.where(tech_groups == unique_groups[0])[0]
-        group1_pts = np.where(tech_groups == unique_groups[1])[0]
+        # Pick two example points from different groups (from subsampled data)
+        group0_mask = tech_groups[sampled_indices] == unique_groups[0]
+        group1_mask = tech_groups[sampled_indices] == unique_groups[1]
+        group0_pts = sampled_indices[group0_mask]
+        group1_pts = sampled_indices[group1_mask]
 
         if len(group0_pts) > 0 and len(group1_pts) > 0:
             # Find closest pair
@@ -312,18 +335,23 @@ def plot_three_steps(
             pt1_candidates = group1_pts[np.argsort(np.abs(cis_norm[group1_pts] - cis_norm[pt0]))]
             pt1 = pt1_candidates[0]
 
-            # Draw correction vector
+            # Draw correction vector (more visible - red color)
             ax1.annotate('', xy=(cis_norm[pt0], trans_norm[pt0]),
                         xytext=(cis_norm[pt1], trans_norm[pt1]),
-                        arrowprops=dict(arrowstyle='->', color='black', lw=1.5,
-                                      linestyle='--', alpha=0.7))
-            ax1.text((cis_norm[pt0] + cis_norm[pt1])/2,
-                    (trans_norm[pt0] + trans_norm[pt1])/2 + 0.5,
-                    'correction\nvector', fontsize=8, ha='center', style='italic')
+                        arrowprops=dict(arrowstyle='->', color='red', lw=2.5, alpha=0.9))
+
+            # Add to legend by creating invisible line
+            correction_handle = plt.Line2D([0], [0], color='red', lw=2.5, label='Correction vector')
 
     ax1.set_xlabel(f"log2({model.cis_gene} + 1)", fontsize=10)
     ax1.set_ylabel(f"log2({trans_feature} + 1)", fontsize=10)
-    ax1.legend(fontsize=8, frameon=False, title='Technical groups')
+
+    # Add legend with correction vector if shown
+    handles, labels = ax1.get_legend_handles_labels()
+    if correction_handle is not None:
+        handles.append(correction_handle)
+        labels.append('Correction vector')
+    ax1.legend(handles, labels, fontsize=8, frameon=False, title='Technical groups')
     ax1.grid(alpha=0.3)
 
     # ========================================================================
@@ -331,8 +359,17 @@ def plot_three_steps(
     # ========================================================================
     ax2.set_title("Step 2: Fit cis", fontsize=12, fontweight='bold')
 
-    # Plot scatter by guide
-    for guide in unique_guides:
+    # Subsample guides
+    n_guides_to_plot = min(n_guides_cis, len(unique_guides))
+    if len(unique_guides) > n_guides_to_plot:
+        # Randomly select guides
+        np.random.seed(42)
+        selected_guides = np.random.choice(unique_guides, size=n_guides_to_plot, replace=False)
+    else:
+        selected_guides = unique_guides
+
+    # Plot scatter by guide (subsampled)
+    for guide in selected_guides:
         mask = guides == guide
         ax2.scatter(cis_norm[mask], log2_x_true[mask],
                    c=guide_colors[guide], alpha=alpha, s=s, label=guide)
@@ -342,16 +379,17 @@ def plot_three_steps(
     # Too many guides for legend, skip it
     ax2.grid(alpha=0.3)
 
-    # Density plots (rotated)
+    # Density plots (rotated) - one plot per guide, all on same axes
     ax3.set_title("", fontsize=10)
     ax3.set_ylabel(f"log2(x_true)", fontsize=10)
     ax3.set_xlabel("Density", fontsize=8)
 
-    # Plot density for each guide
+    # Plot density for each selected guide
     y_min, y_max = log2_x_true.min(), log2_x_true.max()
     y_grid = np.linspace(y_min, y_max, 200)
 
-    for i, guide in enumerate(unique_guides[:5]):  # Limit to 5 guides for clarity
+    max_density = 0  # Track max for x-axis scaling
+    for guide in selected_guides:
         mask = guides == guide
         guide_x_true = log2_x_true[mask]
 
@@ -359,15 +397,15 @@ def plot_three_steps(
             kde = gaussian_kde(guide_x_true, bw_method='scott')
             density = kde(y_grid)
 
-            # Normalize density
-            density = density / density.max() * 0.15  # Scale to fit nicely
+            # Plot density curve (all start from x=0, no offset)
+            ax3.plot(density, y_grid, c=guide_colors[guide], lw=1.5, alpha=0.7)
+            ax3.fill_betweenx(y_grid, 0, density,
+                             color=guide_colors[guide], alpha=0.2)
 
-            ax3.plot(density + i * 0.2, y_grid, c=guide_colors[guide], lw=1.5, alpha=0.8)
-            ax3.fill_betweenx(y_grid, i * 0.2, density + i * 0.2,
-                             color=guide_colors[guide], alpha=0.3)
+            max_density = max(max_density, density.max())
 
     ax3.set_ylim(ax2.get_ylim())
-    ax3.set_xlim(0, len(unique_guides[:5]) * 0.2 + 0.15)
+    ax3.set_xlim(0, max_density * 1.1)
     ax3.set_xticks([])
     ax3.grid(alpha=0.3, axis='y')
 
