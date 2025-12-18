@@ -370,11 +370,27 @@ def _resolve_features(feature_or_gene: str, modality) -> Tuple[List[int], List[s
 
             # Get feature names for matched indices
             if hasattr(modality, 'feature_names') and modality.feature_names is not None:
+                # Use explicit feature_names attribute if available
                 names = [modality.feature_names[i] for i in indices]
-            elif modality.feature_meta.index.name:
-                names = modality.feature_meta.iloc[indices].index.tolist()
             else:
-                names = [str(i) for i in indices]
+                # Extract from feature_meta columns
+                # Priority: feature_id > feature > gene_name > gene > junction coordinates > fallback to index
+                name_cols = ['feature_id', 'feature', 'gene_name', 'gene', 'coord.intron', 'junction_id']
+                name_col_found = None
+                for col in name_cols:
+                    if col in modality.feature_meta.columns:
+                        name_col_found = col
+                        break
+
+                if name_col_found:
+                    # Extract names from the identified column
+                    names = modality.feature_meta.iloc[indices][name_col_found].tolist()
+                elif modality.feature_meta.index.name:
+                    # Use index if it has a name
+                    names = modality.feature_meta.iloc[indices].index.tolist()
+                else:
+                    # Last resort: use str(index)
+                    names = [str(i) for i in indices]
 
             return indices, names, True
 
