@@ -212,13 +212,20 @@ def plot_three_steps(
     cis_norm = np.log2(cis_counts / sum_factors + 1)
     trans_norm = np.log2(trans_counts / sum_factors + 1)
 
-    # Get x_true (mean if posterior)
-    if hasattr(model.x_true, 'mean'):
-        x_true = model.x_true.mean(dim=0).cpu().numpy()
-    elif model.x_true.ndim == 2:
-        x_true = model.x_true.mean(axis=0)
+    # Get x_true (mean if posterior, otherwise use directly)
+    # Handle both tensor and numpy array
+    import torch
+
+    if isinstance(model.x_true, torch.Tensor):
+        x_true_arr = model.x_true.cpu().numpy()
     else:
-        x_true = model.x_true
+        x_true_arr = np.array(model.x_true)
+
+    # If 2D (posterior samples), take mean over samples
+    if x_true_arr.ndim == 2:
+        x_true = x_true_arr.mean(axis=0)
+    else:
+        x_true = x_true_arr.ravel()  # Ensure 1D
 
     log2_x_true = np.log2(x_true)
 
