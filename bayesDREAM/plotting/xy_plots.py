@@ -911,32 +911,27 @@ def predict_trans_function(
         except (KeyError, IndexError, AttributeError):
             return None
 
-    elif 'upper_limit' in posterior and 'alpha' in posterior and 'beta' in posterior:
-        # ===== ADDITIVE HILL (binomial/multinomial with upper_limit) =====
+    elif 'upper_limit' in posterior and 'Vmax_a' in posterior and 'Vmax_b' in posterior:
+        # ===== ADDITIVE HILL (binomial/multinomial with upper_limit and Vmax_a/b) =====
         try:
             # Extract parameters using helper function
             alpha = _extract_param(posterior['alpha'], feature_idx)
             beta = _extract_param(posterior['beta'], feature_idx)
-            upper_limit = _extract_param(posterior['upper_limit'], feature_idx)
+            Vmax_a = _extract_param(posterior['Vmax_a'], feature_idx)
+            Vmax_b = _extract_param(posterior['Vmax_b'], feature_idx)
             K_a = _extract_param(posterior['K_a'], feature_idx)
             K_b = _extract_param(posterior['K_b'], feature_idx)
             n_a = _extract_param(posterior['n_a'], feature_idx)
             n_b = _extract_param(posterior['n_b'], feature_idx)
 
-            # IMPORTANT: Match the actual model computation!
-            # Model uses: y = A + Vmax_sum * (alpha * Hill_{Vmax=1}(x) + beta * Hill_{Vmax=1}(x))
-            # where Hills with Vmax=1 return values in [0, 1]
-            Vmax_sum = upper_limit - A
+            # IMPORTANT: Match the actual model computation in fit_trans!
+            # Model uses: y = A + (alpha * Hill_a(Vmax=Vmax_a)) + (beta * Hill_b(Vmax=Vmax_b))
+            # where Hill functions return values in [0, Vmax]
+            Hill_a = Hill_based_positive(x_range, Vmax=Vmax_a, A=0, K=K_a, n=n_a)
+            Hill_b = Hill_based_positive(x_range, Vmax=Vmax_b, A=0, K=K_b, n=n_b)
 
-            # Compute Hill functions with Vmax=1 (normalized to [0, 1])
-            Hill_a = Hill_based_positive(x_range, Vmax=1.0, A=0, K=K_a, n=n_a)
-            Hill_b = Hill_based_positive(x_range, Vmax=1.0, A=0, K=K_b, n=n_b)
-
-            # Combined Hill can exceed 1 if alpha + beta > 1!
-            combined_hill = alpha * Hill_a + beta * Hill_b
-
-            # Combined prediction (can exceed upper_limit if combined_hill > 1)
-            y_pred = A + Vmax_sum * combined_hill
+            # Combined prediction
+            y_pred = A + alpha * Hill_a + beta * Hill_b
             return y_pred
 
         except (KeyError, IndexError, AttributeError):
@@ -1083,10 +1078,8 @@ def plot_negbinom_xy(
             fig, ax = plt.subplots(1, 1, figsize=(8, 5))
             axes = [ax]
     else:
-        # Single axis provided - cannot show both corrected and uncorrected
-        if show_correction == 'both':
-            warnings.warn("show_correction='both' not supported when ax is provided (multi-panel mode). Showing uncorrected only.")
-            show_correction = 'uncorrected'
+        # Single axis provided - in multifeature mode, function is called twice
+        # (once with 'uncorrected' and once with 'corrected'), so don't override show_correction
         axes = [ax]
 
     # Map technical_group_code → label using only codes present in this df
@@ -1349,10 +1342,8 @@ def plot_binomial_xy(
             fig, ax = plt.subplots(1, 1, figsize=(8, 5))
             axes = [ax]
     else:
-        # Single axis provided - cannot show both corrected and uncorrected
-        if show_correction == 'both':
-            warnings.warn("show_correction='both' not supported when ax is provided (multi-panel mode). Showing uncorrected only.")
-            show_correction = 'uncorrected'
+        # Single axis provided - in multifeature mode, function is called twice
+        # (once with 'uncorrected' and once with 'corrected'), so don't override show_correction
         axes = [ax]
 
     # Get technical group labels
@@ -1466,12 +1457,14 @@ def plot_binomial_xy(
         ax_plot.legend(frameon=False)
 
     # Plot
+    # NOTE: When ax is provided (multifeature mode), show_correction will be 'uncorrected' or 'corrected'
+    # (forced by warning above), so we respect the show_correction value
     if show_correction == 'both':
         _plot_one(axes[0], corrected=False)
         _plot_one(axes[1], corrected=True)
     elif show_correction == 'corrected':
         _plot_one(axes[0], corrected=True)
-    else:
+    else:  # show_correction == 'uncorrected'
         _plot_one(axes[0], corrected=False)
 
     return axes[0] if len(axes) == 1 else axes
@@ -1868,10 +1861,8 @@ def plot_normal_xy(
             fig, ax = plt.subplots(1, 1, figsize=(8, 5))
             axes = [ax]
     else:
-        # Single axis provided - cannot show both corrected and uncorrected
-        if show_correction == 'both':
-            warnings.warn("show_correction='both' not supported when ax is provided (multi-panel mode). Showing uncorrected only.")
-            show_correction = 'uncorrected'
+        # Single axis provided - in multifeature mode, function is called twice
+        # (once with 'uncorrected' and once with 'corrected'), so don't override show_correction
         axes = [ax]
 
     # Get technical group labels
