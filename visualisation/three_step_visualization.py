@@ -323,25 +323,86 @@ def plot_three_steps(
     # Show correction vector if requested
     correction_handle = None
     if show_correction_vector and len(unique_groups) > 1:
-        # Pick two example points from different groups (from subsampled data)
-        group0_mask = tech_groups[sampled_indices] == unique_groups[0]
-        group1_mask = tech_groups[sampled_indices] == unique_groups[1]
-        group0_pts = sampled_indices[group0_mask]
-        group1_pts = sampled_indices[group1_mask]
+        # Get alpha_y_prefit from modality for the trans feature
+        gene_modality = model.get_modality('gene')
+        alpha_y = None
 
-        if len(group0_pts) > 0 and len(group1_pts) > 0:
-            # Find closest pair
-            pt0 = group0_pts[len(group0_pts)//2]  # Middle point
-            pt1_candidates = group1_pts[np.argsort(np.abs(cis_norm[group1_pts] - cis_norm[pt0]))]
-            pt1 = pt1_candidates[0]
+        if hasattr(gene_modality, 'alpha_y_prefit') and gene_modality.alpha_y_prefit is not None:
+            alpha_y_tensor = gene_modality.alpha_y_prefit
 
-            # Draw correction vector (more visible - red color)
-            ax1.annotate('', xy=(cis_norm[pt0], trans_norm[pt0]),
-                        xytext=(cis_norm[pt1], trans_norm[pt1]),
-                        arrowprops=dict(arrowstyle='->', color='red', lw=2.5, alpha=0.9))
+            # Find trans feature index
+            trans_idx = None
+            if trans_feature in gene_modality.feature_meta.index:
+                trans_idx = gene_modality.feature_meta.index.get_loc(trans_feature)
+            else:
+                # Try to find in feature_meta columns
+                for col in ['gene_name', 'gene', 'feature', 'feature_id']:
+                    if col in gene_modality.feature_meta.columns:
+                        matches = gene_modality.feature_meta[col] == trans_feature
+                        if matches.any():
+                            trans_idx = matches.idxmax()
+                            break
 
-            # Add to legend by creating invisible line
-            correction_handle = plt.Line2D([0], [0], color='red', lw=2.5, label='Correction vector')
+            if trans_idx is not None:
+                # Extract alpha_y for this feature
+                # Shape: [samples, groups, features] or [groups, features]
+                if hasattr(alpha_y_tensor, 'cpu'):
+                    alpha_y_tensor = alpha_y_tensor.cpu().numpy()
+
+                if alpha_y_tensor.ndim == 3:
+                    # Posterior: [samples, groups, features]
+                    # Take mean over samples
+                    alpha_y = alpha_y_tensor.mean(axis=0)[:, trans_idx]  # [groups]
+                elif alpha_y_tensor.ndim == 2:
+                    # Point estimate: [groups, features]
+                    alpha_y = alpha_y_tensor[:, trans_idx]  # [groups]
+                else:
+                    warnings.warn(f"Unexpected alpha_y_prefit shape: {alpha_y_tensor.shape}")
+
+        # Draw correction vector using alpha_y if available
+        if alpha_y is not None and len(alpha_y) >= 2:
+            # Pick a point from group 0
+            group0_mask = tech_groups[sampled_indices] == unique_groups[0]
+            group0_pts = sampled_indices[group0_mask]
+
+            if len(group0_pts) > 0:
+                # Pick middle point from group 0
+                pt0 = group0_pts[len(group0_pts)//2]
+                x0, y0 = cis_norm[pt0], trans_norm[pt0]
+
+                # Compute multiplicative correction from group 0 to group 1
+                # alpha_y is multiplicative on linear scale, so on log2 scale: log2(alpha_1/alpha_0)
+                alpha_ratio = alpha_y[unique_groups[1]] / alpha_y[unique_groups[0]]
+                log2_correction = np.log2(alpha_ratio) if alpha_ratio > 0 else 0
+
+                # Corrected position (move vertically on log2 scale)
+                x1, y1 = x0, y0 + log2_correction
+
+                # Draw correction vector (vertical, red color)
+                ax1.annotate('', xy=(x1, y1), xytext=(x0, y0),
+                            arrowprops=dict(arrowstyle='->', color='red', lw=2.5, alpha=0.9))
+
+                # Add to legend
+                correction_handle = plt.Line2D([0], [0], color='red', lw=2.5,
+                                              label=f'Correction vector\n(α₁/α₀={alpha_ratio:.2f})')
+        else:
+            # Fallback to old behavior if alpha_y not available
+            warnings.warn("alpha_y_prefit not available, drawing approximate correction vector")
+            group0_mask = tech_groups[sampled_indices] == unique_groups[0]
+            group1_mask = tech_groups[sampled_indices] == unique_groups[1]
+            group0_pts = sampled_indices[group0_mask]
+            group1_pts = sampled_indices[group1_mask]
+
+            if len(group0_pts) > 0 and len(group1_pts) > 0:
+                pt0 = group0_pts[len(group0_pts)//2]
+                pt1_candidates = group1_pts[np.argsort(np.abs(cis_norm[group1_pts] - cis_norm[pt0]))]
+                pt1 = pt1_candidates[0]
+
+                ax1.annotate('', xy=(cis_norm[pt0], trans_norm[pt0]),
+                            xytext=(cis_norm[pt1], trans_norm[pt1]),
+                            arrowprops=dict(arrowstyle='->', color='red', lw=2.5, alpha=0.9))
+
+                correction_handle = plt.Line2D([0], [0], color='red', lw=2.5, label='Correction vector')
 
     ax1.set_xlabel(f"log2({model.cis_gene} + 1)", fontsize=10)
     ax1.set_ylabel(f"log2({trans_feature} + 1)", fontsize=10)
