@@ -17,6 +17,9 @@ from typing import Optional, Dict, List, Tuple, Union, Any
 import warnings
 import torch
 
+# Import dependency filtering from utils
+from .utils import dependency_mask_from_n
+
 
 # ============================================================================
 # Helper Functions
@@ -2395,6 +2398,8 @@ def plot_xy_data(
     figsize: Optional[Tuple[int, int]] = None,
     src_barcodes: Optional[np.ndarray] = None,
     subset_meta: Optional[Dict[str, Any]] = None,
+    only_dependent: bool = False,
+    ci_level: float = 95.0,
     **kwargs
 ) -> Union[plt.Figure, plt.Axes]:
     """
@@ -2451,6 +2456,14 @@ def plot_xy_data(
         Example: {'cell_line': 'CRISPRi'} - plot only CRISPRi cells
         Example: {'lane': 'L1', 'cell_line': 'CRISPRa'} - plot L1 lane CRISPRa cells
         Multiple conditions are combined with AND logic.
+    only_dependent : bool
+        If True and plotting multiple features (gene name), filter to only "dependent" features
+        where the Hill coefficient (n_a or n_b) credible interval excludes 0 (default: False).
+        Requires fit_trans() to have been run with function_type='additive_hill'.
+        Ignored for single-feature plots.
+    ci_level : float
+        Credible interval level for dependency filtering (default: 95.0).
+        Only used if only_dependent=True.
     **kwargs
         Additional plotting arguments
 
@@ -2497,6 +2510,9 @@ def plot_xy_data(
     >>>
     >>> # Plot only CRISPRi cells
     >>> model.plot_xy_data('GFI1B', subset_meta={'cell_line': 'CRISPRi'})
+    >>>
+    >>> # Plot all junctions for a gene, but only show dependent ones (n_a or n_b CI excludes 0)
+    >>> model.plot_xy_data('HES4', modality_name='splicing_sj', only_dependent=True, ci_level=95.0)
     """
     # Check x_true is set
     if not hasattr(model, 'x_true') or model.x_true is None:
@@ -2560,6 +2576,101 @@ def plot_xy_data(
 
     # Resolve feature(s) - could be single feature or gene name
     feature_indices, feature_names_resolved, is_gene = _resolve_features(feature, modality)
+
+    # Filter to only dependent features if requested (multifeature mode only)
+    if only_dependent and is_gene and len(feature_indices) > 1:
+        # Check that trans model is fitted
+        if modality_name == model.primary_modality:
+            # Primary modality: check model-level posterior
+            if not hasattr(model, 'posterior_samples_trans') or model.posterior_samples_trans is None:
+                warnings.warn(
+                    "only_dependent=True requires fit_trans() to have been run. "
+                    "Showing all features instead.",
+                    UserWarning
+                )
+            else:
+                posterior = model.posterior_samples_trans
+                # Check if this is an additive_hill model (has n_a and n_b)
+                if 'n_a' not in posterior or 'n_b' not in posterior:
+                    warnings.warn(
+                        "only_dependent=True requires fit_trans() with function_type='additive_hill'. "
+                        "Showing all features instead.",
+                        UserWarning
+                    )
+                else:
+                    # Extract n_a and n_b samples
+                    n_a_samps = posterior['n_a'].detach().cpu().numpy()
+                    n_b_samps = posterior['n_b'].detach().cpu().numpy()
+
+                    # Compute dependency masks
+                    dep_mask_a = dependency_mask_from_n(n_a_samps, ci=ci_level)
+                    dep_mask_b = dependency_mask_from_n(n_b_samps, ci=ci_level)
+                    dep_mask = dep_mask_a | dep_mask_b
+
+                    # Filter features
+                    n_before = len(feature_indices)
+                    filtered_indices = [idx for i, idx in enumerate(feature_indices) if dep_mask[idx]]
+                    filtered_names = [name for i, name in enumerate(feature_names_resolved) if dep_mask[feature_indices[i]]]
+
+                    if len(filtered_indices) == 0:
+                        warnings.warn(
+                            f"No dependent features found for '{feature}' (all n_a and n_b CIs include 0). "
+                            f"Showing all {n_before} features instead.",
+                            UserWarning
+                        )
+                    else:
+                        feature_indices = filtered_indices
+                        feature_names_resolved = filtered_names
+                        print(f"[DEPENDENCY FILTER] {feature}: {n_before} → {len(feature_indices)} features "
+                              f"(CI={ci_level}%, {dep_mask_a.sum()} positive, {dep_mask_b.sum()} negative)")
+        else:
+            # Non-primary modality: check modality-level posterior
+            if not hasattr(modality, 'posterior_samples_trans') or modality.posterior_samples_trans is None:
+                warnings.warn(
+                    f"only_dependent=True requires fit_trans() to have been run for modality '{modality_name}'. "
+                    "Showing all features instead.",
+                    UserWarning
+                )
+            else:
+                posterior = modality.posterior_samples_trans
+                # Check if this is an additive_hill model
+                if 'n_a' not in posterior or 'n_b' not in posterior:
+                    warnings.warn(
+                        "only_dependent=True requires fit_trans() with function_type='additive_hill'. "
+                        "Showing all features instead.",
+                        UserWarning
+                    )
+                else:
+                    # Extract n_a and n_b samples (modality posteriors are 3D: samples × cis_genes × trans_features)
+                    n_a_samps = posterior['n_a'].detach().cpu().numpy()
+                    n_b_samps = posterior['n_b'].detach().cpu().numpy()
+
+                    # Squeeze out cis gene dimension (should be 1)
+                    if n_a_samps.ndim == 3:
+                        n_a_samps = n_a_samps.squeeze(1)  # (S, 1, T) → (S, T)
+                        n_b_samps = n_b_samps.squeeze(1)
+
+                    # Compute dependency masks
+                    dep_mask_a = dependency_mask_from_n(n_a_samps, ci=ci_level)
+                    dep_mask_b = dependency_mask_from_n(n_b_samps, ci=ci_level)
+                    dep_mask = dep_mask_a | dep_mask_b
+
+                    # Filter features
+                    n_before = len(feature_indices)
+                    filtered_indices = [idx for i, idx in enumerate(feature_indices) if dep_mask[idx]]
+                    filtered_names = [name for i, name in enumerate(feature_names_resolved) if dep_mask[feature_indices[i]]]
+
+                    if len(filtered_indices) == 0:
+                        warnings.warn(
+                            f"No dependent features found for '{feature}' (all n_a and n_b CIs include 0). "
+                            f"Showing all {n_before} features instead.",
+                            UserWarning
+                        )
+                    else:
+                        feature_indices = filtered_indices
+                        feature_names_resolved = filtered_names
+                        print(f"[DEPENDENCY FILTER] {feature}: {n_before} → {len(feature_indices)} features "
+                              f"(CI={ci_level}%, {dep_mask_a.sum()} positive, {dep_mask_b.sum()} negative)")
 
     # If multiple features (gene input), create multi-panel figure
     if is_gene and len(feature_indices) > 1:
