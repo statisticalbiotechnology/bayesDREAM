@@ -37,7 +37,9 @@ from .basic import (
     scatter_ci95_by_guide,
     violin_by_guide_log2,
     filled_density_by_guide_log2,
-    scatter_param_mean_vs_ci
+    scatter_param_mean_vs_ci,
+    plot_parameter_ci_panel,
+    extract_posterior_dataframe
 )
 
 # Posterior density plots
@@ -84,6 +86,8 @@ __all__ = [
     'violin_by_guide_log2',
     'filled_density_by_guide_log2',
     'scatter_param_mean_vs_ci',
+    'plot_parameter_ci_panel',
+    'extract_posterior_dataframe',
     # Posterior plots
     'plot_posterior_density_lines',
     'plot_xtrue_density_by_guide',

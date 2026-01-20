@@ -618,3 +618,99 @@ class PlottingMixin:
         """
         from .xy_plots import plot_xy_data
         return plot_xy_data(self, *args, **kwargs)
+
+    def plot_parameter_ci_panel(self, params: list, **kwargs):
+        """
+        Forest plot (dot + whisker CI) for posterior parameters across trans genes.
+
+        Creates a plot with genes on the x-axis and parameter values (median + CI) on
+        the y-axis. Multiple parameters are dodged side-by-side for comparison.
+
+        This method is delegated to basic.plot_parameter_ci_panel().
+        See that function for full documentation.
+
+        Parameters
+        ----------
+        params : list of str
+            Parameter names to plot (e.g., ['n_a', 'n_b'] or ['alpha', 'beta']).
+            These must exist in posterior_samples_trans.
+        modality_name : str, optional
+            Modality name. If None, uses primary modality.
+        ci_level : float
+            Credible interval level (default: 95.0 for 95% CI)
+        sort_by : str
+            How to sort genes: 'none', 'median', 'abs_median', 'effect'
+        filter_dependent : bool
+            If True, only show genes where CI excludes 0 (default: False)
+        ymin, ymax : float, optional
+            Y-axis limits. If None, auto-scaled.
+        title : str, optional
+            Plot title. If None, auto-generated.
+        color_palette : dict, optional
+            Custom colors for parameters.
+        **kwargs
+            Additional plotting arguments
+
+        Returns
+        -------
+        fig : matplotlib.Figure
+        ax : matplotlib.Axes
+
+        Examples
+        --------
+        >>> # Plot n_a and n_b for all genes
+        >>> fig, ax = model.plot_parameter_ci_panel(['n_a', 'n_b'])
+
+        >>> # Plot only dependent genes, sorted by effect size
+        >>> fig, ax = model.plot_parameter_ci_panel(
+        ...     ['n_a', 'n_b'],
+        ...     filter_dependent=True,
+        ...     sort_by='effect'
+        ... )
+
+        >>> # Plot alpha and beta with custom colors
+        >>> fig, ax = model.plot_parameter_ci_panel(
+        ...     ['alpha', 'beta'],
+        ...     color_palette={'alpha': 'crimson', 'beta': 'dodgerblue'}
+        ... )
+        """
+        from .basic import plot_parameter_ci_panel
+        return plot_parameter_ci_panel(self, params, **kwargs)
+
+    def extract_posterior_dataframe(self, params: list, **kwargs):
+        """
+        Extract posterior parameters into a long-format DataFrame.
+
+        This is useful for custom analysis or plotting with seaborn/plotnine.
+
+        This method is delegated to basic.extract_posterior_dataframe().
+        See that function for full documentation.
+
+        Parameters
+        ----------
+        params : list of str
+            Parameter names to extract (e.g., ['n_a', 'n_b', 'K_a', 'K_b'])
+        modality_name : str, optional
+            Modality name. If None, uses primary modality.
+        include_samples : bool
+            If True, includes all posterior samples (can be large).
+            If False (default), only includes summary statistics.
+
+        Returns
+        -------
+        pd.DataFrame
+            Long-format DataFrame with columns:
+            - gene, gene_idx, param, median, lo, hi, mean, std, ci_excludes_zero
+            If include_samples=True, also: sample_idx, value
+
+        Examples
+        --------
+        >>> # Get summary statistics
+        >>> df = model.extract_posterior_dataframe(['n_a', 'n_b', 'K_a', 'K_b'])
+        >>> df_dependent = df[df['ci_excludes_zero']]
+
+        >>> # Get all samples for custom analysis
+        >>> df_samples = model.extract_posterior_dataframe(['n_a'], include_samples=True)
+        """
+        from .basic import extract_posterior_dataframe
+        return extract_posterior_dataframe(self, params, **kwargs)

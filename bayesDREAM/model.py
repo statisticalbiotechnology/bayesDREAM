@@ -877,13 +877,21 @@ class bayesDREAM(
             )
             cell_names = None
 
+        # Extract feature names for feature_names (prefer feature_name, then feature, then gene_name, then gene)
+        feature_names_for_modality = None
+        for col in ['feature_name', 'feature', 'gene_name', 'gene', 'gene_id', 'feature_id']:
+            if col in mod_feature_meta.columns:
+                feature_names_for_modality = mod_feature_meta[col].tolist()
+                break
+
         self.modalities[modality_name] = Modality(
             name=modality_name,
             counts=counts_trans,
             feature_meta=mod_feature_meta,
             cell_names=cell_names,
             distribution='negbinom',
-            cells_axis=1
+            cells_axis=1,
+            feature_names=feature_names_for_modality
         )
 
     def _create_gene_modality(
@@ -1024,13 +1032,21 @@ class bayesDREAM(
             )
             cell_names = None
 
+        # Extract gene names for feature_names (prefer gene_name, then gene column)
+        gene_names_for_modality = None
+        for col in ['gene_name', 'gene', 'gene_id']:
+            if col in gene_feature_meta.columns:
+                gene_names_for_modality = gene_feature_meta[col].tolist()
+                break
+
         self.modalities['gene'] = Modality(
             name='gene',
             counts=counts_trans,
             feature_meta=gene_feature_meta,
             cell_names=cell_names,
             distribution='negbinom',
-            cells_axis=1
+            cells_axis=1,
+            feature_names=gene_names_for_modality
         )
 
     def add_modality(
@@ -1115,7 +1131,11 @@ class bayesDREAM(
             else:
                 has_cis = '-'  # Not applicable
 
-            has_trans = '✓' if mod.posterior_samples_trans is not None else '✗'
+            # fit_trans only applies to trans modalities, not to 'cis'
+            if name == 'cis':
+                has_trans = '-'  # Not applicable - cis is the predictor, not a trans response
+            else:
+                has_trans = '✓' if mod.posterior_samples_trans is not None else '✗'
 
             rows.append({
                 'name': name,

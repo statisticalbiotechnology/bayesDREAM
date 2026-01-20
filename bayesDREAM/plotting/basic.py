@@ -453,3 +453,442 @@ def scatter_param_mean_vs_ci(
         plt.show()
 
     return ax
+
+
+def plot_parameter_ci_panel(
+    model,
+    params: list,
+    modality_name: str = None,
+    ci_level: float = 95.0,
+    sort_by: str = 'none',
+    filter_dependent: bool = False,
+    dependency_params: list = None,
+    ymin: float = None,
+    ymax: float = None,
+    title: str = None,
+    ylabel: str = 'value',
+    figsize: tuple = None,
+    color_palette: dict = None,
+    marker_size: int = 18,
+    capsize: int = 3,
+    show_zero_line: bool = True,
+    ax=None,
+    show: bool = True,
+):
+    """
+    Forest plot (dot + whisker CI) for posterior parameters across trans genes.
+
+    Creates a plot with genes on the x-axis and parameter values (median + CI) on
+    the y-axis. Multiple parameters are dodged side-by-side for comparison.
+
+    Parameters
+    ----------
+    model : bayesDREAM
+        Fitted bayesDREAM model with posterior_samples_trans
+    params : list of str
+        Parameter names to plot (e.g., ['n_a', 'n_b'] or ['alpha', 'beta']).
+        These must exist in posterior_samples_trans.
+    modality_name : str, optional
+        Modality name. If None, uses primary modality.
+    ci_level : float
+        Credible interval level (default: 95.0 for 95% CI)
+    sort_by : str
+        How to sort genes on x-axis:
+        - 'none': Keep original order
+        - 'alphabetical': Sort alphabetically by gene name
+        - 'median': Sort by median of first parameter (ascending)
+        - 'abs_median': Sort by absolute median of first parameter (descending)
+        - 'effect': Sort by max absolute effect across all params (descending)
+    filter_dependent : bool
+        If True, only show genes where CI excludes 0 for any param in
+        dependency_params (default: False)
+    dependency_params : list, optional
+        Parameters to use for dependency filtering. If None, uses all params.
+        Common: ['n_a', 'n_b'] for Hill coefficients.
+    ymin, ymax : float, optional
+        Y-axis limits. If None, auto-scaled.
+    title : str, optional
+        Plot title. If None, auto-generated.
+    ylabel : str
+        Y-axis label (default: 'value')
+    figsize : tuple, optional
+        Figure size. If None, auto-scaled based on number of genes.
+    color_palette : dict, optional
+        Custom colors for parameters. Keys are param names, values are colors.
+        If None, uses seaborn color palette.
+    marker_size : int
+        Size of median markers (default: 18)
+    capsize : int
+        Size of error bar caps (default: 3)
+    show_zero_line : bool
+        Whether to draw horizontal line at y=0 (default: True)
+    ax : matplotlib axes, optional
+        Axes to plot on. If None, creates new figure.
+    show : bool
+        Whether to display the plot (default: True)
+
+    Returns
+    -------
+    fig : matplotlib Figure (if ax was None)
+    ax : matplotlib Axes
+
+    Examples
+    --------
+    >>> # Plot n_a and n_b for all genes
+    >>> fig, ax = model.plot_parameter_ci_panel(['n_a', 'n_b'])
+
+    >>> # Plot only dependent genes, sorted by effect size
+    >>> fig, ax = model.plot_parameter_ci_panel(
+    ...     ['n_a', 'n_b'],
+    ...     filter_dependent=True,
+    ...     sort_by='effect'
+    ... )
+
+    >>> # Plot alpha and beta with custom colors
+    >>> fig, ax = model.plot_parameter_ci_panel(
+    ...     ['alpha', 'beta'],
+    ...     color_palette={'alpha': 'crimson', 'beta': 'dodgerblue'}
+    ... )
+
+    >>> # Plot for a specific modality
+    >>> fig, ax = model.plot_parameter_ci_panel(
+    ...     ['n_a', 'n_b'],
+    ...     modality_name='splicing_sj'
+    ... )
+    """
+    import seaborn as sns
+
+    # Get modality
+    if modality_name is None:
+        modality_name = model.primary_modality
+    modality = model.get_modality(modality_name)
+
+    # Get posterior samples
+    if modality_name == model.primary_modality:
+        posterior = model.posterior_samples_trans
+    else:
+        posterior = modality.posterior_samples_trans
+
+    if posterior is None:
+        raise ValueError(
+            f"No posterior_samples_trans found for modality '{modality_name}'. "
+            "Must run fit_trans() first."
+        )
+
+    # Validate params exist
+    missing = [p for p in params if p not in posterior]
+    if missing:
+        available = list(posterior.keys())
+        raise ValueError(
+            f"Parameters {missing} not found in posterior. "
+            f"Available: {available}"
+        )
+
+    # Get gene names from modality
+    gene_names = modality.feature_names
+    if gene_names is None:
+        # Fallback to feature_meta
+        for col in ['gene_name', 'gene', 'feature_id', 'feature']:
+            if col in modality.feature_meta.columns:
+                gene_names = modality.feature_meta[col].tolist()
+                break
+    if gene_names is None:
+        gene_names = [str(i) for i in range(modality.dims['n_features'])]
+
+    # Extract samples for each parameter
+    # Shape: posterior[param] is typically (S, n_cis, T) where n_cis=1
+    samples_dict = {}
+    for param in params:
+        samps = to_np(posterior[param])
+        # Handle different shapes
+        if samps.ndim == 3:
+            samps = samps[:, 0, :]  # (S, 1, T) -> (S, T)
+        elif samps.ndim == 1:
+            samps = samps.reshape(-1, 1)  # (S,) -> (S, 1)
+        samples_dict[param] = samps
+
+    T = samples_dict[params[0]].shape[1]
+
+    # Ensure gene_names matches T
+    if len(gene_names) != T:
+        gene_names = gene_names[:T]
+
+    # Compute CI bounds
+    lo_q = (100 - ci_level) / 2.0
+    hi_q = 100 - lo_q
+
+    stats = {}  # {param: {'median': array, 'lo': array, 'hi': array}}
+    for param, samps in samples_dict.items():
+        stats[param] = {
+            'median': np.nanmedian(samps, axis=0),
+            'lo': np.nanpercentile(samps, lo_q, axis=0),
+            'hi': np.nanpercentile(samps, hi_q, axis=0),
+        }
+
+    # Filter to dependent genes if requested
+    gene_mask = np.ones(T, dtype=bool)
+    if filter_dependent:
+        dep_params = dependency_params if dependency_params else params
+        # Start with all False, then OR with each param's dependency
+        gene_mask = np.zeros(T, dtype=bool)
+        for param in dep_params:
+            if param in samples_dict:
+                samps = samples_dict[param]
+                lo = np.nanpercentile(samps, lo_q, axis=0)
+                hi = np.nanpercentile(samps, hi_q, axis=0)
+                param_dep = (lo > 0) | (hi < 0)
+                gene_mask = gene_mask | param_dep
+
+        n_dep = gene_mask.sum()
+        print(f"[FILTER] {n_dep}/{T} genes pass dependency filter (CI excludes 0)")
+
+    # Get indices of genes to plot
+    gene_indices = np.where(gene_mask)[0]
+    n_genes = len(gene_indices)
+
+    if n_genes == 0:
+        print("No genes to plot after filtering.")
+        return None, None
+
+    # Sort genes
+    if sort_by == 'alphabetical':
+        # Get gene names for current indices, then sort alphabetically
+        names_for_sort = [gene_names[i] for i in gene_indices]
+        order = np.argsort(names_for_sort)
+        gene_indices = gene_indices[order]
+    elif sort_by == 'median':
+        sort_vals = stats[params[0]]['median'][gene_indices]
+        order = np.argsort(sort_vals)
+        gene_indices = gene_indices[order]
+    elif sort_by == 'abs_median':
+        sort_vals = np.abs(stats[params[0]]['median'][gene_indices])
+        order = np.argsort(sort_vals)[::-1]  # Descending
+        gene_indices = gene_indices[order]
+    elif sort_by == 'effect':
+        # Max absolute median across all params
+        max_effect = np.zeros(n_genes)
+        for param in params:
+            max_effect = np.maximum(max_effect, np.abs(stats[param]['median'][gene_indices]))
+        order = np.argsort(max_effect)[::-1]  # Descending
+        gene_indices = gene_indices[order]
+
+    # Get sorted gene names
+    sorted_gene_names = [gene_names[i] for i in gene_indices]
+
+    # Create figure
+    if ax is None:
+        if figsize is None:
+            fig_w = min(max(0.5 * n_genes, 12), 28)
+            fig_h = 5.5
+            figsize = (fig_w, fig_h)
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.get_figure()
+
+    # Set up colors
+    if color_palette is None:
+        colors = sns.color_palette(n_colors=len(params))
+        color_palette = dict(zip(params, colors))
+
+    # Set up x positions with dodging
+    x_base = np.arange(n_genes)
+    n_params = len(params)
+    width = 0.7
+    if n_params > 1:
+        offsets = np.linspace(-width/2, width/2, n_params)
+    else:
+        offsets = np.array([0.0])
+
+    # Plot each parameter
+    for j, param in enumerate(params):
+        medians = stats[param]['median'][gene_indices]
+        los = stats[param]['lo'][gene_indices]
+        his = stats[param]['hi'][gene_indices]
+
+        x = x_base + offsets[j]
+        color = color_palette.get(param, 'blue')
+
+        # Plot median points
+        ax.scatter(x, medians, label=param, s=marker_size, zorder=3, color=color)
+
+        # Plot error bars
+        yerr = np.vstack([medians - los, his - medians])
+        ax.errorbar(x, medians, yerr=yerr, fmt="none",
+                    elinewidth=1.5, capsize=capsize, color=color, zorder=2)
+
+    # Styling
+    if title is None:
+        param_str = ', '.join(params)
+        title = f"{model.cis_gene} → trans genes: {param_str}"
+        if filter_dependent:
+            title += f" (n={n_genes} dependent)"
+
+    ax.set_title(title)
+    ax.set_xlabel("Trans gene")
+    ax.set_ylabel(ylabel)
+    ax.set_xticks(x_base)
+    ax.set_xticklabels(sorted_gene_names, rotation=90, ha="center")
+
+    ax.yaxis.grid(True, linestyle="--", alpha=0.4)
+    ax.xaxis.grid(False)
+
+    if show_zero_line:
+        ax.axhline(0, color='black', linestyle=':', linewidth=1, alpha=0.7)
+
+    if ymin is not None or ymax is not None:
+        cur = ax.get_ylim()
+        ax.set_ylim(
+            ymin if ymin is not None else cur[0],
+            ymax if ymax is not None else cur[1]
+        )
+
+    ax.legend(title='parameter', bbox_to_anchor=(1.02, 1), loc="upper left")
+    plt.tight_layout()
+
+    if show:
+        plt.show()
+
+    return fig, ax
+
+
+def extract_posterior_dataframe(
+    model,
+    params: list,
+    modality_name: str = None,
+    include_samples: bool = False,
+):
+    """
+    Extract posterior parameters into a long-format DataFrame.
+
+    This is useful for custom analysis or plotting with seaborn/plotnine.
+
+    Parameters
+    ----------
+    model : bayesDREAM
+        Fitted bayesDREAM model
+    params : list of str
+        Parameter names to extract (e.g., ['n_a', 'n_b', 'K_a', 'K_b'])
+    modality_name : str, optional
+        Modality name. If None, uses primary modality.
+    include_samples : bool
+        If True, includes all posterior samples (can be large).
+        If False (default), only includes summary statistics.
+
+    Returns
+    -------
+    pd.DataFrame
+        Long-format DataFrame with columns:
+        - gene: Gene name
+        - gene_idx: Gene index
+        - param: Parameter name
+        - median: Median value
+        - lo: Lower CI bound (2.5%)
+        - hi: Upper CI bound (97.5%)
+        - mean: Mean value
+        - std: Standard deviation
+        - ci_excludes_zero: Boolean, True if CI excludes 0
+        If include_samples=True, also includes:
+        - sample_idx: Sample index
+        - value: Sample value
+
+    Examples
+    --------
+    >>> # Get summary statistics
+    >>> df = extract_posterior_dataframe(model, ['n_a', 'n_b', 'K_a', 'K_b'])
+    >>> df_dependent = df[df['ci_excludes_zero']]
+
+    >>> # Get all samples for custom analysis
+    >>> df_samples = extract_posterior_dataframe(model, ['n_a'], include_samples=True)
+    >>> sns.violinplot(data=df_samples, x='gene', y='value')
+    """
+    import pandas as pd
+
+    # Get modality
+    if modality_name is None:
+        modality_name = model.primary_modality
+    modality = model.get_modality(modality_name)
+
+    # Get posterior samples
+    if modality_name == model.primary_modality:
+        posterior = model.posterior_samples_trans
+    else:
+        posterior = modality.posterior_samples_trans
+
+    if posterior is None:
+        raise ValueError(
+            f"No posterior_samples_trans found for modality '{modality_name}'. "
+            "Must run fit_trans() first."
+        )
+
+    # Get gene names
+    gene_names = modality.feature_names
+    if gene_names is None:
+        for col in ['gene_name', 'gene', 'feature_id', 'feature']:
+            if col in modality.feature_meta.columns:
+                gene_names = modality.feature_meta[col].tolist()
+                break
+    if gene_names is None:
+        gene_names = [str(i) for i in range(modality.dims['n_features'])]
+
+    rows = []
+
+    for param in params:
+        if param not in posterior:
+            print(f"[WARNING] Parameter '{param}' not found in posterior, skipping.")
+            continue
+
+        samps = to_np(posterior[param])
+
+        # Handle different shapes
+        if samps.ndim == 3:
+            samps = samps[:, 0, :]  # (S, 1, T) -> (S, T)
+        elif samps.ndim == 1:
+            samps = samps.reshape(-1, 1)
+
+        S, T = samps.shape
+
+        # Ensure gene_names matches T
+        gene_names_use = gene_names[:T] if len(gene_names) >= T else gene_names + [f'gene_{i}' for i in range(len(gene_names), T)]
+
+        for i in range(T):
+            gene_samps = samps[:, i]
+
+            # Compute statistics
+            median_val = np.nanmedian(gene_samps)
+            lo_val = np.nanpercentile(gene_samps, 2.5)
+            hi_val = np.nanpercentile(gene_samps, 97.5)
+            mean_val = np.nanmean(gene_samps)
+            std_val = np.nanstd(gene_samps)
+            ci_excludes_zero = (lo_val > 0) or (hi_val < 0)
+
+            if include_samples:
+                # Add one row per sample
+                for s_idx, val in enumerate(gene_samps):
+                    rows.append({
+                        'gene': gene_names_use[i],
+                        'gene_idx': i,
+                        'param': param,
+                        'sample_idx': s_idx,
+                        'value': float(val),
+                        'median': median_val,
+                        'lo': lo_val,
+                        'hi': hi_val,
+                        'mean': mean_val,
+                        'std': std_val,
+                        'ci_excludes_zero': ci_excludes_zero,
+                    })
+            else:
+                # Add one summary row per gene
+                rows.append({
+                    'gene': gene_names_use[i],
+                    'gene_idx': i,
+                    'param': param,
+                    'median': median_val,
+                    'lo': lo_val,
+                    'hi': hi_val,
+                    'mean': mean_val,
+                    'std': std_val,
+                    'ci_excludes_zero': ci_excludes_zero,
+                })
+
+    return pd.DataFrame(rows)

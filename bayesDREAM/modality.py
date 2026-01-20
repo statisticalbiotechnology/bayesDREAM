@@ -95,12 +95,12 @@ class Modality:
             self.counts = counts.values
             self.count_df = counts
             self.is_sparse = False  # DataFrames are dense
-            # Feature names from index or columns depending on orientation
+            # Feature names: use explicit parameter if provided, else from index/columns
             if cells_axis == 1:
-                self.feature_names = counts.index.tolist()
+                self.feature_names = feature_names if feature_names is not None else counts.index.tolist()
                 self.cell_names = counts.columns.tolist()
             else:
-                self.feature_names = counts.columns.tolist()
+                self.feature_names = feature_names if feature_names is not None else counts.columns.tolist()
                 self.cell_names = counts.index.tolist()
         elif self.is_sparse:
             # Sparse matrix: keep sparse, don't densify!

@@ -1230,7 +1230,19 @@ def plot_negbinom_xy(
                     trans_genes = model.trans_genes if hasattr(model, 'trans_genes') else []
                     if feature in trans_genes:
                         gene_idx = trans_genes.index(feature)
-                        A = A_samples.mean(dim=0)[gene_idx].item() if hasattr(A_samples, 'mean') else A_samples.mean(axis=0)[gene_idx]
+                        # Handle shape (S, n_cis, T) - squeeze out n_cis dimension if present
+                        if hasattr(A_samples, 'mean'):
+                            A_mean = A_samples.mean(dim=0)  # (n_cis, T) or (T,)
+                            if A_mean.ndim == 2:
+                                A = A_mean[0, gene_idx].item()  # (n_cis, T) -> index both dims
+                            else:
+                                A = A_mean[gene_idx].item()  # (T,) -> index directly
+                        else:
+                            A_mean = A_samples.mean(axis=0)
+                            if A_mean.ndim == 2:
+                                A = A_mean[0, gene_idx]
+                            else:
+                                A = A_mean[gene_idx]
                         ax_plot.axhline(np.log2(A + 1), color='red', linestyle=':', linewidth=1, label='log2(A+1) baseline')
 
         ax_plot.set_xlabel(xlabel)
