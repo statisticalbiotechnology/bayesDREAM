@@ -484,18 +484,17 @@ class CisFitter:
         
         if self.model.alpha_x_prefit is not None:
             if self.model.alpha_x_type == 'posterior':
-                # Take mean over posterior samples (S, C-1) -> (C-1)
-                alpha_x_prefit_mean = self.model.alpha_x_prefit.mean(dim=0)
+                # Take mean over posterior samples (S, C) -> (C,)
+                # alpha_x_prefit already contains ALL cell lines including reference
+                alpha_x_full = self.model.alpha_x_prefit.mean(dim=0)
             else:
-                # If it's a point estimate, ensure correct shape (C-1)
-                alpha_x_prefit_mean = self.model.alpha_x_prefit.reshape((C-1,))
-        
-            # Ensure correct shape for alpha_x_full: (C, 1)
-            alpha_x_full = torch.cat([torch.ones((1,), device=self.model.device), alpha_x_prefit_mean], dim=0)  # Shape: (2,1)
-        
+                # Point estimate: already shape (C,) containing all cell lines
+                # Flatten in case it's (C, 1)
+                alpha_x_full = self.model.alpha_x_prefit.flatten()
+
             # Select the correct alpha_x for each observation (expand for broadcasting)
-            alpha_x_used = alpha_x_full[groups_tensor]  # groups_tensor indexes into (2,1)
-            
+            alpha_x_used = alpha_x_full[groups_tensor]  # groups_tensor indexes into (C,)
+
             # Adjust x_obs_factored by alpha_x_used
             x_obs_factored /= alpha_x_used  # Ensure correct shape for division
         
