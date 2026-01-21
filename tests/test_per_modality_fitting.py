@@ -107,12 +107,8 @@ print(f"✓ Gene modality alpha_y_prefit shape: {gene_modality.alpha_y_prefit.sh
 print(f"✓ Gene modality has posterior_samples_technical: {gene_modality.posterior_samples_technical is not None}")
 
 # Check model-level storage (backward compatibility)
-print(f"✓ Model-level alpha_y_prefit stored (backward compat): {model.alpha_y_prefit is not None}")
+# NOTE: model.alpha_y_prefit is deprecated - alpha_y_prefit is stored per-modality
 print(f"✓ Model-level posterior_samples_technical stored: {model.posterior_samples_technical is not None}")
-
-# Verify they are the same object (or at least equal)
-if gene_modality.alpha_y_prefit is not None and model.alpha_y_prefit is not None:
-    print(f"✓ Model-level and modality-level alpha_y_prefit match: {torch.allclose(gene_modality.alpha_y_prefit, model.alpha_y_prefit)}")
 
 # Test 4: Fit technical for non-primary modality
 print("\n" + "=" * 80)
@@ -131,10 +127,8 @@ print(f"✓ Technical fit completed for 'splicing_test' modality")
 print(f"✓ Splicing modality alpha_y_prefit shape: {splicing_modality.alpha_y_prefit.shape if splicing_modality.alpha_y_prefit is not None else 'None'}")
 print(f"✓ Splicing modality has posterior_samples_technical: {splicing_modality.posterior_samples_technical is not None}")
 
-# Check that model-level storage was NOT overwritten
-print(f"✓ Model-level alpha_y_prefit NOT overwritten (still from gene): {model.alpha_y_prefit is not None}")
-if gene_modality.alpha_y_prefit is not None and model.alpha_y_prefit is not None:
-    print(f"✓ Model-level alpha_y_prefit still matches gene modality: {torch.allclose(gene_modality.alpha_y_prefit, model.alpha_y_prefit)}")
+# Check that gene modality's alpha_y_prefit was NOT overwritten by splicing fit
+print(f"✓ Gene modality alpha_y_prefit still set: {gene_modality.alpha_y_prefit is not None}")
 
 # Test 5: Fit trans for primary modality
 print("\n" + "=" * 80)

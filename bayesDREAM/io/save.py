@@ -79,12 +79,15 @@ class ModelSaver:
                 saved_files['alpha_x_type'] = self.model.alpha_x_type
                 print(f"[SAVE] alpha_x_prefit ({self.model.alpha_x_type}) → {path}")
 
-            if hasattr(self.model, 'alpha_y_prefit') and self.model.alpha_y_prefit is not None:
+            # NOTE: model.alpha_y_prefit is deprecated - alpha_y_prefit is stored per-modality
+            # For backward compatibility, save primary modality's alpha_y_prefit as alpha_y_prefit.pt
+            primary_mod = self.model.get_modality(self.model.primary_modality)
+            if hasattr(primary_mod, 'alpha_y_prefit') and primary_mod.alpha_y_prefit is not None:
                 path = os.path.join(output_dir, 'alpha_y_prefit.pt')
-                torch.save(self.model.alpha_y_prefit, path)
+                torch.save(primary_mod.alpha_y_prefit, path)
                 saved_files['alpha_y_prefit'] = path
                 saved_files['alpha_y_type'] = self.model.alpha_y_type
-                print(f"[SAVE] alpha_y_prefit ({self.model.alpha_y_type}) → {path}")
+                print(f"[SAVE] alpha_y_prefit (from {self.model.primary_modality} modality) → {path}")
 
         # Save per-modality alpha_y_prefit and posterior_samples_technical
         for mod_name in modalities_to_save:

@@ -70,20 +70,20 @@ class ModelSummarizer:
         if modality_name is None:
             modality_name = self.model.primary_modality
 
-        # Check if technical fit has been run
-        if not hasattr(self.model, 'alpha_y_prefit') or self.model.alpha_y_prefit is None:
-            raise ValueError("Technical fit not found. Run fit_technical() first.")
-
         # Get modality
         modality = self.model.get_modality(modality_name)
 
-        # Get alpha_y for this modality
-        if modality_name == self.model.primary_modality:
-            alpha_y = self.model.alpha_y_prefit  # [n_samples, n_groups, n_features]
-        elif hasattr(modality, 'alpha_y_prefit_mult'):
+        # Check if technical fit has been run for this modality
+        if not hasattr(modality, 'alpha_y_prefit') or modality.alpha_y_prefit is None:
+            raise ValueError(f"Technical fit not found for modality '{modality_name}'. Run fit_technical() first.")
+
+        # Get alpha_y for this modality (prefer distribution-specific versions)
+        if hasattr(modality, 'alpha_y_prefit_mult') and modality.alpha_y_prefit_mult is not None:
             alpha_y = modality.alpha_y_prefit_mult  # [n_samples, n_groups, n_features]
+        elif hasattr(modality, 'alpha_y_prefit_add') and modality.alpha_y_prefit_add is not None:
+            alpha_y = modality.alpha_y_prefit_add  # [n_samples, n_groups, n_features]
         else:
-            raise ValueError(f"No technical fit parameters found for modality '{modality_name}'")
+            alpha_y = modality.alpha_y_prefit  # [n_samples, n_groups, n_features]
 
         # Convert to numpy if tensor
         if isinstance(alpha_y, torch.Tensor):

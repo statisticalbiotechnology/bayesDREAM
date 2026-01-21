@@ -79,11 +79,13 @@ def test_summary_export_simple():
         model.set_technical_groups(['cell_line'])
 
         # Create mock technical fit posteriors
-        n_features = model.modalities['gene'].dims['n_features']
+        gene_mod = model.modalities['gene']
+        n_features = gene_mod.dims['n_features']
         n_groups = 2  # K562, HEL
 
-        # alpha_y_prefit should be [n_samples, n_groups, n_features]
-        model.alpha_y_prefit = torch.randn((100, n_groups, n_features), device=model.device)
+        # alpha_y_prefit should be [n_samples, n_groups, n_features] - stored per modality
+        gene_mod.alpha_y_prefit = torch.randn((100, n_groups, n_features), device=model.device)
+        gene_mod.alpha_y_type = 'posterior'
 
         # Export technical summary
         tech_df = model.save_technical_summary()

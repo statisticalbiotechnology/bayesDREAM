@@ -1992,8 +1992,7 @@ class TransFitter:
         if modality_name == self.model.primary_modality:
             self.model.posterior_samples_trans = posterior_samples_y
             self.model.losses_trans = self.losses_trans  # Store loss history at model level
-            if self.model.alpha_y_prefit is None and groups_tensor is not None and "alpha_y" in posterior_samples_y:
-                self.model.alpha_y_prefit = posterior_samples_y["alpha_y"].mean(dim=0)
+            # NOTE: alpha_y_prefit is stored per-modality (already done above), not at model level
             print(f"[INFO] Stored results in modality '{modality_name}' and at model level (primary modality)")
         else:
             print(f"[INFO] Stored results in modality '{modality_name}'")

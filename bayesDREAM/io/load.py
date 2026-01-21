@@ -73,18 +73,21 @@ class ModelLoader:
                 loaded['alpha_x_prefit'] = self.model.alpha_x_prefit
                 print(f"[LOAD] alpha_x_prefit ({self.model.alpha_x_type}) ← {alpha_x_path}")
 
-            # Load alpha_y_prefit
+            # Load alpha_y_prefit (legacy model-level file → primary modality)
             alpha_y_path = os.path.join(input_dir, 'alpha_y_prefit.pt')
             if os.path.exists(alpha_y_path):
                 alpha_y = torch.load(alpha_y_path)
+                primary_mod = self.model.get_modality(self.model.primary_modality)
                 if use_posterior:
-                    self.model.alpha_y_prefit = alpha_y
+                    primary_mod.alpha_y_prefit = alpha_y
+                    primary_mod.alpha_y_type = 'posterior'
                     self.model.alpha_y_type = 'posterior'
                 else:
-                    self.model.alpha_y_prefit = alpha_y.mean(dim=0)
+                    primary_mod.alpha_y_prefit = alpha_y.mean(dim=0)
+                    primary_mod.alpha_y_type = 'point'
                     self.model.alpha_y_type = 'point'
-                loaded['alpha_y_prefit'] = self.model.alpha_y_prefit
-                print(f"[LOAD] alpha_y_prefit ({self.model.alpha_y_type}) ← {alpha_y_path}")
+                loaded['alpha_y_prefit'] = primary_mod.alpha_y_prefit
+                print(f"[LOAD] alpha_y_prefit → {self.model.primary_modality} modality ← {alpha_y_path}")
 
         # Load per-modality alpha_y_prefit and posterior_samples_technical
         for mod_name in modalities_to_load:

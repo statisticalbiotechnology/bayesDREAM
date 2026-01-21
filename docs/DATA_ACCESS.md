@@ -433,9 +433,10 @@ if hasattr(model, 'alpha_x_prefit'):
     print(f"Alpha_x shape: {alpha_x.shape}")  # (n_samples, n_groups)
     print(f"Cis gene: {model.cis_gene}")
 
-# 2. Alpha for trans genes (rest of genes)
-if hasattr(model, 'alpha_y_prefit'):
-    alpha_y = model.alpha_y_prefit  # Trans gene overdispersion
+# 2. Alpha for trans genes (stored per-modality)
+gene_mod = model.get_modality('gene')
+if hasattr(gene_mod, 'alpha_y_prefit') and gene_mod.alpha_y_prefit is not None:
+    alpha_y = gene_mod.alpha_y_prefit  # Trans gene overdispersion
     print(f"Alpha_y shape: {alpha_y.shape}")  # (n_samples, n_groups, n_trans_genes)
 
     # Convert to pandas for easier viewing

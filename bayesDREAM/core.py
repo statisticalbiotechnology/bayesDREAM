@@ -750,8 +750,8 @@ class _BayesDREAMCore(PlottingMixin):
         # Bookkeeping for results
         self.alpha_x_prefit = None    # from step1
         self.alpha_x_type = None    # from step1
-        self.alpha_y_prefit = None    # from step1
-        self.alpha_y_type = None    # from step1
+        # NOTE: alpha_y_prefit is stored per-modality (modality.alpha_y_prefit), not on the model
+        self.alpha_y_type = None    # from step1 (type is still tracked at model level for backward compat)
         self.trace_cellline = None    # from step1
         self.trace_x = None          # from step2
         self.trace_y = None          # from step3
@@ -911,7 +911,10 @@ class _BayesDREAMCore(PlottingMixin):
                 )
             self.alpha_y_type = 'point'
     
-        self.alpha_y_prefit = alpha_y  # Store validated tensor
+        # Store in primary modality (not model-level)
+        primary_mod = self.get_modality(self.primary_modality)
+        primary_mod.alpha_y_prefit = alpha_y
+        primary_mod.alpha_y_type = self.alpha_y_type
 
     def set_o_x_grouped(
         self,
@@ -1562,8 +1565,9 @@ class _BayesDREAMCore(PlottingMixin):
                 model_new.alpha_x_prefit = self.alpha_x_prefit.clone() if isinstance(self.alpha_x_prefit, torch.Tensor) else self.alpha_x_prefit
                 model_new.alpha_x_type = self.alpha_x_type
 
-            if self.alpha_y_prefit is not None:
-                model_new.alpha_y_prefit = self.alpha_y_prefit.clone() if isinstance(self.alpha_y_prefit, torch.Tensor) else self.alpha_y_prefit
+            # alpha_y_prefit is stored per-modality, not at model level
+            # It will be copied when modalities are copied above
+            if self.alpha_y_type is not None:
                 model_new.alpha_y_type = self.alpha_y_type
 
             # Copy cis fit parameters if they exist
