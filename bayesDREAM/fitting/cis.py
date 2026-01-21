@@ -582,30 +582,7 @@ class CisFitter:
             return pyro.infer.autoguide.initialization.init_to_median(site)
 
         guide_x = pyro.infer.autoguide.AutoNormalMessenger(self._model_x, init_loc_fn=init_loc_fn)
-
-        # Use OneCycleLR scheduler for stable convergence (consistent with fit_technical and fit_trans)
-        from torch.optim.lr_scheduler import OneCycleLR
-        base_lr = 1e-3 if lr is None else lr
-
-        optimizer = pyro.optim.PyroLRScheduler(
-            scheduler_constructor=OneCycleLR,
-            optim_args={
-                # underlying torch optimizer
-                "optimizer": torch.optim.Adam,
-                "optim_args": {
-                    "lr": base_lr,      # initial lr (OneCycle will move it)
-                    "betas": (0.9, 0.999),
-                },
-                # OneCycleLR hyperparameters
-                "max_lr":          base_lr * 10,  # peak at 10x base_lr
-                "total_steps":     niters,
-                "pct_start":       0.1,           # 10% warmup
-                "div_factor":      25.0,          # initial_lr = max_lr/25
-                "final_div_factor": 1e4,          # final_lr = max_lr/1e4
-            },
-            clip_args={"clip_norm": 10.0},  # gradient clipping
-        )
-
+        optimizer = pyro.optim.Adam({"lr": lr})
         svi = pyro.infer.SVI(self._model_x, guide_x, optimizer,
                              loss=pyro.infer.Trace_ELBO())
 
