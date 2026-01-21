@@ -1165,8 +1165,14 @@ def plot_negbinom_xy(
             # Get is_ntc for this group
             is_ntc_group = is_ntc[df_group.index].values
 
-            # Transform to log2(y+1) BEFORE smoothing
-            y_log = np.log2(y_expr + 1)
+            # Transform to log2(y) BEFORE smoothing (matching old code behavior)
+            # Filter out zero/negative values first
+            valid_expr = y_expr > 0
+            if not valid_expr.all():
+                df_group = df_group[valid_expr].copy()
+                y_expr = y_expr[valid_expr]
+                is_ntc_group = is_ntc_group[valid_expr] if show_ntc_gradient else None
+            y_log = np.log2(y_expr)
 
             # k-NN smoothing in log space
             k = _knn_k(len(df_group), window)
@@ -1184,7 +1190,7 @@ def plot_negbinom_xy(
                 group_cmap = group_cmaps.get(group_label, plt.cm.gray)
                 plot_colored_line(
                     x=np.log2(x_smooth),
-                    y=y_smooth,  # Already in log2(y+1) space
+                    y=y_smooth,  # Already in log2(y) space
                     color_values=1 - ntc_prop,  # Darker (group color) = fewer NTCs
                     cmap=group_cmap,
                     ax=ax_plot,
@@ -1219,10 +1225,13 @@ def plot_negbinom_xy(
             y_pred = predict_trans_function(model, feature, x_range, modality_name=None)
 
             if y_pred is not None:
-                # Transform prediction to log2(y+1) space to match data
-                ax_plot.plot(np.log2(x_range), np.log2(y_pred + 1),
-                            color='blue', linestyle='--', linewidth=2,
-                            label='Fitted Trans Function')
+                # Transform prediction to log2(y) space to match data
+                # Filter out zero/negative predictions
+                valid_pred = y_pred > 0
+                if valid_pred.any():
+                    ax_plot.plot(np.log2(x_range[valid_pred]), np.log2(y_pred[valid_pred]),
+                                color='blue', linestyle='--', linewidth=2,
+                                label='Fitted Trans Function')
 
                 # Add baseline if available
                 if hasattr(model, 'posterior_samples_trans') and 'A' in model.posterior_samples_trans:
@@ -1243,10 +1252,11 @@ def plot_negbinom_xy(
                                 A = A_mean[0, gene_idx]
                             else:
                                 A = A_mean[gene_idx]
-                        ax_plot.axhline(np.log2(A + 1), color='red', linestyle=':', linewidth=1, label='log2(A+1) baseline')
+                        if A > 0:
+                            ax_plot.axhline(np.log2(A), color='red', linestyle=':', linewidth=1, label='log2(A) baseline')
 
         ax_plot.set_xlabel(xlabel)
-        ax_plot.set_ylabel('log2(Expression + 1)')
+        ax_plot.set_ylabel('log2(Expression)')
         title_suffix = ' (corrected)' if corrected else ' (uncorrected)'
         ax_plot.set_title(f"{model.cis_gene} → {feature}{title_suffix}")
         ax_plot.legend(frameon=False)
