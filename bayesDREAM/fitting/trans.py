@@ -9,6 +9,12 @@ import warnings
 import numpy as np
 import pandas as pd
 import torch
+# Pre-import torch._dynamo to avoid circular import issues with OneCycleLR scheduler
+# This is a workaround for a known PyTorch issue in some versions/builds (especially ROCm)
+try:
+    import torch._dynamo
+except (ImportError, AttributeError):
+    pass  # Older PyTorch versions may not have _dynamo
 import pyro
 import pyro.distributions as dist
 from pyro.distributions.transforms import iterated, affine_autoregressive
