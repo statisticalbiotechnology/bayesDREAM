@@ -1165,32 +1165,35 @@ def plot_negbinom_xy(
             # Get is_ntc for this group
             is_ntc_group = is_ntc[df_group.index].values
 
-            # Transform to log2(y) BEFORE smoothing (matching old code behavior)
-            # Filter out zero/negative values first
-            valid_expr = y_expr > 0
-            if not valid_expr.all():
-                df_group = df_group[valid_expr].copy()
-                y_expr = y_expr[valid_expr]
-                is_ntc_group = is_ntc_group[valid_expr] if show_ntc_gradient else None
-            y_log = np.log2(y_expr)
-
-            # k-NN smoothing in log space
+            # k-NN smoothing in LINEAR space first (matching old code behavior)
+            # Old code: smooth raw y, THEN take log2
+            # This matters because log2(mean(y)) >= mean(log2(y)) by Jensen's inequality
             k = _knn_k(len(df_group), window)
             if show_ntc_gradient:
-                # Smoothing with NTC tracking
-                x_smooth, y_smooth, ntc_prop = _smooth_knn(
+                # Smoothing with NTC tracking in LINEAR space
+                x_smooth, y_smooth_linear, ntc_prop = _smooth_knn(
                     df_group['x_true'].values,
-                    y_log,
+                    y_expr.values if hasattr(y_expr, 'values') else y_expr,
                     k,
                     is_ntc=is_ntc_group
                 )
+
+                # Filter out zero/negative smoothed values before log transform
+                valid_smooth = y_smooth_linear > 0
+                if not valid_smooth.all():
+                    x_smooth = x_smooth[valid_smooth]
+                    y_smooth_linear = y_smooth_linear[valid_smooth]
+                    ntc_prop = ntc_prop[valid_smooth]
+
+                # Now take log2 of smoothed values
+                y_smooth_log = np.log2(y_smooth_linear)
 
                 # Use per-group gradient coloring (white → group color)
                 # Color value = 1 - ntc_prop: high NTC → 0 → white, low NTC → 1 → group color
                 group_cmap = group_cmaps.get(group_label, plt.cm.gray)
                 plot_colored_line(
                     x=np.log2(x_smooth),
-                    y=y_smooth,  # Already in log2(y) space
+                    y=y_smooth_log,
                     color_values=1 - ntc_prop,  # Darker (group color) = fewer NTCs
                     cmap=group_cmap,
                     ax=ax_plot,
@@ -1211,12 +1214,25 @@ def plot_negbinom_xy(
                     cbar.set_label('1 - Proportion NTC (darker = fewer NTCs)')
                     colorbar_added = True
             else:
-                # Standard smoothing without NTC tracking in log space
-                x_smooth, y_smooth = _smooth_knn(df_group['x_true'].values, y_log, k)
+                # Standard smoothing without NTC tracking in LINEAR space
+                x_smooth, y_smooth_linear = _smooth_knn(
+                    df_group['x_true'].values,
+                    y_expr.values if hasattr(y_expr, 'values') else y_expr,
+                    k
+                )
+
+                # Filter out zero/negative smoothed values before log transform
+                valid_smooth = y_smooth_linear > 0
+                if not valid_smooth.all():
+                    x_smooth = x_smooth[valid_smooth]
+                    y_smooth_linear = y_smooth_linear[valid_smooth]
+
+                # Now take log2 of smoothed values
+                y_smooth_log = np.log2(y_smooth_linear)
 
                 # Use standard coloring
                 color = _color_for_label(group_label, fallback_idx=idx, palette=color_palette)
-                ax_plot.plot(np.log2(x_smooth), y_smooth, color=color, linewidth=2, label=group_label)
+                ax_plot.plot(np.log2(x_smooth), y_smooth_log, color=color, linewidth=2, label=group_label)
 
         # Trans function overlay (if trans model fitted)
         # Show on corrected plot only (trans model was fitted on corrected data)
