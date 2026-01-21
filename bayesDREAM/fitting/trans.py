@@ -1600,14 +1600,10 @@ class TransFitter:
                 print(f"[WARNING] alpha_y_prefit shape mismatch - may need to add reference group")
 
         # Ensure x_true is on the correct device (may have been loaded from CPU)
-        if self.model.x_true.device != self.model.device:
-            self.model.x_true = self.model.x_true.to(self.model.device)
-
-        assert self.model.x_true.device == self.model.device
+        # Always move to device to avoid device comparison issues (cuda vs cuda:0)
+        self.model.x_true = self.model.x_true.to(self.model.device)
         if alpha_y_prefit is not None:
-            assert alpha_y_prefit.device == self.model.device
-        assert y_obs_tensor.device == self.model.device
-        assert sum_factor_tensor.device == self.model.device
+            alpha_y_prefit = alpha_y_prefit.to(self.model.device)
 
         def init_loc_fn(site):
             name = site["name"]
