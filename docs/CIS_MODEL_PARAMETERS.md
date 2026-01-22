@@ -100,6 +100,37 @@ x_obs ~ NegativeBinomial(mu=mu_obs, phi=phi_x)
 
 ---
 
+### `o_x` (overdispersion parameter)
+
+**Shape:** `(n_samples,)` - scalar per posterior sample
+
+**Meaning:** Controls the overdispersion of the negative binomial distribution. Related to
+the dispersion parameter `phi_x` by `phi_x = 1 / o_x^2`.
+
+**Generative model:**
+```
+beta_o ~ Gamma(beta_o_alpha, beta_o_beta)  # hyperprior
+o_x ~ Exponential(beta_o)                   # overdispersion
+phi_x = 1 / o_x^2                           # NB dispersion parameter
+```
+
+**Two versions are exported:**
+
+1. **`o_x_cis_posterior.csv`**: Overdispersion estimated during `fit_cis()`. This is
+   estimated jointly with the guide effects and captures the noise structure when
+   modeling the cis gene expression.
+
+2. **`o_x_trans_posterior.csv`**: Overdispersion estimated during `fit_technical()` on
+   NTC cells only. This serves as a baseline estimate of technical noise without
+   perturbation effects.
+
+**Interpretation:**
+- Smaller `o_x` → larger `phi_x` → less overdispersion (closer to Poisson)
+- Larger `o_x` → smaller `phi_x` → more overdispersion (more variance than Poisson)
+- Typical values: 0.1 to 1.0
+
+---
+
 ## Full Observation Model
 
 The complete generative model for observed counts is:
@@ -129,6 +160,10 @@ Where:
 | `x_true_posterior.csv` | (n_samples, n_cells) | Full posterior samples for x_true |
 | `x_eff_g_posterior.csv` | (n_samples, n_guides) | Full posterior samples for x_eff_g |
 | `sigma_eff_posterior.csv` | (n_samples, n_guides) | Full posterior samples for sigma_eff |
+| `o_x_cis_posterior.csv` | (n_samples,) | Overdispersion from cis fit |
+| `o_x_trans_posterior.csv` | (n_samples,) | Overdispersion from technical fit (NTC only) |
+| `alpha_x_posterior.csv` | (n_samples, C-1) | Technical correction factors from technical fit |
 
 **Note:** Rows in posterior CSVs are posterior samples, columns are cells/guides.
 Guide order matches `guide_code` in guide_meta (sorted by guide_code).
+Technical group order: index 0 = reference group (alpha_x = 1.0, not stored), index i = group i+1.
