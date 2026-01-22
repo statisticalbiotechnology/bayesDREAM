@@ -86,6 +86,7 @@ class TransFitter:
         mean_within_guide_var=None,
         x_true_CV=None,
         use_data_driven_priors=True,
+        use_lognormal_priors=False,
     ):
 
         if use_alpha:
@@ -351,33 +352,30 @@ class TransFitter:
                         K_a = pyro.deterministic("K_a", torch.exp(log_K_a))  # [T]
 
                 else:
-                    # For negbinom/normal/studentt: Learn Vmax using Log-Normal with data-driven variance
-                    Vmax_mean_prior = Vmax_prior_mean.clamp_min(epsilon_tensor)  # [T]
+                    # For negbinom/normal/studentt: Choose between Gamma and Log-Normal priors
+                    K_sigma = (K_max_tensor / (self._t(2.0) * torch.sqrt(K_alpha_tensor))) + epsilon_tensor
+                    Vmax_sigma = (Vmax_prior_mean / torch.sqrt(Vmax_alpha_tensor)) + epsilon_tensor
 
-                    # Use raw variance (not CV) for Vmax
-                    if mean_within_guide_var is not None:
-                        if mean_within_guide_var.ndim > 1:
-                            # Multinomial case: already handled by Vmax_prior_mean reduction
-                            Vmax_var_prior = mean_within_guide_var.mean(dim=-1)  # [T]
-                        else:
-                            Vmax_var_prior = mean_within_guide_var  # [T]
+                    if use_lognormal_priors:
+                        # Log-Normal priors (experimental) - use for comparison
+                        Vmax_log_mu = torch.log(Vmax_prior_mean) - 0.5 * torch.log1p((Vmax_sigma / Vmax_prior_mean) ** 2)
+                        Vmax_log_sigma = torch.sqrt(torch.log1p((Vmax_sigma / Vmax_prior_mean) ** 2))
+                        log_Vmax_a = pyro.sample("log_Vmax_a", dist.Normal(Vmax_log_mu, Vmax_log_sigma))
+                        Vmax_a = pyro.deterministic("Vmax_a", torch.exp(log_Vmax_a))
+
+                        log_K_a = pyro.sample("log_K_a", dist.Normal(K_log_mu, K_log_sigma))
+                        K_a = pyro.deterministic("K_a", torch.exp(log_K_a))
                     else:
-                        # Fallback if variance not available
-                        Vmax_var_prior = (Vmax_mean_prior ** 2) / Vmax_alpha_tensor
-
-                    Vmax_std_prior = torch.sqrt(Vmax_var_prior.clamp_min(epsilon_tensor))
-
-                    # Log-Normal parameterization for Vmax
-                    ratio_Vmax = (Vmax_std_prior / Vmax_mean_prior).clamp_min(self._t(1e-6))
-                    Vmax_log_sigma = torch.sqrt(torch.log1p(ratio_Vmax ** 2))
-                    Vmax_log_mu = torch.log(Vmax_mean_prior) - 0.5 * Vmax_log_sigma ** 2
-
-                    log_Vmax_a = pyro.sample("log_Vmax_a", dist.Normal(Vmax_log_mu, Vmax_log_sigma))
-                    Vmax_a = pyro.deterministic("Vmax_a", torch.exp(log_Vmax_a))
-
-                    # K_a: unified Log-Normal (same as binomial/multinomial)
-                    log_K_a = pyro.sample("log_K_a", dist.Normal(K_log_mu, K_log_sigma))
-                    K_a = pyro.deterministic("K_a", torch.exp(log_K_a))
+                        # Gamma priors (default, matching archive) - better convergence and sparsity
+                        # Gamma parameterization: shape = mean^2/var, rate = mean/var
+                        Vmax_a = pyro.sample("Vmax_a", dist.Gamma(
+                            (Vmax_prior_mean ** 2) / (Vmax_sigma ** 2),
+                            Vmax_prior_mean / (Vmax_sigma ** 2)
+                        ))
+                        K_a = pyro.sample("K_a", dist.Gamma(
+                            ((K_max_tensor / 2) ** 2) / (K_sigma ** 2),
+                            (K_max_tensor / 2) / (K_sigma ** 2)
+                        ))
 
                 # Sample all required parameters (additive_hill and nested_hill need second set)
                 if function_type in ['additive_hill', 'nested_hill']:
@@ -426,12 +424,25 @@ class TransFitter:
                             K_b = pyro.deterministic("K_b", torch.exp(log_K_b))  # [T]
 
                     else:
-                        # For negbinom/normal/studentt: Vmax_b and K_b use Log-Normal (same as Vmax_a and K_a)
-                        log_Vmax_b = pyro.sample("log_Vmax_b", dist.Normal(Vmax_log_mu, Vmax_log_sigma))
-                        Vmax_b = pyro.deterministic("Vmax_b", torch.exp(log_Vmax_b))
+                        # For negbinom/normal/studentt: Choose between Gamma and Log-Normal priors
+                        # K_sigma and Vmax_sigma were computed above in the Vmax_a/K_a section
+                        if use_lognormal_priors:
+                            # Log-Normal priors (experimental) - Vmax_log_mu/sigma computed in Vmax_a section
+                            log_Vmax_b = pyro.sample("log_Vmax_b", dist.Normal(Vmax_log_mu, Vmax_log_sigma))
+                            Vmax_b = pyro.deterministic("Vmax_b", torch.exp(log_Vmax_b))
 
-                        log_K_b = pyro.sample("log_K_b", dist.Normal(K_log_mu, K_log_sigma))
-                        K_b = pyro.deterministic("K_b", torch.exp(log_K_b))
+                            log_K_b = pyro.sample("log_K_b", dist.Normal(K_log_mu, K_log_sigma))
+                            K_b = pyro.deterministic("K_b", torch.exp(log_K_b))
+                        else:
+                            # Gamma priors (default, matching archive) - better convergence and sparsity
+                            Vmax_b = pyro.sample("Vmax_b", dist.Gamma(
+                                (Vmax_prior_mean ** 2) / (Vmax_sigma ** 2),
+                                Vmax_prior_mean / (Vmax_sigma ** 2)
+                            ))
+                            K_b = pyro.sample("K_b", dist.Gamma(
+                                ((K_max_tensor / 2) ** 2) / (K_sigma ** 2),
+                                (K_max_tensor / 2) / (K_sigma ** 2)
+                            ))
                 
                 # Compute Hill function(s)
                 # Hill_based_positive returns values in [0, Vmax]
@@ -860,6 +871,7 @@ class TransFitter:
         modality_name: str = None,
         min_denominator: int = None,
         use_data_driven_priors: bool = True,
+        use_lognormal_priors: bool = False,
         **kwargs
     ):
         """
@@ -885,6 +897,10 @@ class TransFitter:
             If True (default), use Beta priors for A and upper_limit based on data percentiles.
             If False, use uniform priors (Beta(1, 1)). Useful for testing if data-driven
             priors are too strong or causing issues. Default: True.
+        use_lognormal_priors : bool, optional
+            If True, use Log-Normal priors for Vmax and K (experimental).
+            If False (default), use direct Gamma priors (matching archive, better convergence).
+            Only affects negbinom/normal/studentt distributions.
         function_type : str
             Dose-response function: 'single_hill', 'additive_hill', 'polynomial'
         **kwargs
@@ -1660,6 +1676,7 @@ class TransFitter:
                 mean_within_guide_var=mean_within_guide_var,
                 x_true_CV=x_true_CV,
                 use_data_driven_priors=use_data_driven_priors,
+                use_lognormal_priors=use_lognormal_priors,
             )
             # OneCycleLR for polynomial only
             base_lr = 1e-3 if lr is None else lr
@@ -1795,8 +1812,9 @@ class TransFitter:
                 mean_within_guide_var=mean_within_guide_var,
                 x_true_CV=x_true_CV,
                 use_data_driven_priors=use_data_driven_priors,
+                use_lognormal_priors=use_lognormal_priors,
             )
-            
+
             self.losses_trans.append(loss)
             if step % 1000 == 0:
                 print(f"Step {step} : loss = {loss:.5e}, device: {Vmax_mean_tensor.device}")
@@ -1854,6 +1872,7 @@ class TransFitter:
                 "mean_within_guide_var": self._to_cpu(mean_within_guide_var) if mean_within_guide_var is not None else None,
                 "x_true_CV": self._to_cpu(x_true_CV) if x_true_CV is not None else None,
                 "use_data_driven_priors": use_data_driven_priors,
+                "use_lognormal_priors": use_lognormal_priors,
             }
         else:
             model_inputs = {
@@ -1893,6 +1912,7 @@ class TransFitter:
                 "mean_within_guide_var": mean_within_guide_var,
                 "x_true_CV": x_true_CV,
                 "use_data_driven_priors": use_data_driven_priors,
+                "use_lognormal_priors": use_lognormal_priors,
             }
 
         if self.model.device.type == "cuda":
