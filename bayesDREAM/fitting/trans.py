@@ -1692,7 +1692,8 @@ class TransFitter:
         else:
             # Simple Adam for Hill-based function types (single_hill, additive_hill, nested_hill)
             guide_y = pyro.infer.autoguide.AutoNormalMessenger(self._model_y)
-            optimizer = pyro.optim.Adam({"lr": lr})
+            hill_lr = 1e-3 if lr is None else lr
+            optimizer = pyro.optim.Adam({"lr": hill_lr})
             svi = pyro.infer.SVI(
                 self._model_y,
                 guide_y,
