@@ -636,18 +636,25 @@ class PlottingMixin:
             These must exist in posterior_samples_trans.
         modality_name : str, optional
             Modality name. If None, uses primary modality.
+        genes : list of str, optional
+            Specific genes to plot. If None, plots all genes (subject to max_genes).
         ci_level : float
             Credible interval level (default: 95.0 for 95% CI)
         sort_by : str
-            How to sort genes: 'none', 'median', 'abs_median', 'effect'
+            How to sort genes: 'none', 'alphabetical', 'median', 'abs_median', 'effect'
         filter_dependent : bool
             If True, only show genes where CI excludes 0 (default: False)
+        max_genes : int
+            Maximum genes to plot (default: 100). Raises error if exceeded.
+            Set to None to disable limit.
         ymin, ymax : float, optional
             Y-axis limits. If None, auto-scaled.
         title : str, optional
             Plot title. If None, auto-generated.
         color_palette : dict, optional
             Custom colors for parameters.
+        show_gene_separators : bool
+            Draw vertical lines between genes (default: True)
         **kwargs
             Additional plotting arguments
 
@@ -672,6 +679,13 @@ class PlottingMixin:
         >>> fig, ax = model.plot_parameter_ci_panel(
         ...     ['alpha', 'beta'],
         ...     color_palette={'alpha': 'crimson', 'beta': 'dodgerblue'}
+        ... )
+
+        >>> # Plot specific genes, sorted alphabetically
+        >>> fig, ax = model.plot_parameter_ci_panel(
+        ...     ['n_a', 'n_b'],
+        ...     genes=['TET2', 'NFE2', 'MYB'],
+        ...     sort_by='alphabetical'
         ... )
         """
         from .basic import plot_parameter_ci_panel

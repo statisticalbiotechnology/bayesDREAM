@@ -459,10 +459,12 @@ def plot_parameter_ci_panel(
     model,
     params: list,
     modality_name: str = None,
+    genes: list = None,
     ci_level: float = 95.0,
     sort_by: str = 'none',
     filter_dependent: bool = False,
     dependency_params: list = None,
+    max_genes: int = 100,
     ymin: float = None,
     ymax: float = None,
     title: str = None,
@@ -472,6 +474,7 @@ def plot_parameter_ci_panel(
     marker_size: int = 18,
     capsize: int = 3,
     show_zero_line: bool = True,
+    show_gene_separators: bool = True,
     ax=None,
     show: bool = True,
 ):
@@ -490,6 +493,9 @@ def plot_parameter_ci_panel(
         These must exist in posterior_samples_trans.
     modality_name : str, optional
         Modality name. If None, uses primary modality.
+    genes : list of str, optional
+        Specific genes to plot. If None, plots all genes (subject to max_genes).
+        Gene names must match feature names in the modality.
     ci_level : float
         Credible interval level (default: 95.0 for 95% CI)
     sort_by : str
@@ -505,6 +511,9 @@ def plot_parameter_ci_panel(
     dependency_params : list, optional
         Parameters to use for dependency filtering. If None, uses all params.
         Common: ['n_a', 'n_b'] for Hill coefficients.
+    max_genes : int
+        Maximum number of genes to plot (default: 100). If more genes would be
+        plotted, raises ValueError with suggestions. Set to None to disable limit.
     ymin, ymax : float, optional
         Y-axis limits. If None, auto-scaled.
     title : str, optional
@@ -522,6 +531,9 @@ def plot_parameter_ci_panel(
         Size of error bar caps (default: 3)
     show_zero_line : bool
         Whether to draw horizontal line at y=0 (default: True)
+    show_gene_separators : bool
+        Whether to draw vertical lines between genes (default: True).
+        Helps visually distinguish which parameters belong to which gene.
     ax : matplotlib axes, optional
         Axes to plot on. If None, creates new figure.
     show : bool
@@ -644,11 +656,46 @@ def plot_parameter_ci_panel(
 
     # Get indices of genes to plot
     gene_indices = np.where(gene_mask)[0]
+
+    # Filter to user-specified genes if provided
+    if genes is not None:
+        # Map gene names to indices
+        name_to_idx = {name: i for i, name in enumerate(gene_names)}
+        user_indices = []
+        missing_genes = []
+        for g in genes:
+            if g in name_to_idx:
+                idx = name_to_idx[g]
+                if idx in gene_indices:  # Respect dependency filter
+                    user_indices.append(idx)
+            else:
+                missing_genes.append(g)
+        if missing_genes:
+            import warnings
+            warnings.warn(f"Genes not found in modality: {missing_genes[:5]}{'...' if len(missing_genes) > 5 else ''}")
+        gene_indices = np.array(user_indices)
+
     n_genes = len(gene_indices)
 
     if n_genes == 0:
         print("No genes to plot after filtering.")
         return None, None
+
+    # Check max_genes limit
+    if max_genes is not None and n_genes > max_genes:
+        raise ValueError(
+            f"Too many genes to plot ({n_genes} > {max_genes}). Options:\n"
+            f"  1. Use filter_dependent=True to show only dependent genes\n"
+            f"  2. Use genes=['gene1', 'gene2', ...] to specify specific genes\n"
+            f"  3. Use sort_by='effect' with filter_dependent=True for top effects\n"
+            f"  4. Set max_genes=None to disable this limit (not recommended)"
+        )
+    elif n_genes > 100:
+        import warnings
+        warnings.warn(
+            f"Plotting {n_genes} genes. Consider using filter_dependent=True "
+            f"or genes=[...] to reduce the number of genes."
+        )
 
     # Sort genes
     if sort_by == 'alphabetical':
@@ -691,9 +738,10 @@ def plot_parameter_ci_panel(
         color_palette = dict(zip(params, colors))
 
     # Set up x positions with dodging
+    # Use smaller width to keep params for same gene close together
     x_base = np.arange(n_genes)
     n_params = len(params)
-    width = 0.7
+    width = 0.3  # Reduced from 0.7 to keep params closer within gene
     if n_params > 1:
         offsets = np.linspace(-width/2, width/2, n_params)
     else:
@@ -734,6 +782,14 @@ def plot_parameter_ci_panel(
 
     if show_zero_line:
         ax.axhline(0, color='black', linestyle=':', linewidth=1, alpha=0.7)
+
+    # Draw vertical separators between genes
+    if show_gene_separators and n_genes > 1:
+        for i in range(1, n_genes):
+            ax.axvline(i - 0.5, color='lightgray', linestyle='-', linewidth=0.5, alpha=0.7, zorder=1)
+
+    # Tighten x-axis margins
+    ax.set_xlim(-0.5, n_genes - 0.5)
 
     if ymin is not None or ymax is not None:
         cur = ax.get_ylim()

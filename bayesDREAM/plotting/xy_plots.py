@@ -1027,6 +1027,7 @@ def plot_negbinom_xy(
     show_hill_function: bool,
     show_ntc_gradient: bool = False,
     sum_factor_col: str = 'sum_factor',
+    min_counts: int = 0,
     xlabel: str = "log2(x_true)",
     ax: Optional[plt.Axes] = None,
     subset_mask: Optional[np.ndarray] = None,
@@ -1046,6 +1047,8 @@ def plot_negbinom_xy(
     sum_factor_col : str
         Column name in model.meta for sum factors (default: 'sum_factor')
         Can be 'sum_factor', 'sum_factor_adj', or any other sum factor column
+    min_counts : int
+        Minimum raw counts to include a cell (default: 0, i.e., include all cells)
     """
     # Get data
     feature_idx = _get_feature_index(feature, modality)
@@ -1081,6 +1084,10 @@ def plot_negbinom_xy(
         df_data['technical_group_code'] = meta_aligned['technical_group_code'].values
 
     df = pd.DataFrame(df_data)
+
+    # Filter by min_counts (exclude cells with raw counts below threshold)
+    if min_counts > 0:
+        df = df[df['y_obs'] >= min_counts].copy()
 
     # Technical correction
     has_technical_fit = modality.alpha_y_prefit is not None
@@ -2427,7 +2434,7 @@ def plot_xy_data(
     modality_name: Optional[str] = None,
     window: int = 100,
     show_correction: str = 'both',
-    min_counts: int = 3,
+    min_counts: Optional[int] = None,
     color_palette: Optional[Dict[str, str]] = None,
     show_hill_function: bool = True,
     show_ntc_gradient: bool = False,
@@ -2462,9 +2469,12 @@ def plot_xy_data(
         'uncorrected': no technical correction
         'corrected': apply alpha_y technical correction
         'both': show both side-by-side (default)
-    min_counts : int
-        Minimum denominator for binomial (default: 3)
-        Minimum total counts for multinomial (default: 3)
+    min_counts : int, optional
+        Minimum raw counts to include cells.
+        Default depends on distribution: 0 for negbinom, 3 for binomial/multinomial.
+        For negbinom: excludes cells with y_obs < min_counts
+        For binomial: minimum denominator
+        For multinomial: minimum total counts
     color_palette : dict, optional
         Custom colors for technical groups
         Example: {'CRISPRa': 'crimson', 'CRISPRi': 'dodgerblue'}
@@ -2606,6 +2616,13 @@ def plot_xy_data(
     if modality_name is None:
         modality_name = model.primary_modality
     modality = model.get_modality(modality_name)
+
+    # Set distribution-specific default for min_counts
+    if min_counts is None:
+        if modality.distribution == 'negbinom':
+            min_counts = 0  # Include all cells for gene expression
+        else:
+            min_counts = 3  # Require min counts for binomial/multinomial
 
     # Get color palette
     if color_palette is None:
@@ -2757,7 +2774,8 @@ def plot_xy_data(
                     x_true=x_true, window=window, show_correction='uncorrected',
                     color_palette=color_palette, show_hill_function=show_hill_function,
                     show_ntc_gradient=show_ntc_gradient, sum_factor_col=sum_factor_col,
-                    xlabel=xlabel, ax=axes[i, 0], subset_mask=subset_mask, **kwargs
+                    min_counts=min_counts, xlabel=xlabel, ax=axes[i, 0],
+                    subset_mask=subset_mask, **kwargs
                 )
             elif distribution == 'binomial':
                 plot_binomial_xy(
@@ -2787,7 +2805,8 @@ def plot_xy_data(
                     x_true=x_true, window=window, show_correction='corrected',
                     color_palette=color_palette, show_hill_function=show_hill_function,
                     show_ntc_gradient=show_ntc_gradient, sum_factor_col=sum_factor_col,
-                    xlabel=xlabel, ax=axes[i, 1], subset_mask=subset_mask, **kwargs
+                    min_counts=min_counts, xlabel=xlabel, ax=axes[i, 1],
+                    subset_mask=subset_mask, **kwargs
                 )
             elif distribution == 'binomial':
                 plot_binomial_xy(
@@ -2831,6 +2850,7 @@ def plot_xy_data(
             show_hill_function=show_hill_function,
             show_ntc_gradient=show_ntc_gradient,
             sum_factor_col=sum_factor_col,
+            min_counts=min_counts,
             xlabel=xlabel,
             subset_mask=subset_mask,
             **kwargs

@@ -1661,40 +1661,44 @@ class TransFitter:
                 x_true_CV=x_true_CV,
                 use_data_driven_priors=use_data_driven_priors,
             )
-        else:
-            guide_y = pyro.infer.autoguide.AutoNormalMessenger(self._model_y)
+            # OneCycleLR for polynomial only
+            base_lr = 1e-3 if lr is None else lr
 
-        # -------------------------------
-        # Shared OneCycleLR scheduler for ALL function types
-        # -------------------------------
-        # Use lr if the user passed it, otherwise default to 1e-3
-        base_lr = 1e-3 if lr is None else lr
-        
-        optimizer = pyro.optim.PyroLRScheduler(
-            scheduler_constructor=OneCycleLR,
-            optim_args={
-                # underlying torch optimizer
-                "optimizer": torch.optim.Adam,
-                "optim_args": {
-                    "lr": base_lr,      # initial lr (OneCycle will move it)
-                    "betas": (0.9, 0.999),
+            optimizer = pyro.optim.PyroLRScheduler(
+                scheduler_constructor=OneCycleLR,
+                optim_args={
+                    # underlying torch optimizer
+                    "optimizer": torch.optim.Adam,
+                    "optim_args": {
+                        "lr": base_lr,      # initial lr (OneCycle will move it)
+                        "betas": (0.9, 0.999),
+                    },
+                    # OneCycleLR hyperparameters
+                    "max_lr":          base_lr * 10,  # was 1e-2 when base_lr=1e-3
+                    "total_steps":     niters,
+                    "pct_start":       0.1,
+                    "div_factor":      25.0,
+                    "final_div_factor": 1e4,
                 },
-                # OneCycleLR hyperparameters
-                "max_lr":          base_lr * 10,  # was 1e-2 when base_lr=1e-3
-                "total_steps":     niters,
-                "pct_start":       0.1,
-                "div_factor":      25.0,
-                "final_div_factor": 1e4,
-            },
-            clip_args={"clip_norm": 5},  # same clipping everywhere
-        )
-        
-        svi = pyro.infer.SVI(
-            self._model_y,
-            guide_y,
-            optimizer,
-            loss=pyro.infer.Trace_ELBO()
-        )
+                clip_args={"clip_norm": 5},
+            )
+
+            svi = pyro.infer.SVI(
+                self._model_y,
+                guide_y,
+                optimizer,
+                loss=pyro.infer.Trace_ELBO()
+            )
+        else:
+            # Simple Adam for Hill-based function types (single_hill, additive_hill, nested_hill)
+            guide_y = pyro.infer.autoguide.AutoNormalMessenger(self._model_y)
+            optimizer = pyro.optim.Adam({"lr": lr})
+            svi = pyro.infer.SVI(
+                self._model_y,
+                guide_y,
+                optimizer,
+                loss=pyro.infer.Trace_ELBO()
+            )
 
         
         for name, value in pyro.get_param_store().items():
