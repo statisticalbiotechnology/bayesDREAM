@@ -876,7 +876,7 @@ class TransFitter:
         use_lognormal_priors: bool = True,
         correct_priors_for_technical: bool = True,
         use_archive_prior_computation: bool = False,
-        use_epsilon: bool = True,
+        use_epsilon: bool = False,
         **kwargs
     ):
         """
@@ -918,8 +918,8 @@ class TransFitter:
             - Amean = 5th percentile of guide means
             - Vmax_mean = 95th percentile - 5th percentile (range)
         use_epsilon : bool, optional
-            If True (default), add 1e-8 epsilon for numerical stability in NegativeBinomial logits.
-            If False (archive behavior), use log(mu) - log(phi) directly.
+            If True, add 1e-8 epsilon for numerical stability in NegativeBinomial logits.
+            If False (default), use log(mu) - log(phi) directly.
         function_type : str
             Dose-response function: 'single_hill', 'additive_hill', 'polynomial'
         **kwargs
