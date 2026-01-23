@@ -81,12 +81,14 @@ def sample_negbinom_trans(
             mu_final = mu_adjusted * sum_factor_tensor.unsqueeze(-1)  # [N, T]
 
             # Sample observations
-            with pyro.plate("obs_plate", N, dim=-2):
+            # NOTE: Archive code does NOT use epsilon in logits (uses log(mu) - log(phi) directly)
+            # This matches the archive behavior for proper loss comparison
+            with pyro.plate("data_plate", N, dim=-2):  # Use "data_plate" to match archive
                 pyro.sample(
                     "y_obs",
                     dist.NegativeBinomial(
                         total_count=phi_y_used,
-                        logits=torch.log(mu_final + 1e-8) - torch.log(phi_y_used + 1e-8)
+                        logits=torch.log(mu_final) - torch.log(phi_y_used)
                     ),
                     obs=y_obs_tensor
                 )
@@ -129,12 +131,13 @@ def sample_negbinom_trans(
             y_obs_expanded = y_obs_tensor.unsqueeze(0).expand(S, -1, -1)
 
             # Sample observations with sample dimension
-            with pyro.plate("obs_plate", S * N * T):
+            # NOTE: Archive code does NOT use epsilon in logits
+            with pyro.plate("data_plate", S * N * T):  # Use "data_plate" to match archive
                 pyro.sample(
                     "y_obs",
                     dist.NegativeBinomial(
                         total_count=phi_expanded,
-                        logits=torch.log(mu_final + 1e-8) - torch.log(phi_expanded + 1e-8)
+                        logits=torch.log(mu_final) - torch.log(phi_expanded)
                     ),
                     obs=y_obs_expanded.reshape(-1)
                 )
@@ -148,12 +151,13 @@ def sample_negbinom_trans(
         mu_final = mu_adjusted * sum_factor_tensor.unsqueeze(-1)  # [N, T]
 
         # Sample observations
-        with pyro.plate("obs_plate", N, dim=-2):
+        # NOTE: Archive code does NOT use epsilon in logits
+        with pyro.plate("data_plate", N, dim=-2):  # Use "data_plate" to match archive
             pyro.sample(
                 "y_obs",
                 dist.NegativeBinomial(
                     total_count=phi_y_used,
-                    logits=torch.log(mu_final + 1e-8) - torch.log(phi_y_used + 1e-8)
+                    logits=torch.log(mu_final) - torch.log(phi_y_used)
                 ),
                 obs=y_obs_tensor
             )
