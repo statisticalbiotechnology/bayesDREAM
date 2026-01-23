@@ -37,7 +37,8 @@ def sample_negbinom_trans(
     sum_factor_tensor,
     N,
     T,
-    C=None
+    C=None,
+    use_epsilon=True
 ):
     """
     Sample observations from negative binomial likelihood for trans model.
@@ -64,12 +65,16 @@ def sample_negbinom_trans(
         Number of features (trans genes)
     C : int or None
         Number of technical groups
+    use_epsilon : bool
+        If True (default), add 1e-8 epsilon for numerical stability in logits.
+        If False, use log(mu) - log(phi) directly (archive behavior).
 
     Notes
     -----
     mu_final = mu_y * alpha_y[group] * sum_factor
     Handles both 2D ([C, T]) and 3D ([S, C, T]) alpha tensors for Predictive sampling.
     """
+    eps = 1e-8 if use_epsilon else 0.0
     # Apply technical group effects if present (multiplicative)
     if alpha_y_full is not None and groups_tensor is not None:
         if alpha_y_full.dim() == 2:
@@ -81,14 +86,14 @@ def sample_negbinom_trans(
             mu_final = mu_adjusted * sum_factor_tensor.unsqueeze(-1)  # [N, T]
 
             # Sample observations
-            # NOTE: Archive code does NOT use epsilon in logits (uses log(mu) - log(phi) directly)
-            # This matches the archive behavior for proper loss comparison
-            with pyro.plate("data_plate", N, dim=-2):  # Use "data_plate" to match archive
+            # NOTE: use_epsilon=True (default) adds 1e-8 for numerical stability
+            # use_epsilon=False matches archive behavior (log(mu) - log(phi) directly)
+            with pyro.plate("data_plate", N, dim=-2):
                 pyro.sample(
                     "y_obs",
                     dist.NegativeBinomial(
                         total_count=phi_y_used,
-                        logits=torch.log(mu_final) - torch.log(phi_y_used)
+                        logits=torch.log(mu_final + eps) - torch.log(phi_y_used + eps)
                     ),
                     obs=y_obs_tensor
                 )
@@ -131,13 +136,13 @@ def sample_negbinom_trans(
             y_obs_expanded = y_obs_tensor.unsqueeze(0).expand(S, -1, -1)
 
             # Sample observations with sample dimension
-            # NOTE: Archive code does NOT use epsilon in logits
-            with pyro.plate("data_plate", S * N * T):  # Use "data_plate" to match archive
+            # NOTE: use_epsilon=True (default) adds 1e-8 for numerical stability
+            with pyro.plate("data_plate", S * N * T):
                 pyro.sample(
                     "y_obs",
                     dist.NegativeBinomial(
                         total_count=phi_expanded,
-                        logits=torch.log(mu_final) - torch.log(phi_expanded)
+                        logits=torch.log(mu_final + eps) - torch.log(phi_expanded + eps)
                     ),
                     obs=y_obs_expanded.reshape(-1)
                 )
@@ -151,13 +156,13 @@ def sample_negbinom_trans(
         mu_final = mu_adjusted * sum_factor_tensor.unsqueeze(-1)  # [N, T]
 
         # Sample observations
-        # NOTE: Archive code does NOT use epsilon in logits
-        with pyro.plate("data_plate", N, dim=-2):  # Use "data_plate" to match archive
+        # NOTE: use_epsilon=True (default) adds 1e-8 for numerical stability
+        with pyro.plate("data_plate", N, dim=-2):
             pyro.sample(
                 "y_obs",
                 dist.NegativeBinomial(
                     total_count=phi_y_used,
-                    logits=torch.log(mu_final) - torch.log(phi_y_used)
+                    logits=torch.log(mu_final + eps) - torch.log(phi_y_used + eps)
                 ),
                 obs=y_obs_tensor
             )

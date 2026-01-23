@@ -86,7 +86,8 @@ class TransFitter:
         mean_within_guide_var=None,
         x_true_CV=None,
         use_data_driven_priors=True,
-        use_lognormal_priors=False,
+        use_lognormal_priors=True,
+        use_epsilon=True,
     ):
 
         if use_alpha:
@@ -786,7 +787,8 @@ class TransFitter:
                 sum_factor_tensor=sum_factor_tensor,
                 N=N,
                 T=T,
-                C=C
+                C=C,
+                use_epsilon=use_epsilon
             )
         elif distribution == 'multinomial':
             # For multinomial, mu_y should be probabilities [N, T, K]
@@ -871,9 +873,10 @@ class TransFitter:
         modality_name: str = None,
         min_denominator: int = None,
         use_data_driven_priors: bool = True,
-        use_lognormal_priors: bool = False,
-        correct_priors_for_technical: bool = False,
-        use_archive_prior_computation: bool = True,
+        use_lognormal_priors: bool = True,
+        correct_priors_for_technical: bool = True,
+        use_archive_prior_computation: bool = False,
+        use_epsilon: bool = True,
         **kwargs
     ):
         """
@@ -900,20 +903,23 @@ class TransFitter:
             If False, use uniform priors (Beta(1, 1)). Useful for testing if data-driven
             priors are too strong or causing issues. Default: True.
         use_lognormal_priors : bool, optional
-            If True, use Log-Normal priors for Vmax and K (experimental).
-            If False (default), use direct Gamma priors (matching archive, better convergence).
+            If True (default), use Log-Normal priors for Vmax and K.
+            If False, use direct Gamma priors (archive behavior).
             Only affects negbinom/normal/studentt distributions.
         correct_priors_for_technical : bool, optional
-            If True, correct data for technical effects before computing priors (Amean, Vmax_mean).
-            If False (default, matching archive), compute priors from raw sum_factor-normalized data.
+            If True (default), correct data for technical effects before computing priors (Amean, Vmax_mean).
+            If False (archive behavior), compute priors from raw sum_factor-normalized data.
             Technical effects are still corrected during model fitting via alpha_y_sample.
         use_archive_prior_computation : bool, optional
-            If True (default), compute Amean and Vmax_mean using archive method:
+            If True, compute Amean and Vmax_mean using archive method:
             - Amean = min(guide_means) per feature
             - Vmax_mean = max(guide_means) per feature
-            If False, use percentile-based method:
+            If False (default), use percentile-based method:
             - Amean = 5th percentile of guide means
             - Vmax_mean = 95th percentile - 5th percentile (range)
+        use_epsilon : bool, optional
+            If True (default), add 1e-8 epsilon for numerical stability in NegativeBinomial logits.
+            If False (archive behavior), use log(mu) - log(phi) directly.
         function_type : str
             Dose-response function: 'single_hill', 'additive_hill', 'polynomial'
         **kwargs
@@ -1726,6 +1732,7 @@ class TransFitter:
                 x_true_CV=x_true_CV,
                 use_data_driven_priors=use_data_driven_priors,
                 use_lognormal_priors=use_lognormal_priors,
+                use_epsilon=use_epsilon,
             )
             # OneCycleLR for polynomial only
             base_lr = 1e-3 if lr is None else lr
@@ -1862,6 +1869,7 @@ class TransFitter:
                 x_true_CV=x_true_CV,
                 use_data_driven_priors=use_data_driven_priors,
                 use_lognormal_priors=use_lognormal_priors,
+                use_epsilon=use_epsilon,
             )
 
             self.losses_trans.append(loss)
@@ -1922,6 +1930,7 @@ class TransFitter:
                 "x_true_CV": self._to_cpu(x_true_CV) if x_true_CV is not None else None,
                 "use_data_driven_priors": use_data_driven_priors,
                 "use_lognormal_priors": use_lognormal_priors,
+                "use_epsilon": use_epsilon,
             }
         else:
             model_inputs = {
@@ -1962,6 +1971,7 @@ class TransFitter:
                 "x_true_CV": x_true_CV,
                 "use_data_driven_priors": use_data_driven_priors,
                 "use_lognormal_priors": use_lognormal_priors,
+                "use_epsilon": use_epsilon,
             }
 
         if self.model.device.type == "cuda":
