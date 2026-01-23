@@ -872,6 +872,8 @@ class TransFitter:
         min_denominator: int = None,
         use_data_driven_priors: bool = True,
         use_lognormal_priors: bool = False,
+        correct_priors_for_technical: bool = False,
+        use_archive_prior_computation: bool = True,
         **kwargs
     ):
         """
@@ -901,6 +903,17 @@ class TransFitter:
             If True, use Log-Normal priors for Vmax and K (experimental).
             If False (default), use direct Gamma priors (matching archive, better convergence).
             Only affects negbinom/normal/studentt distributions.
+        correct_priors_for_technical : bool, optional
+            If True, correct data for technical effects before computing priors (Amean, Vmax_mean).
+            If False (default, matching archive), compute priors from raw sum_factor-normalized data.
+            Technical effects are still corrected during model fitting via alpha_y_sample.
+        use_archive_prior_computation : bool, optional
+            If True (default), compute Amean and Vmax_mean using archive method:
+            - Amean = min(guide_means) per feature
+            - Vmax_mean = max(guide_means) per feature
+            If False, use percentile-based method:
+            - Amean = 5th percentile of guide means
+            - Vmax_mean = 95th percentile - 5th percentile (range)
         function_type : str
             Dose-response function: 'single_hill', 'additive_hill', 'polynomial'
         **kwargs
@@ -1205,9 +1218,12 @@ class TransFitter:
         # CORRECT FOR TECHNICAL EFFECTS BEFORE COMPUTING PRIORS
         # ===================================================================
         # The observed data includes technical batch effects. To compute unbiased
-        # priors for A and Vmax (baseline parameters), we need to remove these effects
+        # priors for A and Vmax (baseline parameters), we can optionally remove these effects
         # using the inverse transformation.
-        if alpha_y_prefit is not None and groups_tensor is not None:
+        # NOTE: Archive code does NOT correct priors - it uses raw sum_factor-normalized data.
+        # Technical effects are only applied during model fitting via alpha_y_sample.
+        # Setting correct_priors_for_technical=False (default) matches archive behavior.
+        if correct_priors_for_technical and alpha_y_prefit is not None and groups_tensor is not None:
             print(f"[INFO] Correcting for technical effects before computing priors (distribution: {distribution})")
 
             # Handle both point estimates (2D) and posterior samples (3D)
@@ -1433,23 +1449,56 @@ class TransFitter:
             guide_means = torch.stack(guide_means, dim=0)  # [G, T] or [G, T, K]
             guide_vars = torch.stack(guide_vars, dim=0)    # [G, T] or [G, T, K]
 
-            # For A and Vmax: use 5th and 95th percentiles of guide means
-            Amean_tensor = nanquantile(guide_means, 0.05, dim=0)  # [T] or [T, K]
-            upper_quantile = nanquantile(guide_means, 0.95, dim=0)  # [T] or [T, K]
+            if use_archive_prior_computation:
+                # ARCHIVE METHOD: Use min/max of guide means (matching archive behavior)
+                # This uses the actual min and max observed guide means per feature
+                # Handle NaN values by using nanmin/nanmax
+                def nanmin(x, dim):
+                    """Compute min ignoring NaN values."""
+                    # Replace NaN with +inf so they don't affect min
+                    x_filled = torch.where(torch.isnan(x), torch.full_like(x, float('inf')), x)
+                    result = torch.min(x_filled, dim=dim)[0]
+                    # If all values were NaN, result will be inf - replace with nan
+                    all_nan = torch.all(torch.isnan(x), dim=dim)
+                    return torch.where(all_nan, torch.full_like(result, float('nan')), result)
 
-            # Ensure A_mean >= 1e-3
-            Amean_tensor = Amean_tensor.clamp_min(self._t(1e-3))
+                def nanmax(x, dim):
+                    """Compute max ignoring NaN values."""
+                    # Replace NaN with -inf so they don't affect max
+                    x_filled = torch.where(torch.isnan(x), torch.full_like(x, float('-inf')), x)
+                    result = torch.max(x_filled, dim=dim)[0]
+                    # If all values were NaN, result will be -inf - replace with nan
+                    all_nan = torch.all(torch.isnan(x), dim=dim)
+                    return torch.where(all_nan, torch.full_like(result, float('nan')), result)
 
-            # Vmax is the RANGE (amplitude), not the absolute value
-            # Model: y = A + Vmax_a * Hill_a, so Vmax_a = y_max - A
-            Vmax_mean_tensor = upper_quantile - Amean_tensor  # [T] or [T, K]
-            Vmax_mean_tensor = Vmax_mean_tensor.clamp_min(self._t(1e-3))  # Ensure positive
+                Amean_tensor = nanmin(guide_means, dim=0)  # [T] or [T, K]
+                Vmax_mean_tensor = nanmax(guide_means, dim=0)  # [T] or [T, K]
+
+                # Ensure positive
+                Amean_tensor = Amean_tensor.clamp_min(self._t(1e-3))
+                Vmax_mean_tensor = Vmax_mean_tensor.clamp_min(self._t(1e-3))
+
+                print(f"[INFO] Using guide-based priors (archive method): {len(unique_guides)} guides, min/max")
+
+            else:
+                # PERCENTILE METHOD: Use 5th and 95th percentiles of guide means
+                # This is more robust to outliers but computes Vmax as range (amplitude)
+                Amean_tensor = nanquantile(guide_means, 0.05, dim=0)  # [T] or [T, K]
+                upper_quantile = nanquantile(guide_means, 0.95, dim=0)  # [T] or [T, K]
+
+                # Ensure A_mean >= 1e-3
+                Amean_tensor = Amean_tensor.clamp_min(self._t(1e-3))
+
+                # Vmax is the RANGE (amplitude), not the absolute value
+                # Model: y = A + Vmax_a * Hill_a, so Vmax_a = y_max - A
+                Vmax_mean_tensor = upper_quantile - Amean_tensor  # [T] or [T, K]
+                Vmax_mean_tensor = Vmax_mean_tensor.clamp_min(self._t(1e-3))  # Ensure positive
+
+                print(f"[INFO] Using guide-based priors (percentile method): {len(unique_guides)} guides, 5th/95th percentiles")
 
             # For variances: use mean variance across guides (average within-guide variability)
             # This captures how much variability exists around each guide's mean
             mean_within_guide_var = nanmean(guide_vars, dim=0)  # [T] or [T, K]
-
-            print(f"[INFO] Using guide-based priors: {len(unique_guides)} guides, 5th/95th percentiles")
 
         else:
             # WITHOUT GUIDES: Use overall percentiles
