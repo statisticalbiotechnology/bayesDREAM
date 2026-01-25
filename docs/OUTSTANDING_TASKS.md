@@ -2,98 +2,77 @@
 
 This document tracks remaining implementation tasks and known issues.
 
-Last updated: 2025-12-12
-
----
-
-## Recent Changes
-
-### Binomial/Multinomial Trans Fitting Bug Fixes (2025-12-12)
-
-**Status**: Fixed in commits 204efc7, 1db8b2a, 59f08d9, b7b53da
-
-**Changes**:
-- Fixed critical alpha_y_full construction bug in binomial trans fitting (was using ones instead of zeros)
-- Enabled multinomial technical correction (matching binomial behavior)
-- Fixed losses_trans storage on model/modality objects
-- Added diagnostic output for non-finite log_prob issues
-- Improved Hill function plotting for binomial/multinomial distributions
-
-See `docs/archive/2025-12/commits/` for detailed analysis of these fixes.
-
-### Cis Modality Design (2025-11-10)
-
-**Change**: bayesDREAM now uses a separate 'cis' modality for cis gene/feature modeling.
-
-**Design**:
-- During `bayesDREAM()` initialization, the 'cis' modality is extracted from the primary modality
-- The primary modality contains only trans features (cis feature excluded)
-- `fit_cis()` always uses the 'cis' modality, regardless of primary modality type
-
-**Benefits**:
-- Consistent interface: `fit_cis()` works the same for gene, ATAC, or any modality
-- Clear separation: cis vs trans features are explicitly separated
-- Extensibility: Easy to support new modality types
-
-**Parameters**:
-```python
-# For gene modality (default)
-model = bayesDREAM(
-    meta=meta,
-    counts=gene_counts,
-    cis_gene='GFI1B',
-    guide_covariates=['cell_line']
-)
-# Creates: 'cis' modality (just GFI1B) + 'gene' modality (trans genes)
-
-# For ATAC as primary modality (implemented via generic negbinom)
-model = bayesDREAM(
-    meta=meta,
-    counts=atac_counts,
-    modality_name='atac',
-    cis_feature='chr9:123-456',
-    feature_meta=region_meta,
-    guide_covariates=['cell_line']
-)
-# Creates: 'cis' modality (chr9:123-456) + 'atac' modality (other regions)
-
-# For any custom negbinom modality as primary
-model = bayesDREAM(
-    meta=meta,
-    counts=custom_counts,
-    modality_name='my_custom_modality',
-    cis_feature='feature_123',
-    feature_meta=feature_meta,
-    guide_covariates=['cell_line']
-)
-# Creates: 'cis' modality (feature_123) + 'my_custom_modality' (other features)
-```
-
-### API Refactoring (2025-11-07)
-
-**Change**: Cleaned up initialization parameters for clarity and extensibility.
-
-**Removed Parameters**:
-- `modalities` - Always start with empty dict, build from counts
-- `primary_modality` - Replaced with `modality_name`
-- `gene_meta` - Replaced with `feature_meta`
-
-**New/Renamed Parameters**:
-- `modality_name` (default='gene') - Name/type of primary modality
-- `feature_meta` - General feature-level metadata for any modality
-- `guide_covariates` - Now explicitly visible in signature (was implicit)
-
-**Benefits**:
-- Clearer intent: `modality_name='atac'` vs `primary_modality='atac'`
-- More general: `feature_meta` works for genes, ATAC, transcripts, etc.
-- Explicit parameters: `guide_covariates` no longer hidden
-- Validation: Primary modality MUST be negbinom (enforced at initialization)
+Last updated: 2025-01-23
 
 ---
 
 ## High Priority
 
-### 1. Implement Guide-Prior Infrastructure in fit_cis
+### 1. Multinomial and Student-T Trans Fitting
+
+**Status**: Implemented, needs thorough testing
+
+**Description**: Trans fitting for multinomial (splicing donor/acceptor usage) and Student-T (continuous data with heavy tails) distributions.
+
+**What Works**:
+- Distribution-specific observation samplers in `distributions.py`
+- Multinomial technical correction enabled
+- Basic Hill function plotting for multinomial
+
+**What's Needed**:
+- Comprehensive testing on real biological data
+- Validation that posteriors are reasonable for splicing data
+- Performance benchmarking with large multinomial features
+- Document expected data formats and preprocessing
+
+---
+
+### 2. High-MOI Guide Additivity
+
+**Status**: Not implemented
+
+**Description**: Support for experiments where cells receive multiple guides (high multiplicity of infection). Currently the model assumes one guide per cell.
+
+**What's Needed**:
+1. Design decision: How to model additive/multiplicative effects of multiple guides
+2. Modify guide assignment logic to handle cells with multiple guides
+3. Update `_model_x` to model combined guide effects
+4. Update `_model_y` to propagate combined cis effects to trans
+5. Add tests with synthetic high-MOI data
+
+**Design Considerations**:
+- Additive effects in log space? `log2(x_true) = sum(log2(effect_g) for g in cell_guides)`
+- How to handle NTC in high-MOI context?
+- Cell-level vs population-level modeling of guide combinations
+
+---
+
+## Medium Priority
+
+### 3. Modality-Specific Cis/Trans Fitting
+
+**Status**: Partially implemented
+
+**Description**: Currently, `fit_cis()` and `fit_trans()` use the primary modality (which can now be any negbinom modality). Support for fitting cis/trans on non-primary modalities is limited.
+
+**What Works**:
+- Any negbinom modality can be primary (gene, ATAC, custom)
+- `fit_cis()` extracts 'cis' modality and fits on it (works for all primary types)
+- `fit_trans()` can fit any modality using `modality_name` parameter
+
+**Current Limitations**:
+- No standardized workflow for fitting splicing or other non-negbinom modalities
+- No examples showing multi-modality cis/trans workflows
+
+**What's Needed**:
+1. Add examples showing how to fit_trans for splicing/custom modalities
+2. Document best practices for multi-modal cis/trans workflows
+
+**Note**: Cis fitting is always negative binomial. Other distributions for cis fitting would violate the core model design where cis represents deconvolved count-based expression.
+
+---
+
+### 4. Implement Guide-Prior Infrastructure in fit_cis
 
 **Status**: Infrastructure prepared, not yet integrated into _model_x
 
@@ -131,48 +110,9 @@ model = bayesDREAM(
 
 ---
 
-## Medium Priority
-
-### 2. Modality-Specific Cis/Trans Fitting
-
-**Status**: Partially implemented
-
-**Description**: Currently, `fit_cis()` and `fit_trans()` use the primary modality (which can now be any negbinom modality). Support for fitting cis/trans on non-primary modalities is limited.
-
-**What Works**:
-- Any negbinom modality can be primary (gene, ATAC, custom)
-- `fit_cis()` extracts 'cis' modality and fits on it (works for all primary types)
-- `fit_trans()` can fit any modality using `modality_name` parameter
-
-**Current Limitations**:
-- No standardized workflow for fitting splicing or other non-negbinom modalities
-- No examples showing multi-modality cis/trans workflows
-
-**What's Needed**:
-1. Add examples showing how to fit_trans for splicing/custom modalities
-2. Document best practices for multi-modal cis/trans workflows
-3. Consider whether cis modeling makes sense for multinomial/binomial distributions
-
----
-
-### 3. Save/Load for Cis Fit
-
-**Status**: Implemented but needs testing
-
-**Location**: `bayesDREAM/io/save.py` and `bayesDREAM/io/load.py`
-
-**Description**: Save and load methods exist for cis fit results, but comprehensive testing is needed.
-
-**What's Needed**:
-- Test `save_cis_fit()` and `load_cis_fit()` in `tests/test_cis_save_load.py`
-- Verify that loaded x_true and alpha_x_prefit produce identical results
-- Test with both 'posterior' and 'point' estimate types
-
----
-
 ## Low Priority / Future Work
 
-### 4. ~~Polynomial Degree Configuration~~ ✅ COMPLETED
+### 5. ~~Polynomial Degree Configuration~~ ✅ COMPLETED
 
 **Status**: ✅ Already implemented
 
@@ -194,7 +134,7 @@ model.fit_trans(
 
 ---
 
-### 5. Documentation Updates
+### 6. Documentation Updates
 
 **Status**: Mostly complete
 
@@ -205,9 +145,8 @@ model.fit_trans(
 - QUICKSTART_MULTIMODAL.md updated with new API examples (2025-11-10)
 - ARCHITECTURE.md updated with new parameter references (2025-11-10)
 - INITIALIZATION.md updated with new API examples (2025-11-07)
-- OUTSTANDING_TASKS.md updated with recent changes (2025-12-12)
+- OUTSTANDING_TASKS.md updated (2025-01-23)
 - HILL_FUNCTION_PRIORS.md documents all Hill priors (2025-11-26)
-- TECHNICAL_CORRECTION_IN_PRIORS.md archived (2025-12-12)
 - Repository cleanup and documentation archiving (2025-12-12)
 
 **What's Needed**:
@@ -218,7 +157,7 @@ model.fit_trans(
 
 ---
 
-### 6. Example Workflows
+### 7. Example Workflows
 
 **Status**: Basic examples exist
 
@@ -230,11 +169,11 @@ model.fit_trans(
 - Splicing modality example with all types (sj, donor, acceptor, exon_skip)
 - Custom modality example (SpliZ)
 - Example showing save/load workflow
-- Example showing guide-prior usage (after #1 is implemented)
+- Example showing guide-prior usage (after #4 is implemented)
 
 ---
 
-### 7. Performance Optimization
+### 8. Performance Optimization
 
 **Status**: Not started
 
@@ -246,21 +185,22 @@ model.fit_trans(
 
 ---
 
-### 8. Additional Distributions
+### 9. Additional Distributions
 
 **Status**: Core distributions implemented
 
 **Implemented**: negbinom, multinomial, binomial, normal, studentt
 
-**Potential Additions**:
-- Zero-inflated negative binomial
-- Beta distribution (for proportions)
-- Gamma distribution (for non-negative continuous data)
+**Not Currently Planned**:
+- Gamma distribution (for non-negative continuous data) - may revisit if use case arises
 
 ---
 
 ## Completed Recently ✓
 
+- ✅ Save/Load for Cis Fit (2025-01-23)
+  - `save_cis_fit()` and `load_cis_fit()` working
+  - Tested with posterior and point estimate types
 - ✅ Binomial/multinomial trans fitting bug fixes (2025-12-12)
   - Fixed critical alpha_y_full construction (ones → zeros)
   - Fixed Hill function plotting for binomial/multinomial
@@ -303,7 +243,9 @@ If you discover issues, please document them here with:
 
 ## Notes
 
+- Cis fitting is always negative binomial (core model design)
 - All public API methods should maintain backward compatibility
 - Tests should pass before merging new features
 - Documentation should be updated alongside code changes
 - Use TodoWrite tool for tracking active work
+- See `docs/archive/RECENT_CHANGES_2025-12.md` for historical change details

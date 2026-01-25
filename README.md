@@ -23,10 +23,9 @@ Supports multiple molecular modalities including genes, transcripts, splicing, A
 - Use `cis_gene='GFI1B'` for genes or `cis_feature='chr9:132283881-132284881'` for ATAC peaks
 - Model chromatin accessibility, regulatory elements, or any feature as the direct perturbation target
 
-**🔬 Prior-Informed Fitting** (🚧 In Development - ~30% complete)
+**🔬 Prior-Informed Fitting** (🚧 In Development - Lower Priority)
 - Use prior datasets to inform Bayesian priors on guide effects
 - Guide-level priors: Provide expected log2FC for specific guides from prior experiments
-- Hyperparameter-level priors: Use prior dataset statistics to inform hierarchical parameters
 - Main use case: Prior GEX data → improve ATAC inference (or vice versa)
 - See [docs/OUTSTANDING_TASKS.md](docs/OUTSTANDING_TASKS.md) for implementation status
 
@@ -179,11 +178,11 @@ model.fit_cis()  # Cis = ATAC peak accessibility
 model.fit_trans(modality_name='gene')  # Trans = Genes regulated by peak
 ```
 
-### Prior-Informed Fitting (🚧 In Development)
+### Prior-Informed Fitting (🚧 Lower Priority)
 
 **Use Case:** You have prior information about guide effects (e.g., from a previous GEX experiment) and want to use that to improve inference on a new dataset (e.g., ATAC-seq).
 
-**Current Status:** Infrastructure ~30% complete. Parameters exist but not yet integrated into Pyro model.
+**Current Status:** Infrastructure partially complete. Parameters exist but not yet integrated into Pyro model. This is currently lower priority than multinomial/Student-T trans fitting and high-MOI guide additivity.
 
 ```python
 # Scenario: Prior GEX experiment → inform current ATAC experiment
