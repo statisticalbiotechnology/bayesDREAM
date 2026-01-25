@@ -12,6 +12,8 @@ from .fitting.distributions import (
     requires_denominator,
     requires_sum_factor,
     is_3d_distribution,
+    supports_cell_line_effects,
+    get_cell_line_effect_type,
     DISTRIBUTION_REGISTRY
 )
 from .plotting import (
@@ -28,6 +30,8 @@ __all__ = [
     "requires_denominator",
     "requires_sum_factor",
     "is_3d_distribution",
+    "supports_cell_line_effects",
+    "get_cell_line_effect_type",
     "DISTRIBUTION_REGISTRY",
     "plot_scalar_parameter",
     "plot_1d_parameter",

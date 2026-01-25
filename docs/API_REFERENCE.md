@@ -409,7 +409,7 @@ model.set_technical_groups(['cell_line'])
 model.fit_technical(
     sum_factor_col='sum_factor',
     lr=1e-3,
-    niters=50000,
+    niters=None,
     nsamples=1000,
     alpha_ewma=0.05,
     tolerance=1e-4,
@@ -419,7 +419,8 @@ model.fit_technical(
     minibatch_size=None,
     distribution=None,
     denominator=None,
-    modality_name=None
+    modality_name=None,
+    use_all_cells=False
 )
 ```
 
@@ -438,7 +439,9 @@ Fit technical model to estimate baseline overdispersion and cell-line effects fr
   - Required for `negbinom` distribution
   - Not used for `normal`
 - `lr` (float): Learning rate. Default: 1e-3
-- `niters` (int): Number of optimization steps. Default: 50,000
+- `niters` (int, optional): Number of optimization steps. Default: None (auto-selects based on distribution)
+  - Univariate distributions (negbinom, normal, etc.): 50,000
+  - Multivariate distributions (multinomial): 100,000
 - `nsamples` (int): Number of posterior samples. Default: 1,000
 - `alpha_ewma` (float): EWMA smoothing parameter for convergence. Default: 0.05
 - `tolerance` (float): Convergence tolerance. Default: 1e-4
@@ -454,6 +457,9 @@ Fit technical model to estimate baseline overdispersion and cell-line effects fr
   - `'multinomial'`: Multinomial (categorical)
 - `denominator` (np.ndarray, optional): Required for `binomial` distribution
 - `modality_name` (str, optional): Modality to fit. Defaults to primary modality
+- `use_all_cells` (bool): If False (default), fit using NTC cells only. If True, fit using all cells.
+  - Use True for high MOI experiments where technical effects are batch/lane specific
+  - Use False (default) when technical groups correlate with cis gene expression
 
 **Side Effects:**
 - Sets `self.alpha_y_prefit` (overdispersion parameters for trans features)
@@ -480,6 +486,10 @@ model.fit_technical(distribution='normal')
 
 # Specific modality
 model.fit_technical(modality_name='splicing_donor', distribution='multinomial')
+
+# High MOI: use all cells for technical estimation
+model.set_technical_groups(['lane', 'batch'])
+model.fit_technical(use_all_cells=True)
 ```
 
 ---
@@ -488,14 +498,23 @@ model.fit_technical(modality_name='splicing_donor', distribution='multinomial')
 
 ```python
 model.fit_cis(
+    technical_covariates=None,
     sum_factor_col='sum_factor',
     cis_feature=None,
-    lr=0.01,
-    niters=25000,
+    manual_guide_effects=None,
+    prior_strength=1.0,
+    lr=1e-3,
+    niters=100000,
     nsamples=1000,
-    tolerance=0,
     alpha_ewma=0.05,
-    device=None
+    tolerance=1e-4,
+    beta_o_beta=3,
+    beta_o_alpha=9,
+    alpha_alpha_mu=5.8,
+    epsilon=1e-6,
+    alpha_dirichlet=0.1,
+    minibatch_size=None,
+    independent_mu_sigma=False
 )
 ```
 
@@ -506,28 +525,54 @@ Fit cis model to estimate direct effects on the targeted feature.
 - Consistent interface regardless of primary modality type (gene, ATAC, etc.)
 
 **Parameters:**
+- `technical_covariates` (list, optional): Technical covariates for correction (e.g., `['cell_line']`)
+  - If provided and `technical_group_code` not already set, creates the grouping
 - `sum_factor_col` (str): Column with normalization factors. Default: `'sum_factor'`
 - `cis_feature` (str, optional): Specific feature in 'cis' modality to use
   - If None, uses the first (and typically only) feature in 'cis' modality
   - Rarely needed since 'cis' modality usually contains exactly one feature
-- `lr` (float): Learning rate. Default: 0.01
-- `niters` (int): Number of optimization steps. Default: 25,000
+- `manual_guide_effects` (pd.DataFrame, optional): Manual guide effect estimates as priors
+  - Required columns: `guide` (identifier), `log2FC` (expected log2 fold-change vs NTC)
+  - Used for prior-informed fitting (infrastructure in place, integration in progress)
+- `prior_strength` (float): Weight for manual guide effects. Default: 1.0
+  - 0 = ignore manual effects, higher = trust more
+- `lr` (float): Learning rate. Default: 1e-3
+- `niters` (int): Number of optimization steps. Default: 100,000
 - `nsamples` (int): Number of posterior samples. Default: 1,000
-- `tolerance` (float): Convergence tolerance. Default: 0 (disabled)
 - `alpha_ewma` (float): EWMA smoothing parameter. Default: 0.05
-- `device` (str, optional): PyTorch device. Defaults to `self.device`
+- `tolerance` (float): Convergence tolerance. Default: 1e-4
+- `beta_o_beta` (float): Beta prior for overdispersion. Default: 3
+- `beta_o_alpha` (float): Alpha prior for overdispersion. Default: 9
+- `alpha_alpha_mu` (float): Mean for alpha hyperprior. Default: 5.8
+- `epsilon` (float): Small constant for numerical stability. Default: 1e-6
+- `alpha_dirichlet` (float): Dirichlet concentration. Default: 0.1
+- `minibatch_size` (int, optional): Minibatch size for predictive sampling
+- `independent_mu_sigma` (bool): Whether to use independent mu/sigma per target type. Default: False
+  - Requires `target` column in meta with >1 unique values
 
 **Side Effects:**
-- Sets `self.x_true` (posterior cis expression per guide)
+- Sets `self.x_true` (posterior cis expression per cell)
 - Sets `self.x_true_type` to `'posterior'`
 - Sets `self.posterior_samples_cis` (full posterior samples)
-- Sets `self.loss_cis` (optimization loss history)
+- Sets `self.loss_x` (optimization loss history)
 
 **Example:**
 ```python
 model.fit_cis(sum_factor_col='sum_factor')
 # Uses 'cis' modality (e.g., just GFI1B for gene modality)
-# Sets self.x_true with shape: [nsamples, n_guides]
+# Sets self.x_true with shape: [nsamples, n_cells]
+
+# With technical covariates
+model.fit_cis(
+    technical_covariates=['cell_line'],
+    sum_factor_col='sum_factor'
+)
+
+# With independent mu/sigma per target type
+model.fit_cis(
+    sum_factor_col='sum_factor',
+    independent_mu_sigma=True
+)
 ```
 
 ---
@@ -537,12 +582,33 @@ model.fit_cis(sum_factor_col='sum_factor')
 ```python
 model.fit_trans(
     sum_factor_col=None,
-    function_type='additive_hill',
-    distribution='negbinom',
+    function_type='single_hill',
+    polynomial_degree=6,
+    lr=None,
+    niters=None,
+    nsamples=1000,
+    alpha_ewma=0.05,
+    tolerance=1e-4,
+    beta_o_beta=3,
+    beta_o_alpha=9,
+    alpha_alpha_mu=5.8,
+    K_alpha=2,
+    Vmax_alpha=2,
+    n_mu=0,
+    p_n=1e-6,
+    epsilon=1e-6,
+    init_temp=1.0,
+    final_temp=0.1,
+    minibatch_size=None,
+    distribution=None,
     denominator=None,
-    n_steps=10000,
-    lr=0.01,
-    device=None
+    modality_name=None,
+    min_denominator=None,
+    use_data_driven_priors=True,
+    use_lognormal_priors=True,
+    correct_priors_for_technical=True,
+    use_archive_prior_computation=False,
+    use_epsilon=False
 )
 ```
 
@@ -550,18 +616,50 @@ Fit trans model to estimate downstream effects as a function of cis expression.
 
 **Parameters:**
 - `sum_factor_col` (str, optional): Column with normalization factors. Required for `negbinom`
-- `function_type` (str): Dose-response function type:
+- `function_type` (str): Dose-response function type. Default: `'single_hill'`
   - `'single_hill'`: Single Hill equation
   - `'additive_hill'`: Sum of positive and negative Hill functions
-  - `'polynomial'`: Polynomial (default degree: 6)
-- `distribution` (str): Distribution type. Default: `'negbinom'`
-- `denominator` (np.ndarray, optional): Required for `binomial`
-- `n_steps` (int): Number of optimization steps. Default: 10000
-- `lr` (float): Learning rate. Default: 0.01
-- `device` (str, optional): PyTorch device
+  - `'polynomial'`: Polynomial function
+- `polynomial_degree` (int): Degree for polynomial function. Default: 6
+- `lr` (float, optional): Learning rate. Default: None (auto-selects based on distribution)
+  - negbinom: 0.05, others: 0.01
+- `niters` (int, optional): Number of optimization steps. Default: None (auto-selects)
+  - negbinom: 50,000, multinomial: 100,000, others: 50,000
+- `nsamples` (int): Number of posterior samples. Default: 1,000
+- `alpha_ewma` (float): EWMA smoothing parameter. Default: 0.05
+- `tolerance` (float): Convergence tolerance. Default: 1e-4
+- `beta_o_beta` (float): Beta prior for overdispersion. Default: 3
+- `beta_o_alpha` (float): Alpha prior for overdispersion. Default: 9
+- `alpha_alpha_mu` (float): Mean for alpha hyperprior. Default: 5.8
+- `K_alpha` (float): Alpha for K (EC50) prior. Default: 2
+- `Vmax_alpha` (float): Alpha for Vmax prior. Default: 2
+- `n_mu` (float): Mean for Hill coefficient prior. Default: 0
+- `p_n` (float): Prior probability for effect. Default: 1e-6
+- `epsilon` (float): Small constant for numerical stability. Default: 1e-6
+- `init_temp` (float): Initial temperature for relaxed Bernoulli. Default: 1.0
+- `final_temp` (float): Final temperature (annealed during training). Default: 0.1
+- `minibatch_size` (int, optional): Minibatch size for predictive sampling
+- `distribution` (str, optional): Distribution type. Auto-detected from modality if None
+  - `'negbinom'`: Negative binomial (count data)
+  - `'normal'`: Normal (continuous measurements)
+  - `'studentt'`: Student's t (heavy-tailed continuous)
+  - `'binomial'`: Binomial (proportions)
+  - `'multinomial'`: Multinomial (categorical)
+- `denominator` (np.ndarray, optional): Required for `binomial`. Auto-detected from modality
+- `modality_name` (str, optional): Modality to fit. Defaults to primary modality
+- `min_denominator` (int, optional): Minimum denominator for binomial observations
+  - Observations with denominator < min_denominator are masked (excluded)
+  - Useful for filtering low-coverage splicing junctions
+- `use_data_driven_priors` (bool): Use data-driven Beta/Dirichlet priors. Default: True
+- `use_lognormal_priors` (bool): Use Log-Normal priors for Vmax/K. Default: True
+- `correct_priors_for_technical` (bool): Correct data for technical effects before computing priors. Default: True
+- `use_archive_prior_computation` (bool): Use archive method for Amean/Vmax_mean. Default: False
+- `use_epsilon` (bool): Add epsilon for numerical stability in NegativeBinomial. Default: False
 
 **Side Effects:**
 - Sets `self.posterior_samples_trans` (dose-response parameters)
+- Sets `self.loss_trans` (optimization loss history)
+- For modalities: sets `modality.posterior_samples_trans`
 
 **Example:**
 ```python
@@ -578,11 +676,19 @@ model.fit_trans(
     function_type='polynomial'
 )
 
-# Exon skipping (binomial)
+# Exon skipping (binomial) with minimum coverage filter
 model.fit_trans(
     distribution='binomial',
     denominator=total_counts,
-    function_type='single_hill'
+    function_type='single_hill',
+    min_denominator=5
+)
+
+# Specific modality with custom priors
+model.fit_trans(
+    modality_name='splicing_donor',
+    distribution='multinomial',
+    use_data_driven_priors=True
 )
 ```
 
@@ -912,6 +1018,74 @@ Set cis expression values (e.g., from external estimates).
 **Parameters:**
 - `x_true` (array-like): Cis expression values
 - `is_posterior` (bool): Whether these are posterior samples. Default: False
+
+---
+
+#### set_o_x()
+
+```python
+model.set_o_x(o_x, is_posterior=False)
+```
+
+Set overdispersion parameter for cis gene.
+
+**Parameters:**
+- `o_x` (float or array-like): Overdispersion values
+  - If posterior: shape `(S,)`, `(S, 1)`, or `(S, 1, 1)` where S = number of samples
+  - If point estimate: scalar or 1-element tensor
+- `is_posterior` (bool): Whether these are posterior samples. Default: False
+
+---
+
+#### set_o_x_grouped()
+
+```python
+model.set_o_x_grouped(o_x, is_posterior, covariates=None)
+```
+
+Set grouped overdispersion parameter (one per technical group).
+
+**Parameters:**
+- `o_x` (array-like): Overdispersion values
+  - Point estimate: shape `(C, 1)` where C = number of technical groups
+  - Posterior: shape `(S, C, 1)` where S = number of samples
+- `is_posterior` (bool): Whether these are posterior samples
+- `covariates` (list, optional): Technical group covariates (e.g., `['cell_line']`)
+  - If provided, creates `technical_group_code` column
+  - If None, uses existing `technical_group_code`
+
+---
+
+#### subset_cells()
+
+```python
+model.subset_cells(cell_mask=None, query=None, preserve_fits=True)
+```
+
+Create a new model instance with a subset of cells.
+
+Useful for testing without technical correction by subsetting to a single cell_line
+(e.g., CRISPRi or CRISPRa only).
+
+**Parameters:**
+- `cell_mask` (np.ndarray, pd.Series, or list, optional): Boolean mask or list of cell names to keep
+- `query` (str, optional): Pandas query string to filter cells (e.g., `"cell_line == 'CRISPRi'"`)
+  - Must provide either `cell_mask` or `query`, not both
+- `preserve_fits` (bool): Whether to preserve existing fit results. Default: True
+  - If True, copies `posterior_samples_technical`, `alpha_y_prefit`, etc.
+  - If False, creates a fresh model without fit results
+
+**Returns:** New bayesDREAM instance with subset of cells
+
+**Example:**
+```python
+# Subset to CRISPRi cells only
+crispri_model = model.subset_cells(query="cell_line == 'CRISPRi'")
+
+# Subset using boolean mask
+mask = model.meta['target'] != 'ntc'
+perturbed_model = model.subset_cells(cell_mask=mask)
+```
 
 ---
 
