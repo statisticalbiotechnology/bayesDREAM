@@ -4,11 +4,12 @@ Complete reference for all classes, methods, and functions in bayesDREAM.
 
 ## Table of Contents
 
-- [bayesDREAM Class](#multimodalbayesdream-class)
+- [bayesDREAM Class](#bayesdream-class)
 - [Modality Class](#modality-class)
 - [Distribution Functions](#distribution-functions)
 - [Splicing Functions](#splicing-functions)
 - [Utility Functions](#utility-functions)
+- [Plotting Methods](#plotting-methods)
 
 ---
 
@@ -1584,3 +1585,210 @@ Each entry contains:
 - `'is_3d'`: bool
 - `'supports_cell_line_effects'`: bool
 - `'cell_line_effect_type'`: str or None
+
+---
+
+## Plotting Methods
+
+bayesDREAM provides comprehensive plotting functions. For detailed usage, see [PLOTTING_GUIDE.md](PLOTTING_GUIDE.md).
+
+### Model Methods
+
+These methods are available on `bayesDREAM` model instances:
+
+#### plot_technical_fit()
+
+```python
+model.plot_technical_fit(
+    param='alpha_y',
+    modality_name=None,
+    technical_group_index=None,
+    order_by='mean',
+    subset_features=None,
+    plot_type='auto',
+    metric='posterior_coverage'
+)
+```
+
+Plot prior vs posterior for technical fit parameters.
+
+**Parameters:**
+- `param` (str): Parameter to plot: `'beta_o'`, `'alpha_x'`, `'alpha_y'`, `'mu_ntc'`, `'o_y'`
+- `modality_name` (str, optional): Modality name (default: primary modality)
+- `technical_group_index` (int, optional): Technical group index (1, 2, ...). Cannot be 0 (baseline).
+- `order_by` (str): Feature ordering: `'mean'`, `'difference'`, `'alphabetical'`, `'input'`
+- `subset_features` (list, optional): Subset to specific features
+- `plot_type` (str): `'auto'`, `'violin'`, or `'scatter'`
+- `metric` (str): Comparison metric: `'overlap'`, `'kl_divergence'`, `'posterior_coverage'`
+
+**Returns:** matplotlib Figure
+
+---
+
+#### plot_cis_fit()
+
+```python
+model.plot_cis_fit(
+    param='x_true',
+    order_by='mean',
+    metric='posterior_coverage'
+)
+```
+
+Plot prior vs posterior for cis fit parameters.
+
+**Parameters:**
+- `param` (str): Parameter to plot: `'x_true'`
+- `order_by` (str): Guide ordering: `'mean'`, `'difference'`, `'alphabetical'`, `'input'`
+- `metric` (str): Comparison metric
+
+**Returns:** matplotlib Figure
+
+---
+
+#### plot_trans_fit()
+
+```python
+model.plot_trans_fit(
+    param='theta',
+    modality_name=None,
+    subset_features=None,
+    order_by='mean',
+    plot_type='auto',
+    function_type='additive_hill',
+    metric='posterior_coverage'
+)
+```
+
+Plot prior vs posterior for trans fit parameters.
+
+**Parameters:**
+- `param` (str): Parameter to plot: `'theta'`, `'gamma'`, `'mu_y'`
+- `modality_name` (str, optional): Modality name (default: primary modality)
+- `subset_features` (list, optional): Subset to specific features
+- `order_by` (str): Feature ordering
+- `plot_type` (str): `'auto'`, `'violin'`, or `'scatter'`
+- `function_type` (str): Function type used: `'additive_hill'`, `'single_hill'`, `'polynomial'`
+- `metric` (str): Comparison metric
+
+**Returns:** matplotlib Figure
+
+---
+
+#### plot_xy_data()
+
+```python
+model.plot_xy_data(
+    feature,
+    modality_name=None,
+    window=100,
+    show_correction='corrected',
+    min_counts=3,
+    show_hill_function=True
+)
+```
+
+Plot raw x-y data showing relationship between cis gene expression and feature values.
+
+**Parameters:**
+- `feature` (str): Feature name (gene, junction, etc.)
+- `modality_name` (str, optional): Modality name (default: primary modality)
+- `window` (int): k-NN window size for smoothing. Default: 100
+- `show_correction` (str): `'uncorrected'`, `'corrected'`, or `'both'`. Default: `'corrected'`
+- `min_counts` (int): Minimum denominator for binomial. Default: 3
+- `show_hill_function` (bool): Overlay Hill function if trans model fitted. Default: True
+
+**Returns:** matplotlib Figure
+
+---
+
+#### plot_parameter_ci_panel()
+
+```python
+model.plot_parameter_ci_panel(
+    params,
+    modality_name=None,
+    genes=None,
+    ci_level=95.0,
+    sort_by='none',
+    filter_dependent=False,
+    max_genes=100
+)
+```
+
+Forest plot (dot + whisker CI) for posterior parameters across trans genes.
+
+**Parameters:**
+- `params` (list): Parameter names to plot (e.g., `['n_a', 'n_b']`)
+- `modality_name` (str, optional): Modality name
+- `genes` (list, optional): Specific genes to plot
+- `ci_level` (float): Credible interval level. Default: 95.0
+- `sort_by` (str): How to sort: `'none'`, `'alphabetical'`, `'median'`, `'abs_median'`, `'effect'`
+- `filter_dependent` (bool): Only show genes where CI excludes 0. Default: False
+- `max_genes` (int): Maximum genes to plot. Default: 100
+
+**Returns:** Tuple of (matplotlib Figure, matplotlib Axes)
+
+---
+
+#### extract_posterior_dataframe()
+
+```python
+model.extract_posterior_dataframe(
+    params,
+    modality_name=None,
+    include_samples=False
+)
+```
+
+Extract posterior parameters into a long-format DataFrame.
+
+**Parameters:**
+- `params` (list): Parameter names to extract (e.g., `['n_a', 'n_b', 'K_a', 'K_b']`)
+- `modality_name` (str, optional): Modality name
+- `include_samples` (bool): Include all posterior samples (can be large). Default: False
+
+**Returns:** pd.DataFrame with columns: `gene`, `gene_idx`, `param`, `median`, `lo`, `hi`, `mean`, `std`, `ci_excludes_zero`
+
+---
+
+### Standalone Plotting Functions
+
+Available via `from bayesDREAM.plotting import ...`:
+
+#### Prior/Posterior Comparison
+
+- `plot_scalar_parameter(prior, posterior, name, metric, ...)`: Plot scalar parameter
+- `plot_1d_parameter(prior, posterior, names, param_name, ...)`: Plot 1D parameter (per-feature)
+- `plot_2d_parameter(prior, posterior, feature_names, group_names, ...)`: Plot 2D parameter
+
+#### Basic X-True Plots
+
+- `scatter_by_guide(model, gene, log2, ...)`: Scatter plot by guide
+- `scatter_ci95_by_guide(model, gene, ...)`: Scatter with 95% CI
+- `violin_by_guide_log2(model, gene, ...)`: Violin plot in log2 space
+- `filled_density_by_guide_log2(model, gene, ...)`: Filled density plot
+
+#### Posterior Density Plots
+
+- `plot_posterior_density_lines(model, param, ...)`: Posterior density lines
+- `plot_xtrue_density_by_guide(model, ...)`: X-true density by guide
+- `plot_parameter_density_with_xtrue(model, ...)`: Parameter density with x-true
+
+#### DE Comparison Plots
+
+- `compute_log2fc_metrics(...)`: Compute log2FC metrics
+- `scatter_and_heatmap_edger_vs_bayes(...)`: Compare with edgeR
+- `plot_edger_vs_bayes_full_range(...)`: Full range comparison
+- `plot_edger_vs_bayes_observed_range(...)`: Observed range comparison
+
+#### Diagnostics
+
+- `plot_sum_factor_comparison(...)`: Compare sum factor methods
+
+#### Color Utilities
+
+- `ColorScheme`: Color scheme management class
+- `build_guide_colors(model)`: Build guide-specific colors
+- `lighten(color, amount)`: Lighten a color
+- `darken(color, amount)`: Darken a color
