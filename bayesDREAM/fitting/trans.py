@@ -1050,10 +1050,10 @@ class TransFitter:
         if alpha_y_prefit is not None and alpha_y_prefit.device != self.model.device:
             alpha_y_prefit = alpha_y_prefit.to(self.model.device)
 
-        if not hasattr(self, "log2_x_true") or self.log2_x_true is None:
+        if not hasattr(self.model, "log2_x_true") or self.model.log2_x_true is None:
             if self.model.x_true is not None:
-                self.log2_x_true = torch.log2(self.model.x_true)
-                self.log2_x_true_type = self.model.x_true_type
+                self.model.log2_x_true = torch.log2(self.model.x_true)
+                self.model.log2_x_true_type = self.model.x_true_type
 
         # Handle cell subsetting
         # CRITICAL: Preserve exact modality cell order when subsetting meta
@@ -1711,7 +1711,7 @@ class TransFitter:
                 p_n_tensor,
                 epsilon_tensor,
                 x_true_sample = self.model.x_true.mean(dim=0) if self.model.x_true_type == "posterior" else self.model.x_true,
-                log2_x_true_sample = self.log2_x_true.mean(dim=0) if self.log2_x_true_type == "posterior" else self.log2_x_true,
+                log2_x_true_sample = self.model.log2_x_true.mean(dim=0) if self.model.log2_x_true_type == "posterior" else self.model.log2_x_true,
                 nmin = nmin,
                 nmax = nmax,
                 alpha_y_sample = (
@@ -1814,8 +1814,8 @@ class TransFitter:
                 if self.model.x_true_type == "posterior" else self.model.x_true
             )
             log2_x_true_sample = (
-                (self.log2_x_true[samp] if samp < self.log2_x_true.shape[0] else self.log2_x_true.mean(dim=0))
-                if self.log2_x_true_type == "posterior" else self.log2_x_true
+                (self.model.log2_x_true[samp] if samp < self.model.log2_x_true.shape[0] else self.model.log2_x_true.mean(dim=0))
+                if self.model.log2_x_true_type == "posterior" else self.model.log2_x_true
             )
             # For alpha_y_sample: check actual dimensions instead of just alpha_y_type
             if alpha_y_prefit is not None:
@@ -1907,7 +1907,7 @@ class TransFitter:
                 "p_n_tensor": self._to_cpu(p_n_tensor),
                 "epsilon_tensor": self._to_cpu(epsilon_tensor),
                 "x_true_sample": self._to_cpu(self.model.x_true.mean(dim=0) if self.model.x_true_type == "posterior" else self.model.x_true),
-                "log2_x_true_sample": self._to_cpu(self.log2_x_true.mean(dim=0) if self.log2_x_true_type == "posterior" else self.log2_x_true),
+                "log2_x_true_sample": self._to_cpu(self.model.log2_x_true.mean(dim=0) if self.model.log2_x_true_type == "posterior" else self.model.log2_x_true),
                 "nmin": self._to_cpu(nmin),
                 "nmax": self._to_cpu(nmax),
                 # Only move if not None:
@@ -1950,7 +1950,7 @@ class TransFitter:
                 "p_n_tensor": p_n_tensor,
                 "epsilon_tensor": epsilon_tensor,
                 "x_true_sample": self.model.x_true.mean(dim=0) if self.model.x_true_type == "posterior" else self.model.x_true,
-                "log2_x_true_sample": self.log2_x_true.mean(dim=0) if self.log2_x_true_type == "posterior" else self.log2_x_true,
+                "log2_x_true_sample": self.model.log2_x_true.mean(dim=0) if self.model.log2_x_true_type == "posterior" else self.model.log2_x_true,
                 "nmin": nmin,
                 "nmax": nmax,
                 "alpha_y_sample": (

@@ -485,7 +485,7 @@ class CisFitter:
         if self.model.alpha_x_prefit is not None:
             if self.model.alpha_x_type == 'posterior':
                 # Take mean over posterior samples (S, C) -> (C,)
-                # alpha_x_prefit already contains ALL cell lines including reference
+                # alpha_x_prefit contains ALL cell lines including reference
                 alpha_x_full = self.model.alpha_x_prefit.mean(dim=0)
             else:
                 # Point estimate: already shape (C,) containing all cell lines
@@ -592,9 +592,12 @@ class CisFitter:
             
             if self.model.alpha_x_prefit is not None:
                 samp = torch.randint(high=self.model.alpha_x_prefit.shape[0], size=(1,)).item()
+            # alpha_x_prefit has shape [S, C] including reference group at index 0
+            # _model_x expects [C-1] without reference (it prepends ones internally)
+            # So we strip the reference group here
             alpha_x_sample = (
-                self.model.alpha_x_prefit[samp] if self.model.alpha_x_type == "posterior"
-                else self.model.alpha_x_prefit
+                self.model.alpha_x_prefit[samp, 1:] if self.model.alpha_x_type == "posterior"
+                else self.model.alpha_x_prefit[1:]
             ) if self.model.alpha_x_prefit is not None else None
             o_x_sample = None
             
@@ -657,7 +660,7 @@ class CisFitter:
                 "epsilon_tensor": self._to_cpu(epsilon_tensor),
                 "C": C,
                 "groups_tensor": self._to_cpu(groups_tensor),
-                "alpha_x_sample": self._to_cpu(self.model.alpha_x_prefit.mean(dim=0)) if self.model.alpha_x_type == "posterior" else self._to_cpu(self.model.alpha_x_prefit),
+                "alpha_x_sample": self._to_cpu(self.model.alpha_x_prefit.mean(dim=0)[1:]) if self.model.alpha_x_type == "posterior" else self._to_cpu(self.model.alpha_x_prefit[1:]),
                 "o_x_sample": None,
                 "target_per_guide_tensor": self._to_cpu(target_per_guide_tensor),
                 "independent_mu_sigma": independent_mu_sigma,
@@ -680,7 +683,7 @@ class CisFitter:
                 "epsilon_tensor": epsilon_tensor,
                 "C": C,
                 "groups_tensor": groups_tensor,
-                "alpha_x_sample": self.model.alpha_x_prefit.mean(dim=0) if self.model.alpha_x_type == "posterior" else (self.model.alpha_x_prefit if self.model.alpha_x_prefit is not None else None),
+                "alpha_x_sample": self.model.alpha_x_prefit.mean(dim=0)[1:] if self.model.alpha_x_type == "posterior" else (self.model.alpha_x_prefit[1:] if self.model.alpha_x_prefit is not None else None),
                 "o_x_sample": None,
                 "target_per_guide_tensor": target_per_guide_tensor if target_per_guide_tensor is not None else None,
                 "independent_mu_sigma": independent_mu_sigma,
@@ -742,8 +745,8 @@ class CisFitter:
         self.posterior_samples_cis = posterior_samples_x  # Keep for backward compatibility
         self.model.x_true = posterior_samples_x['x_true']
         self.model.x_true_type = 'posterior'
-        self.log2_x_true = posterior_samples_x['log_x_true']
-        self.log2_x_true_type = 'posterior'
+        self.model.log2_x_true = posterior_samples_x['log_x_true']
+        self.model.log2_x_true_type = 'posterior'
         if self.model.alpha_x_prefit is None and technical_covariates:
             self.model.alpha_x_prefit = posterior_samples_x["alpha_x"]
             self.model.alpha_x_type = 'posterior'
