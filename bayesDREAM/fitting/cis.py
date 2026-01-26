@@ -144,8 +144,16 @@ class CisFitter:
         ## Cell-level variables ##
         ##########################
         if alpha_x is not None:
-            ones_ = torch.ones(alpha_x.shape[:-1] + (1,), device=self.model.device)
-            alpha_x_full = torch.cat([ones_, alpha_x], dim=-1)  # shape = [C] or [S,C]
+            # alpha_x can be either:
+            # - Shape [C] or [S, C]: already includes reference group (index 0 = 1.0)
+            # - Shape [C-1] or [S, C-1]: needs reference group prepended
+            if alpha_x.shape[-1] == C:
+                # Full shape - use directly
+                alpha_x_full = alpha_x
+            else:
+                # Missing reference - prepend ones
+                ones_ = torch.ones(alpha_x.shape[:-1] + (1,), device=self.model.device)
+                alpha_x_full = torch.cat([ones_, alpha_x], dim=-1)  # shape = [C] or [S,C]
             alpha_x_used = alpha_x_full[..., groups_tensor]     # shape = [N] or [S,N]
         else:
             alpha_x_used = torch.ones_like(sum_factor_tensor)  # shape = [N] or [S,N]
@@ -593,11 +601,11 @@ class CisFitter:
             if self.model.alpha_x_prefit is not None:
                 samp = torch.randint(high=self.model.alpha_x_prefit.shape[0], size=(1,)).item()
             # alpha_x_prefit has shape [S, C] including reference group at index 0
-            # _model_x expects [C-1] without reference (it prepends ones internally)
-            # So we strip the reference group here
+            # _model_x now accepts either [C] (full) or [C-1] (without reference)
+            # Pass full array - _model_x will detect and handle appropriately
             alpha_x_sample = (
-                self.model.alpha_x_prefit[samp, 1:] if self.model.alpha_x_type == "posterior"
-                else self.model.alpha_x_prefit[1:]
+                self.model.alpha_x_prefit[samp] if self.model.alpha_x_type == "posterior"
+                else self.model.alpha_x_prefit
             ) if self.model.alpha_x_prefit is not None else None
             o_x_sample = None
             
@@ -660,7 +668,7 @@ class CisFitter:
                 "epsilon_tensor": self._to_cpu(epsilon_tensor),
                 "C": C,
                 "groups_tensor": self._to_cpu(groups_tensor),
-                "alpha_x_sample": self._to_cpu(self.model.alpha_x_prefit.mean(dim=0)[1:]) if self.model.alpha_x_type == "posterior" else self._to_cpu(self.model.alpha_x_prefit[1:]),
+                "alpha_x_sample": self._to_cpu(self.model.alpha_x_prefit.mean(dim=0)) if self.model.alpha_x_type == "posterior" else self._to_cpu(self.model.alpha_x_prefit),
                 "o_x_sample": None,
                 "target_per_guide_tensor": self._to_cpu(target_per_guide_tensor),
                 "independent_mu_sigma": independent_mu_sigma,
@@ -683,7 +691,7 @@ class CisFitter:
                 "epsilon_tensor": epsilon_tensor,
                 "C": C,
                 "groups_tensor": groups_tensor,
-                "alpha_x_sample": self.model.alpha_x_prefit.mean(dim=0)[1:] if self.model.alpha_x_type == "posterior" else (self.model.alpha_x_prefit[1:] if self.model.alpha_x_prefit is not None else None),
+                "alpha_x_sample": self.model.alpha_x_prefit.mean(dim=0) if self.model.alpha_x_type == "posterior" else (self.model.alpha_x_prefit if self.model.alpha_x_prefit is not None else None),
                 "o_x_sample": None,
                 "target_per_guide_tensor": target_per_guide_tensor if target_per_guide_tensor is not None else None,
                 "independent_mu_sigma": independent_mu_sigma,
