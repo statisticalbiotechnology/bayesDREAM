@@ -2,7 +2,7 @@
 
 This document tracks remaining implementation tasks and known issues.
 
-Last updated: 2025-01-23
+Last updated: 2025-01-27
 
 ---
 
@@ -72,7 +72,37 @@ Last updated: 2025-01-23
 
 ---
 
-### 4. Implement Guide-Prior Infrastructure in fit_cis
+### 4. Cell Cycle Modality
+
+**Status**: Not implemented
+
+**Description**: Model cell cycle state as a modality. Two potential approaches:
+
+1. **Multinomial**: Probability of being in each cell cycle phase (G1, S, G2/M)
+   - Input: Classification probabilities from cell cycle scoring tools
+   - Distribution: `multinomial` with categories = phases
+   - Similar to splicing donor/acceptor usage
+
+2. **Multivariate continuous**: Phase-specific scores
+   - Input: Continuous scores for each phase (e.g., from Seurat/Scanpy)
+   - Distribution: `gamma` (non-negative) or `studentt` (robust to outliers)
+   - Could use independent univariate fits or correlated multivariate
+
+**What's Needed**:
+1. Decide on data format and distribution choice
+2. Add `add_cell_cycle_modality()` method (or use `add_custom_modality()`)
+3. If using Gamma: add to distribution registry (`distributions.py`)
+4. Test with real cell cycle data
+5. Document preprocessing requirements (normalization, etc.)
+
+**Design Considerations**:
+- Cell cycle is per-cell, not per-feature - may need special handling
+- Scores may be highly correlated (cells transitioning between phases)
+- Consider whether to model phase as categorical vs continuous "progress"
+
+---
+
+### 5. Implement Guide-Prior Infrastructure in fit_cis
 
 **Status**: Infrastructure prepared, not yet integrated into _model_x
 
@@ -112,7 +142,7 @@ Last updated: 2025-01-23
 
 ## Low Priority / Future Work
 
-### 5. ~~Polynomial Degree Configuration~~ ✅ COMPLETED
+### 6. ~~Polynomial Degree Configuration~~ ✅ COMPLETED
 
 **Status**: ✅ Already implemented
 
@@ -134,7 +164,7 @@ model.fit_trans(
 
 ---
 
-### 6. Documentation Updates
+### 7. Documentation Updates
 
 **Status**: Mostly complete
 
@@ -157,7 +187,7 @@ model.fit_trans(
 
 ---
 
-### 7. Example Workflows
+### 8. Example Workflows
 
 **Status**: Basic examples exist
 
@@ -169,11 +199,11 @@ model.fit_trans(
 - Splicing modality example with all types (sj, donor, acceptor, exon_skip)
 - Custom modality example (SpliZ)
 - Example showing save/load workflow
-- Example showing guide-prior usage (after #4 is implemented)
+- Example showing guide-prior usage (after #5 is implemented)
 
 ---
 
-### 8. Performance Optimization
+### 9. Performance Optimization
 
 **Status**: Not started
 
@@ -185,7 +215,7 @@ model.fit_trans(
 
 ---
 
-### 9. Additional Distributions
+### 10. Additional Distributions
 
 **Status**: Core distributions implemented
 
@@ -193,6 +223,37 @@ model.fit_trans(
 
 **Not Currently Planned**:
 - Gamma distribution (for non-negative continuous data) - may revisit if use case arises
+
+---
+
+## Long-term / Exploratory
+
+These tasks represent significant architectural changes and are not planned for near-term implementation.
+
+### 11. Combinatorial Cis Effects (Multiple Cis Genes)
+
+**Status**: Not planned - long-term research direction
+
+**Description**: Support experiments with multiple cis genes being perturbed simultaneously (e.g., double knockouts, combinatorial screens). Currently the model assumes a single cis gene.
+
+**Challenges**:
+- How to model interaction effects between multiple cis genes
+- Exponential growth in combinations (2 genes = 4 states, 3 genes = 8 states, etc.)
+- Statistical power requirements for estimating interaction terms
+- Computational complexity of fitting combinatorial models
+
+**Potential Approaches**:
+1. **Additive model**: `x_true = x_cis1 + x_cis2 + ...` (no interactions)
+2. **Multiplicative model**: `x_true = x_cis1 * x_cis2 * ...` (in log space: additive)
+3. **Full factorial**: Fit separate effects for each combination (limited scalability)
+4. **Hierarchical interaction model**: Sparse priors on interaction terms
+
+**Prerequisites**:
+- High-MOI support (#2) should be fully tested first
+- Guide-prior infrastructure (#5) may help constrain combinatorial fits
+- Significant theoretical work needed on identifiability
+
+**Note**: This is a research direction, not a planned feature. Would require substantial model redesign.
 
 ---
 
