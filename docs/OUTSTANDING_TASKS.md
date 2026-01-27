@@ -49,26 +49,24 @@ Last updated: 2025-01-27
 
 ## Medium Priority
 
-### 3. Modality-Specific Cis/Trans Fitting
+### 3. Multi-Modal Workflow Documentation
 
-**Status**: Partially implemented
+**Status**: Implementation complete, documentation needed
 
-**Description**: Currently, `fit_cis()` and `fit_trans()` use the primary modality (which can now be any negbinom modality). Support for fitting cis/trans on non-primary modalities is limited.
+**Description**: The multi-modal fitting infrastructure is fully implemented but lacks comprehensive examples and documentation.
 
 **What Works**:
+- `fit_cis()` always fits the primary modality (by design - the primary modality defines the cis gene)
+- `fit_trans()` can fit ANY modality via `modality_name` parameter (tested on splicing_sj, etc.)
 - Any negbinom modality can be primary (gene, ATAC, custom)
-- `fit_cis()` extracts 'cis' modality and fits on it (works for all primary types)
-- `fit_trans()` can fit any modality using `modality_name` parameter
-
-**Current Limitations**:
-- No standardized workflow for fitting splicing or other non-negbinom modalities
-- No examples showing multi-modality cis/trans workflows
+- All distribution types supported in trans fitting (negbinom, binomial, multinomial, normal, studentt)
 
 **What's Needed**:
-1. Add examples showing how to fit_trans for splicing/custom modalities
+1. Add examples showing `fit_trans()` for splicing/custom modalities
 2. Document best practices for multi-modal cis/trans workflows
+3. Example showing full workflow: fit_cis on genes → fit_trans on multiple modalities
 
-**Note**: Cis fitting is always negative binomial. Other distributions for cis fitting would violate the core model design where cis represents deconvolved count-based expression.
+**Note**: Cis fitting is always negative binomial on the primary modality. This is by design - the primary modality defines what "cis" means (deconvolved count-based expression of the perturbed gene/feature).
 
 ---
 
