@@ -255,6 +255,33 @@ These tasks represent significant architectural changes and are not planned for 
 
 ---
 
+### 12. Dynamic ATAC Region Identification
+
+**Status**: Not planned - long-term research direction
+
+**Description**: Rather than using pre-determined ATAC peaks/motifs/regions, dynamically identify key variable regions that respond to perturbations. Currently, users must specify regions of interest upfront.
+
+**Challenges**:
+- Computational cost of scanning across all genomic positions
+- Multiple testing burden across thousands/millions of potential regions
+- How to define "region boundaries" in a data-driven way
+- Integration with existing peak-calling pipelines
+
+**Potential Approaches**:
+1. **Two-stage**: Initial broad scan to identify candidate regions, then detailed fitting
+2. **Sliding window**: Test windows of varying sizes across the genome
+3. **Bayesian changepoint detection**: Identify boundaries where accessibility changes
+4. **Variational feature selection**: Learn which regions are informative during fitting
+
+**Related Work**:
+- Differential accessibility methods (e.g., DiffBind, csaw)
+- Topic modeling approaches for single-cell ATAC
+- Peak-free methods in scATAC-seq analysis
+
+**Note**: This is a research direction that would significantly expand scope beyond current perturbation-response modeling.
+
+---
+
 ## Completed Recently ✓
 
 - ✅ Save/Load for Cis Fit (2025-01-23)
