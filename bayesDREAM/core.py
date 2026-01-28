@@ -1575,28 +1575,40 @@ class _BayesDREAMCore(PlottingMixin):
                 model_new.alpha_x_prefit = self.alpha_x_prefit.clone() if isinstance(self.alpha_x_prefit, torch.Tensor) else self.alpha_x_prefit
                 model_new.alpha_x_type = self.alpha_x_type
 
-            # Copy alpha_y_prefit from original modalities to new modalities
+            # Copy all fit attributes from original modalities to new modalities
             # (including 'gene' and 'cis' which were recreated during initialization)
             if self.alpha_y_type is not None:
                 model_new.alpha_y_type = self.alpha_y_type
+
+            # Helper to clone tensors
+            def _clone_attr(val):
+                if hasattr(val, 'clone'):
+                    return val.clone()
+                return val
+
+            # Modality-level attributes to copy from fit_technical and fit_trans
+            modality_attrs = [
+                'alpha_y_prefit', 'alpha_y_type', 'alpha_y_prefit_mult', 'alpha_y_prefit_add',
+                'posterior_samples_technical', 'posterior_samples_trans', 'losses_trans'
+            ]
             for mod_name in self.modalities:
                 if mod_name in model_new.modalities:
                     orig_mod = self.modalities[mod_name]
-                    if hasattr(orig_mod, 'alpha_y_prefit') and orig_mod.alpha_y_prefit is not None:
-                        model_new.modalities[mod_name].alpha_y_prefit = (
-                            orig_mod.alpha_y_prefit.clone() if hasattr(orig_mod.alpha_y_prefit, 'clone')
-                            else orig_mod.alpha_y_prefit
-                        )
+                    new_mod = model_new.modalities[mod_name]
+                    for attr in modality_attrs:
+                        if hasattr(orig_mod, attr) and getattr(orig_mod, attr) is not None:
+                            setattr(new_mod, attr, _clone_attr(getattr(orig_mod, attr)))
 
             # Copy cis fit parameters if they exist
+            # Get cell indices for subsetting cell-indexed tensors
+            cell_indices_torch = torch.tensor(
+                [i for i, cell in enumerate(self.meta['cell']) if cell in cells_to_keep],
+                dtype=torch.long
+            )
+
             if hasattr(self, 'x_true') and self.x_true is not None:
                 # x_true needs to be subsetted to match new cells
                 if isinstance(self.x_true, torch.Tensor):
-                    # Get indices of subsetted cells
-                    cell_indices_torch = torch.tensor(
-                        [i for i, cell in enumerate(self.meta['cell']) if cell in cells_to_keep],
-                        dtype=torch.long
-                    )
                     if self.x_true_type == 'posterior':
                         # x_true shape: [S, N] or [S, 1, N]
                         if self.x_true.ndim == 2:
@@ -1607,6 +1619,29 @@ class _BayesDREAMCore(PlottingMixin):
                         # Point estimate: shape [N]
                         model_new.x_true = self.x_true[cell_indices_torch].clone()
                     model_new.x_true_type = self.x_true_type
+
+            # Copy log2_x_true (also needs subsetting)
+            if hasattr(self, 'log2_x_true') and self.log2_x_true is not None:
+                if isinstance(self.log2_x_true, torch.Tensor):
+                    if hasattr(self, 'log2_x_true_type') and self.log2_x_true_type == 'posterior':
+                        if self.log2_x_true.ndim == 2:
+                            model_new.log2_x_true = self.log2_x_true[:, cell_indices_torch].clone()
+                        else:
+                            model_new.log2_x_true = self.log2_x_true[:, :, cell_indices_torch].clone()
+                    else:
+                        model_new.log2_x_true = self.log2_x_true[cell_indices_torch].clone()
+                    if hasattr(self, 'log2_x_true_type'):
+                        model_new.log2_x_true_type = self.log2_x_true_type
+
+            # Copy posterior samples and losses (these don't need cell subsetting)
+            if hasattr(self, 'posterior_samples_cis') and self.posterior_samples_cis is not None:
+                model_new.posterior_samples_cis = self.posterior_samples_cis
+            if hasattr(self, 'loss_x') and self.loss_x is not None:
+                model_new.loss_x = self.loss_x
+            if hasattr(self, 'posterior_samples_trans') and self.posterior_samples_trans is not None:
+                model_new.posterior_samples_trans = self.posterior_samples_trans
+            if hasattr(self, 'losses_trans') and self.losses_trans is not None:
+                model_new.losses_trans = self.losses_trans
 
             # Copy traces if they exist
             if self.trace_cellline is not None:
