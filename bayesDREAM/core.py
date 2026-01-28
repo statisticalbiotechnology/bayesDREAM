@@ -1546,6 +1546,7 @@ class _BayesDREAMCore(PlottingMixin):
         model_new = bayesDREAM(
             meta=meta_subset,
             counts=counts_subset,
+            modality_name=self.primary_modality,  # Use same primary modality name
             feature_meta=self.gene_meta.copy() if hasattr(self, 'gene_meta') else None,
             cis_gene=self.cis_gene,
             output_dir=self.output_dir,
@@ -1558,6 +1559,9 @@ class _BayesDREAMCore(PlottingMixin):
             guide_target=None,  # Already encoded in guide_meta
             require_ntc=False  # Allow subsetting without NTC cells
         )
+
+        print(f"[DEBUG] Original modalities: {list(self.modalities.keys())}")
+        print(f"[DEBUG] New model modalities: {list(model_new.modalities.keys())}")
 
         # Copy additional modalities (beyond the primary 'gene' modality)
         if hasattr(self, 'modalities'):
@@ -1597,11 +1601,18 @@ class _BayesDREAMCore(PlottingMixin):
                     new_mod = model_new.modalities[mod_name]
                     copied_attrs = []
                     for attr in modality_attrs:
-                        if hasattr(orig_mod, attr) and getattr(orig_mod, attr) is not None:
-                            setattr(new_mod, attr, _clone_attr(getattr(orig_mod, attr)))
+                        orig_val = getattr(orig_mod, attr, None)
+                        if orig_val is not None:
+                            setattr(new_mod, attr, _clone_attr(orig_val))
                             copied_attrs.append(attr)
                     if copied_attrs:
                         print(f"[INFO] Copied {copied_attrs} from '{mod_name}' modality")
+                    else:
+                        print(f"[DEBUG] No attributes to copy from '{mod_name}' modality")
+                        # Debug: show which attrs exist
+                        for attr in modality_attrs:
+                            val = getattr(orig_mod, attr, "MISSING")
+                            print(f"  {attr}: {type(val).__name__ if val != 'MISSING' else 'MISSING'}")
                 else:
                     print(f"[WARN] Modality '{mod_name}' not found in new model")
 
