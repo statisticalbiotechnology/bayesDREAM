@@ -1633,9 +1633,19 @@ class _BayesDREAMCore(PlottingMixin):
                     if hasattr(self, 'log2_x_true_type'):
                         model_new.log2_x_true_type = self.log2_x_true_type
 
-            # Copy posterior samples and losses (these don't need cell subsetting)
+            # Copy posterior_samples_cis with cell-indexed tensors subsetted
             if hasattr(self, 'posterior_samples_cis') and self.posterior_samples_cis is not None:
-                model_new.posterior_samples_cis = self.posterior_samples_cis
+                n_cells_orig = len(self.meta)
+                subsetted_cis = {}
+                for key, val in self.posterior_samples_cis.items():
+                    if isinstance(val, torch.Tensor) and val.shape[-1] == n_cells_orig:
+                        # This tensor has cell dimension - subset it
+                        subsetted_cis[key] = val[..., cell_indices_torch].clone()
+                    elif isinstance(val, torch.Tensor):
+                        subsetted_cis[key] = val.clone()
+                    else:
+                        subsetted_cis[key] = val
+                model_new.posterior_samples_cis = subsetted_cis
             if hasattr(self, 'loss_x') and self.loss_x is not None:
                 model_new.loss_x = self.loss_x
             if hasattr(self, 'posterior_samples_trans') and self.posterior_samples_trans is not None:
