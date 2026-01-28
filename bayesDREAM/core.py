@@ -1595,9 +1595,15 @@ class _BayesDREAMCore(PlottingMixin):
                 if mod_name in model_new.modalities:
                     orig_mod = self.modalities[mod_name]
                     new_mod = model_new.modalities[mod_name]
+                    copied_attrs = []
                     for attr in modality_attrs:
                         if hasattr(orig_mod, attr) and getattr(orig_mod, attr) is not None:
                             setattr(new_mod, attr, _clone_attr(getattr(orig_mod, attr)))
+                            copied_attrs.append(attr)
+                    if copied_attrs:
+                        print(f"[INFO] Copied {copied_attrs} from '{mod_name}' modality")
+                else:
+                    print(f"[WARN] Modality '{mod_name}' not found in new model")
 
             # Copy cis fit parameters if they exist
             # Get cell indices for subsetting cell-indexed tensors
