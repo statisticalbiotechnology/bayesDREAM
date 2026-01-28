@@ -80,7 +80,8 @@ class bayesDREAM(
         device: str = None,
         random_seed: int = 2402,
         cores: int = 1,
-        exclude_targets: list = None
+        exclude_targets: list = None,
+        require_ntc: bool = True
     ):
         """
         Initialize bayesDREAM.
@@ -315,7 +316,8 @@ class bayesDREAM(
             device=device,
             random_seed=random_seed,
             cores=cores,
-            exclude_targets=exclude_targets
+            exclude_targets=exclude_targets,
+            require_ntc=require_ntc
         )
 
         # Subset all modalities to match filtered cells from base class

@@ -77,7 +77,8 @@ class _BayesDREAMCore(PlottingMixin):
         guide_assignment: np.ndarray = None,
         guide_meta: pd.DataFrame = None,
         guide_target: pd.DataFrame = None,
-        exclude_targets: list[str] = None
+        exclude_targets: list[str] = None,
+        require_ntc: bool = True
     ):
         """
         Initialize the model with the metadata and count matrices.
@@ -131,6 +132,10 @@ class _BayesDREAMCore(PlottingMixin):
             a gene in this list will be removed from analysis, regardless of other guides present.
             Example: exclude_targets=['MYB'] will remove cells with guides targeting MYB,
             even if they also have NTC or cis-targeting guides.
+        require_ntc : bool, optional
+            If True (default), requires NTC cells in meta for single-guide mode.
+            Set to False when subsetting a model that has already had technical fitting done,
+            or when NTC cells are not needed (e.g., stress testing without NTC).
         """
         
         if label is None and cis_gene is not None:
@@ -434,8 +439,12 @@ class _BayesDREAMCore(PlottingMixin):
             if missing_cols:
                 raise ValueError(f"[Single-guide] Missing required columns in meta: {missing_cols}")
 
-            if "ntc" not in self.meta["target"].values:
-                raise ValueError("The 'target' column in meta must contain 'ntc'.")
+            if require_ntc and "ntc" not in self.meta["target"].values:
+                raise ValueError(
+                    "The 'target' column in meta must contain 'ntc'. "
+                    "If you have already run fit_technical() and want to subset without NTC cells, "
+                    "use require_ntc=False."
+                )
 
         # Populate cell names if not already set
         if self._cell_names is None:
@@ -1546,7 +1555,8 @@ class _BayesDREAMCore(PlottingMixin):
             cores=1,
             guide_assignment=guide_assignment_subset,
             guide_meta=self.guide_meta.copy() if self.is_high_moi else None,
-            guide_target=None  # Already encoded in guide_meta
+            guide_target=None,  # Already encoded in guide_meta
+            require_ntc=False  # Allow subsetting without NTC cells
         )
 
         # Copy additional modalities (beyond the primary 'gene' modality)
