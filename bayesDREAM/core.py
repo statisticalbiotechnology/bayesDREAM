@@ -1575,10 +1575,18 @@ class _BayesDREAMCore(PlottingMixin):
                 model_new.alpha_x_prefit = self.alpha_x_prefit.clone() if isinstance(self.alpha_x_prefit, torch.Tensor) else self.alpha_x_prefit
                 model_new.alpha_x_type = self.alpha_x_type
 
-            # alpha_y_prefit is stored per-modality, not at model level
-            # It will be copied when modalities are copied above
+            # Copy alpha_y_prefit from original modalities to new modalities
+            # (including 'gene' and 'cis' which were recreated during initialization)
             if self.alpha_y_type is not None:
                 model_new.alpha_y_type = self.alpha_y_type
+            for mod_name in self.modalities:
+                if mod_name in model_new.modalities:
+                    orig_mod = self.modalities[mod_name]
+                    if hasattr(orig_mod, 'alpha_y_prefit') and orig_mod.alpha_y_prefit is not None:
+                        model_new.modalities[mod_name].alpha_y_prefit = (
+                            orig_mod.alpha_y_prefit.clone() if hasattr(orig_mod.alpha_y_prefit, 'clone')
+                            else orig_mod.alpha_y_prefit
+                        )
 
             # Copy cis fit parameters if they exist
             if hasattr(self, 'x_true') and self.x_true is not None:
