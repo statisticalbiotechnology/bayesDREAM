@@ -79,13 +79,11 @@ class ModelLoader:
                 alpha_y = torch.load(alpha_y_path)
                 primary_mod = self.model.get_modality(self.model.primary_modality)
                 if use_posterior:
-                    primary_mod.alpha_y_prefit = alpha_y
+                    primary_mod.alpha_y_prefit = alpha_y  # Uses property to set distribution-specific attr
                     primary_mod.alpha_y_type = 'posterior'
-                    self.model.alpha_y_type = 'posterior'
                 else:
                     primary_mod.alpha_y_prefit = alpha_y.mean(dim=0)
                     primary_mod.alpha_y_type = 'point'
-                    self.model.alpha_y_type = 'point'
                 loaded['alpha_y_prefit'] = primary_mod.alpha_y_prefit
                 print(f"[LOAD] alpha_y_prefit → {self.model.primary_modality} modality ← {alpha_y_path}")
 
@@ -234,6 +232,19 @@ class ModelLoader:
             loaded['x_true'] = self.model.x_true
             print(f"[LOAD] x_true ({self.model.x_true_type}) ← {x_true_path}")
 
+        # Load log2_x_true if saved separately
+        log2_x_true_path = os.path.join(input_dir, 'log2_x_true.pt')
+        if os.path.exists(log2_x_true_path):
+            log2_x_true = torch.load(log2_x_true_path)
+            if use_posterior:
+                self.model.log2_x_true = log2_x_true
+                self.model.log2_x_true_type = 'posterior'
+            else:
+                self.model.log2_x_true = log2_x_true.mean(dim=0)
+                self.model.log2_x_true_type = 'point'
+            loaded['log2_x_true'] = self.model.log2_x_true
+            print(f"[LOAD] log2_x_true ({self.model.log2_x_true_type}) ← {log2_x_true_path}")
+
         # Load posterior samples
         posterior_path = os.path.join(input_dir, 'posterior_samples_cis.pt')
         if os.path.exists(posterior_path):
@@ -267,6 +278,25 @@ class ModelLoader:
                 self.model.posterior_samples_cis = loaded_data
                 loaded['posterior_samples_cis'] = self.model.posterior_samples_cis
                 print(f"[LOAD] posterior_samples_cis (legacy format) ← {posterior_path}")
+
+            # Extract log2_x_true from posterior_samples_cis if not already loaded
+            if not hasattr(self.model, 'log2_x_true') or self.model.log2_x_true is None:
+                if 'log_x_true' in self.model.posterior_samples_cis:
+                    log_x_true = self.model.posterior_samples_cis['log_x_true']
+                    if use_posterior:
+                        self.model.log2_x_true = log_x_true
+                        self.model.log2_x_true_type = 'posterior'
+                    else:
+                        self.model.log2_x_true = log_x_true.mean(dim=0)
+                        self.model.log2_x_true_type = 'point'
+                    loaded['log2_x_true'] = self.model.log2_x_true
+                    print(f"[LOAD] log2_x_true ({self.model.log2_x_true_type}) ← extracted from posterior_samples_cis")
+                elif hasattr(self.model, 'x_true') and self.model.x_true is not None:
+                    # Compute log2_x_true from x_true if not in posterior samples
+                    self.model.log2_x_true = torch.log2(self.model.x_true)
+                    self.model.log2_x_true_type = getattr(self.model, 'x_true_type', 'posterior')
+                    loaded['log2_x_true'] = self.model.log2_x_true
+                    print(f"[LOAD] log2_x_true ({self.model.log2_x_true_type}) ← computed from x_true")
 
         print(f"[LOAD] Cis fit loaded from {input_dir}")
         return loaded

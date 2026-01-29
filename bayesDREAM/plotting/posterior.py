@@ -173,7 +173,7 @@ def plot_posterior_density_lines(
 
 def plot_xtrue_density_by_guide(
     model,
-    cis_gene,
+    cis_gene=None,
     log2=False,
     cmap="viridis",
     alpha_overall=0.5,
@@ -193,8 +193,8 @@ def plot_xtrue_density_by_guide(
     ----------
     model : bayesDREAM
         Fitted bayesDREAM model
-    cis_gene : str
-        Cis gene name
+    cis_gene : str, optional
+        Cis gene name (used for title, defaults to model.cis_gene)
     log2 : bool
         Whether to use log2 scale
     cmap : str or Colormap
@@ -225,8 +225,11 @@ def plot_xtrue_density_by_guide(
     if color_scheme is None:
         color_scheme = ColorScheme()
 
-    df = model[cis_gene].meta.copy()
-    X = to_np(model[cis_gene].x_true)  # [S, N_cells]
+    if cis_gene is None:
+        cis_gene = getattr(model, 'cis_gene', 'cis')
+
+    df = model.meta.copy()
+    X = to_np(model.x_true)  # [S, N_cells]
 
     # log2 transform without dropping guides
     if log2:
@@ -329,7 +332,7 @@ def plot_xtrue_density_by_guide(
 def plot_parameter_density_with_xtrue(
     param_samps,
     model,
-    cis_gene,
+    cis_gene=None,
     param_name='x_infl',
     subset_mask=None,
     log2=True,
@@ -390,8 +393,8 @@ def plot_parameter_density_with_xtrue(
     --------
     >>> from bayesDREAM.plotting import (plot_parameter_density_with_xtrue,
     ...                                   hill_xinf_samples, dependency_mask_from_n)
-    >>> K_samps = model['GFI1B'].posterior_samples_trans['K_a'][:, 0, :].detach().cpu().numpy()
-    >>> n_samps = model['GFI1B'].posterior_samples_trans['n_a'][:, 0, :].detach().cpu().numpy()
+    >>> K_samps = model.posterior_samples_trans['K_a'][:, 0, :].detach().cpu().numpy()
+    >>> n_samps = model.posterior_samples_trans['n_a'][:, 0, :].detach().cpu().numpy()
     >>> xinf_samps = hill_xinf_samples(K_samps, n_samps, tol_n=0.2)
     >>> mask = dependency_mask_from_n(n_samps)
     >>> fig = plot_parameter_density_with_xtrue(
@@ -406,6 +409,9 @@ def plot_parameter_density_with_xtrue(
     if color_scheme is None:
         color_scheme = ColorScheme()
 
+    if cis_gene is None:
+        cis_gene = getattr(model, 'cis_gene', 'cis')
+
     # Convert to numpy and apply log2 if requested
     param_samps = np.asarray(param_samps)
     if log2:
@@ -413,8 +419,8 @@ def plot_parameter_density_with_xtrue(
         param_samps = log2_pos(param_samps)
 
     # Get x_true samples and metadata
-    df_meta = model[cis_gene].meta.copy()
-    x_true_samps = to_np(model[cis_gene].x_true)  # [S, N_cells]
+    df_meta = model.meta.copy()
+    x_true_samps = to_np(model.x_true)  # [S, N_cells]
     xtrue_mean_per_cell = x_true_samps.mean(axis=0)  # [N_cells]
 
     if log2:

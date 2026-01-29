@@ -142,7 +142,9 @@ class Modality:
         self._unfiltered_feature_meta = None
 
         # Per-modality fitting results storage
-        self.alpha_y_prefit = None          # Technical fit: overdispersion parameters
+        # Distribution-specific alpha_y parameters (use these directly, not alpha_y_prefit)
+        self.alpha_y_prefit_mult = None     # For negbinom: multiplicative correction
+        self.alpha_y_prefit_add = None      # For normal/studentt/binomial/multinomial: additive correction
         self.alpha_y_type = None            # 'point' (2D/3D) or 'posterior' (3D/4D with samples dim)
         self.posterior_samples_technical = None  # Technical fit: full posterior samples
         self.posterior_samples_trans = None      # Trans fit: full posterior samples
@@ -509,3 +511,31 @@ class Modality:
     def __repr__(self) -> str:
         exon_info = f", exon_agg='{self.exon_aggregate_method}'" if self.is_exon_skipping() else ""
         return f"Modality(name='{self.name}', distribution='{self.distribution}', dims={self.dims}{exon_info})"
+
+    @property
+    def alpha_y_prefit(self):
+        """
+        Get the distribution-appropriate alpha_y_prefit.
+
+        Returns alpha_y_prefit_mult for negbinom, alpha_y_prefit_add for others.
+        This property provides a unified interface while ensuring the correct
+        parameter type is used for each distribution.
+        """
+        if self.distribution == 'negbinom':
+            return self.alpha_y_prefit_mult
+        else:
+            return self.alpha_y_prefit_add
+
+    @alpha_y_prefit.setter
+    def alpha_y_prefit(self, value):
+        """
+        Set the distribution-appropriate alpha_y_prefit.
+
+        Stores to alpha_y_prefit_mult for negbinom, alpha_y_prefit_add for others.
+        This property provides a unified interface while ensuring the correct
+        parameter type is stored for each distribution.
+        """
+        if self.distribution == 'negbinom':
+            self.alpha_y_prefit_mult = value
+        else:
+            self.alpha_y_prefit_add = value

@@ -12,7 +12,7 @@ from .helpers import to_np
 from .colors import ColorScheme
 
 
-def scatter_by_guide(model, cis_gene, log2=False, color_scheme=None, ax=None, show=True):
+def scatter_by_guide(model, cis_gene=None, log2=False, color_scheme=None, ax=None, show=True):
     """
     Scatter plot of per-cell mean vs std of x_true, colored by guide.
 
@@ -20,8 +20,8 @@ def scatter_by_guide(model, cis_gene, log2=False, color_scheme=None, ax=None, sh
     ----------
     model : bayesDREAM
         Fitted bayesDREAM model
-    cis_gene : str
-        Cis gene name
+    cis_gene : str, optional
+        Cis gene name (used for title, defaults to model.cis_gene)
     log2 : bool, default False
         Whether to use log2 scale
     color_scheme : ColorScheme, optional
@@ -38,8 +38,11 @@ def scatter_by_guide(model, cis_gene, log2=False, color_scheme=None, ax=None, sh
     if color_scheme is None:
         color_scheme = ColorScheme()
 
-    df = model[cis_gene].meta.copy()
-    X = to_np(model[cis_gene].x_true)
+    if cis_gene is None:
+        cis_gene = getattr(model, 'cis_gene', 'cis')
+
+    df = model.meta.copy()
+    X = to_np(model.x_true)
 
     if log2:
         # filter strictly positive before log
@@ -71,7 +74,7 @@ def scatter_by_guide(model, cis_gene, log2=False, color_scheme=None, ax=None, sh
     return ax
 
 
-def scatter_ci95_by_guide(model, cis_gene, log2=False, full_width=False,
+def scatter_ci95_by_guide(model, cis_gene=None, log2=False, full_width=False,
                           color_scheme=None, ax=None, show=True):
     """
     Scatter of per-cell mean vs 95% CI width (or half-width) of x_true samples.
@@ -80,8 +83,8 @@ def scatter_ci95_by_guide(model, cis_gene, log2=False, full_width=False,
     ----------
     model : bayesDREAM
         Fitted bayesDREAM model
-    cis_gene : str
-        Cis gene name
+    cis_gene : str, optional
+        Cis gene name (used for title, defaults to model.cis_gene)
     log2 : bool, default False
         Whether to use log2 scale
     full_width : bool, default False
@@ -100,8 +103,11 @@ def scatter_ci95_by_guide(model, cis_gene, log2=False, full_width=False,
     if color_scheme is None:
         color_scheme = ColorScheme()
 
-    df = model[cis_gene].meta.copy()
-    X = to_np(model[cis_gene].x_true)  # shape [S, N] (samples x cells)
+    if cis_gene is None:
+        cis_gene = getattr(model, 'cis_gene', 'cis')
+
+    df = model.meta.copy()
+    X = to_np(model.x_true)  # shape [S, N] (samples x cells)
 
     if log2:
         mask_pos = (X > 0).all(axis=0)
@@ -137,7 +143,7 @@ def scatter_ci95_by_guide(model, cis_gene, log2=False, full_width=False,
     return ax
 
 
-def violin_by_guide_log2(model, cis_gene, color_scheme=None, ax=None, show=True):
+def violin_by_guide_log2(model, cis_gene=None, color_scheme=None, ax=None, show=True):
     """
     Violin plot of x_true (log2) grouped by guide, colored by target.
 
@@ -145,8 +151,8 @@ def violin_by_guide_log2(model, cis_gene, color_scheme=None, ax=None, show=True)
     ----------
     model : bayesDREAM
         Fitted bayesDREAM model
-    cis_gene : str
-        Cis gene name
+    cis_gene : str, optional
+        Cis gene name (used for title, defaults to model.cis_gene)
     color_scheme : ColorScheme, optional
         Custom color scheme
     ax : matplotlib axes, optional
@@ -161,8 +167,11 @@ def violin_by_guide_log2(model, cis_gene, color_scheme=None, ax=None, show=True)
     if color_scheme is None:
         color_scheme = ColorScheme()
 
-    df = model[cis_gene].meta.copy()
-    X = to_np(model[cis_gene].x_true)
+    if cis_gene is None:
+        cis_gene = getattr(model, 'cis_gene', 'cis')
+
+    df = model.meta.copy()
+    X = to_np(model.x_true)
 
     pos_mask = (X > 0).all(axis=0)
     X = X[:, pos_mask]
@@ -210,7 +219,7 @@ def violin_by_guide_log2(model, cis_gene, color_scheme=None, ax=None, show=True)
     return ax
 
 
-def filled_density_by_guide_log2(model, cis_gene, bw=None, color_scheme=None,
+def filled_density_by_guide_log2(model, cis_gene=None, bw=None, color_scheme=None,
                                  ax=None, show=True):
     """
     Filled KDE density plot of x_true (log2), colored by guide.
@@ -219,8 +228,8 @@ def filled_density_by_guide_log2(model, cis_gene, bw=None, color_scheme=None,
     ----------
     model : bayesDREAM
         Fitted bayesDREAM model
-    cis_gene : str
-        Cis gene name
+    cis_gene : str, optional
+        Cis gene name (used for title, defaults to model.cis_gene)
     bw : float, optional
         KDE bandwidth. If None, uses scott's rule.
     color_scheme : ColorScheme, optional
@@ -237,8 +246,11 @@ def filled_density_by_guide_log2(model, cis_gene, bw=None, color_scheme=None,
     if color_scheme is None:
         color_scheme = ColorScheme()
 
-    df = model[cis_gene].meta.copy()
-    X = to_np(model[cis_gene].x_true)
+    if cis_gene is None:
+        cis_gene = getattr(model, 'cis_gene', 'cis')
+
+    df = model.meta.copy()
+    X = to_np(model.x_true)
 
     pos_mask = (X > 0).all(axis=0)
     X = X[:, pos_mask]
@@ -356,7 +368,7 @@ def scatter_param_mean_vs_ci(
     ... )
 
     >>> # Example 2: Hill coefficient n with dependency coloring
-    >>> n_samps = model['GFI1B'].posterior_samples_trans['n_a'][:, 0, :].detach().cpu().numpy()
+    >>> n_samps = model.posterior_samples_trans['n_a'][:, 0, :].detach().cpu().numpy()
     >>> dep_mask = dependency_mask_from_n(n_samps)
     >>> fig = scatter_param_mean_vs_ci(
     ...     n_samps,

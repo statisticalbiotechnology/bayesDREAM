@@ -850,6 +850,7 @@ class TransFitter:
         self,
         sum_factor_col: str = None,
         function_type: str = 'single_hill',  # or 'additive', 'nested'
+        use_posterior: bool = False,
         polynomial_degree: int = 6,
         lr: float = None,
         niters: int = None,
@@ -891,6 +892,11 @@ class TransFitter:
             If None, auto-detected from modality.
         sum_factor_col : str, optional
             Sum factor column name. Required for negbinom, ignored for others.
+        use_posterior : bool, default=False
+            If False (default), converts alpha_y_prefit and x_true from prior fits to
+            point estimates (mean over posterior samples) before fitting. This is faster
+            and usually sufficient. If True, uses full posterior samples for uncertainty
+            propagation (slower but more accurate).
         denominator : np.ndarray, optional
             Denominator array for binomial distribution (e.g., total counts for PSI)
             If None, auto-detected from modality.
@@ -944,10 +950,50 @@ class TransFitter:
         ...                 use_data_driven_priors=False)
         """
 
+        # Handle use_posterior flag - convert posteriors to point estimates if needed
+        # Check for x_true (from cis fit)
+        has_x_true = self.model.x_true is not None
+
+        if not has_x_true:
+            warnings.warn(
+                "x_true not set. You should run fit_cis() before fit_trans(). "
+                "Proceeding without cis effects."
+            )
+
+        if not use_posterior:
+            # Convert x_true to point estimate if it's a posterior
+            if has_x_true and getattr(self.model, 'x_true_type', None) == 'posterior':
+                print("[INFO] use_posterior=False: Converting x_true to point estimate (mean)")
+                self.model.x_true = self.model.x_true.mean(dim=0)
+                self.model.x_true_type = 'point'
+
+            # Convert log2_x_true to point estimate if it's a posterior
+            if hasattr(self.model, 'log2_x_true') and self.model.log2_x_true is not None:
+                if getattr(self.model, 'log2_x_true_type', None) == 'posterior':
+                    print("[INFO] use_posterior=False: Converting log2_x_true to point estimate (mean)")
+                    self.model.log2_x_true = self.model.log2_x_true.mean(dim=0)
+                    self.model.log2_x_true_type = 'point'
+
         # Determine which modality to use
         if modality_name is None:
             modality_name = self.model.primary_modality
         modality = self.model.get_modality(modality_name)
+
+        # Handle use_posterior flag for modality-specific alpha_y
+        if not use_posterior:
+            # Convert alpha_y_prefit_mult to point estimate if it's a posterior (negbinom)
+            if hasattr(modality, 'alpha_y_prefit_mult') and modality.alpha_y_prefit_mult is not None:
+                if getattr(modality, 'alpha_y_type', None) == 'posterior' and modality.alpha_y_prefit_mult.dim() >= 3:
+                    print(f"[INFO] use_posterior=False: Converting {modality_name}.alpha_y_prefit_mult to point estimate (mean)")
+                    modality.alpha_y_prefit_mult = modality.alpha_y_prefit_mult.mean(dim=0)
+                    modality.alpha_y_type = 'point'
+
+            # Convert alpha_y_prefit_add to point estimate if it's a posterior (normal, binomial, etc)
+            if hasattr(modality, 'alpha_y_prefit_add') and modality.alpha_y_prefit_add is not None:
+                if getattr(modality, 'alpha_y_type', None) == 'posterior' and modality.alpha_y_prefit_add.dim() >= 3:
+                    print(f"[INFO] use_posterior=False: Converting {modality_name}.alpha_y_prefit_add to point estimate (mean)")
+                    modality.alpha_y_prefit_add = modality.alpha_y_prefit_add.mean(dim=0)
+                    modality.alpha_y_type = 'point'
 
         # Auto-detect distribution from modality
         if distribution is None:

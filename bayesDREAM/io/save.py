@@ -82,11 +82,11 @@ class ModelSaver:
             # NOTE: model.alpha_y_prefit is deprecated - alpha_y_prefit is stored per-modality
             # For backward compatibility, save primary modality's alpha_y_prefit as alpha_y_prefit.pt
             primary_mod = self.model.get_modality(self.model.primary_modality)
-            if hasattr(primary_mod, 'alpha_y_prefit') and primary_mod.alpha_y_prefit is not None:
+            if primary_mod.alpha_y_prefit is not None:
                 path = os.path.join(output_dir, 'alpha_y_prefit.pt')
                 torch.save(primary_mod.alpha_y_prefit, path)
                 saved_files['alpha_y_prefit'] = path
-                saved_files['alpha_y_type'] = self.model.alpha_y_type
+                saved_files['alpha_y_type'] = getattr(primary_mod, 'alpha_y_type', None)
                 print(f"[SAVE] alpha_y_prefit (from {self.model.primary_modality} modality) → {path}")
 
         # Save per-modality alpha_y_prefit and posterior_samples_technical
@@ -164,7 +164,7 @@ class ModelSaver:
 
         Saves:
         - x_true: True cis gene expression (posterior samples or point estimate)
-        - x_true_type: Type ('posterior' or 'point')
+        - log2_x_true: Log2-transformed x_true (posterior samples or point estimate)
         - posterior_samples_cis: Full posterior samples
 
         Parameters
@@ -192,6 +192,15 @@ class ModelSaver:
             x_type = getattr(self.model, 'x_true_type', 'posterior')
             saved_files['x_true_type'] = x_type
             print(f"[SAVE] x_true ({x_type}) → {path}")
+
+        # Save log2_x_true
+        if hasattr(self.model, 'log2_x_true') and self.model.log2_x_true is not None:
+            path = os.path.join(output_dir, 'log2_x_true.pt')
+            torch.save(self.model.log2_x_true, path)
+            saved_files['log2_x_true'] = path
+            log2_x_type = getattr(self.model, 'log2_x_true_type', 'posterior')
+            saved_files['log2_x_true_type'] = log2_x_type
+            print(f"[SAVE] log2_x_true ({log2_x_type}) → {path}")
 
         # Save posterior samples
         if hasattr(self.model, 'posterior_samples_cis') and self.model.posterior_samples_cis is not None:

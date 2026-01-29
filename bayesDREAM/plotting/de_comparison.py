@@ -197,7 +197,7 @@ def compute_log2fc_obs_for_cells(
     return log2fc_obs, x_min_obs, x_max_obs
 
 
-def prepare_de_for_cg(model, de_df, cis_gene, color_scheme=None):
+def prepare_de_for_cg(model, de_df, cis_gene=None, color_scheme=None):
     """
     Prepare model + edgeR data for a given cis gene.
 
@@ -208,8 +208,8 @@ def prepare_de_for_cg(model, de_df, cis_gene, color_scheme=None):
     de_df : pd.DataFrame
         External DE results (e.g., from edgeR) with columns:
         'gene', 'logFC', 'FDR', 'guide' (optional)
-    cis_gene : str
-        Cis gene name
+    cis_gene : str, optional
+        Cis gene name (defaults to model.cis_gene)
     color_scheme : ColorScheme, optional
         Color scheme
 
@@ -219,29 +219,38 @@ def prepare_de_for_cg(model, de_df, cis_gene, color_scheme=None):
         (A_samps, alpha_samps, Vmax_samps, K_samps, n_samps, x_true_samps,
          meta, de_cg (with idx, logFC, FDR, gene, n_mean, dependent, ext_sig),
          base_target_color, base_ntc_color)
-        Returns None if cis_gene not found in model.
+        Returns None if posterior_samples_trans not found in model.
     """
     if color_scheme is None:
         color_scheme = ColorScheme()
 
-    if cis_gene not in model:
-        print(f"[{cis_gene}] not found in model.")
+    if cis_gene is None:
+        cis_gene = getattr(model, 'cis_gene', None)
+
+    # Check if model has been fitted with trans
+    if not hasattr(model, 'posterior_samples_trans') or model.posterior_samples_trans is None:
+        print(f"[{cis_gene}] posterior_samples_trans not found in model. Run fit_trans() first.")
         return None
 
-    A_samps     = to_np(model[cis_gene].posterior_samples_trans['A'][:, 0, :])
-    alpha_samps = to_np(model[cis_gene].posterior_samples_trans['alpha'][:, 0, :])
-    Vmax_samps  = to_np(model[cis_gene].posterior_samples_trans['Vmax_a'][:, 0, :])
-    K_samps     = to_np(model[cis_gene].posterior_samples_trans['K_a'][:, 0, :])
-    n_samps     = to_np(model[cis_gene].posterior_samples_trans['n_a'][:, 0, :])
-    x_true_samps = to_np(model[cis_gene].x_true)
-    meta = model[cis_gene].meta
+    # Check if cis_gene matches
+    if cis_gene is not None and hasattr(model, 'cis_gene') and model.cis_gene != cis_gene:
+        print(f"[{cis_gene}] does not match model.cis_gene='{model.cis_gene}'.")
+        return None
+
+    A_samps     = to_np(model.posterior_samples_trans['A'][:, 0, :])
+    alpha_samps = to_np(model.posterior_samples_trans['alpha'][:, 0, :])
+    Vmax_samps  = to_np(model.posterior_samples_trans['Vmax_a'][:, 0, :])
+    K_samps     = to_np(model.posterior_samples_trans['K_a'][:, 0, :])
+    n_samps     = to_np(model.posterior_samples_trans['n_a'][:, 0, :])
+    x_true_samps = to_np(model.x_true)
+    meta = model.meta
 
     n_mean   = n_samps.mean(axis=0)             # [T]
     dep_mask = dependency_mask_from_n(n_samps)  # [T] bool
     T        = n_mean.shape[0]
 
     # gene names aligned to posterior arrays
-    gene_names = np.array(model[cis_gene].get_modality('gene').feature_meta['gene'])
+    gene_names = np.array(model.get_modality('gene').feature_meta['gene'])
     if len(gene_names) != T:
         print(f"[{cis_gene}] WARNING: len(gene_names)={len(gene_names)} != T={T}. "
               "Trimming gene_names to first T entries.")

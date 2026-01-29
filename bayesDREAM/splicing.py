@@ -914,7 +914,8 @@ def process_exon_skipping(sj_counts: pd.DataFrame,
 
 def process_sj_counts(sj_counts: pd.DataFrame,
                       sj_meta: pd.DataFrame,
-                      gene_counts: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+                      gene_counts: pd.DataFrame,
+                      cis_gene_counts: Optional[pd.DataFrame] = None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Process raw SJ counts for binomial modality.
 
@@ -934,6 +935,11 @@ def process_sj_counts(sj_counts: pd.DataFrame,
         Optional columns: gene_id_start, gene_id_end (for Ensembl ID support)
     gene_counts : pd.DataFrame
         Gene-level counts to use as denominator (genes × cells)
+    cis_gene_counts : pd.DataFrame, optional
+        Additional gene counts for cis gene(s) not in gene_counts.
+        This allows including SJs for the cis gene even when cis gene
+        has been removed from gene_counts for trans modeling.
+        Should have genes as rows and cells as columns.
 
     Returns
     -------
@@ -1006,9 +1012,18 @@ def process_sj_counts(sj_counts: pd.DataFrame,
     gene_counts_subset = gene_counts[common_cells].copy()
 
     # Build denominator: for each SJ, get the corresponding gene count
-    # Track which SJs to keep (only those where gene is found in gene_counts)
+    # Track which SJs to keep (only those where gene is found in gene_counts or cis_gene_counts)
     valid_sjs = []
     gene_denom_data = []
+
+    # Prepare cis_gene_counts subset if provided
+    cis_gene_counts_subset = None
+    if cis_gene_counts is not None:
+        cis_common_cells = [c for c in common_cells if c in cis_gene_counts.columns]
+        if len(cis_common_cells) > 0:
+            cis_gene_counts_subset = cis_gene_counts[cis_common_cells].copy()
+            # Reindex to match gene_counts_subset columns
+            cis_gene_counts_subset = cis_gene_counts_subset.reindex(columns=common_cells, fill_value=0)
 
     for sj_id, row in idx.iterrows():
         gene = row['gene']
@@ -1031,6 +1046,21 @@ def process_sj_counts(sj_counts: pd.DataFrame,
                         alt_gene = row[gene_col]
                         if alt_gene in gene_counts_subset.index:
                             gene_expr = gene_counts_subset.loc[alt_gene].values
+                            found = True
+                            break
+
+        # If not found in gene_counts, check cis_gene_counts
+        if not found and cis_gene_counts_subset is not None:
+            if gene in cis_gene_counts_subset.index:
+                gene_expr = cis_gene_counts_subset.loc[gene].values
+                found = True
+            elif has_gene_id:
+                # Try all possible gene identifiers for this SJ in cis_gene_counts
+                for gene_col in ['gene_name_start', 'gene_name_end', 'gene_id_start', 'gene_id_end']:
+                    if gene_col in row.index and pd.notna(row[gene_col]):
+                        alt_gene = row[gene_col]
+                        if alt_gene in cis_gene_counts_subset.index:
+                            gene_expr = cis_gene_counts_subset.loc[alt_gene].values
                             found = True
                             break
 
@@ -1142,6 +1172,7 @@ def create_splicing_modality(sj_counts: pd.DataFrame,
                              min_cell_total: int = 1,
                              min_total_exon: int = 2,
                              cell_names: Optional[List[str]] = None,
+                             cis_gene_counts: Optional[pd.DataFrame] = None,
                              **kwargs) -> Modality:
     """
     Create a Modality object for splicing data.
@@ -1163,6 +1194,9 @@ def create_splicing_modality(sj_counts: pd.DataFrame,
         Minimum reads for exon skipping
     cell_names : list of str, optional
         Cell identifiers (extracted from DataFrame or explicitly provided)
+    cis_gene_counts : pd.DataFrame, optional
+        Additional gene counts for cis gene(s) not in gene_counts.
+        Only used for splicing_type='sj' to include SJs mapping to the cis gene.
     **kwargs
         Additional arguments (e.g., method, fallback_genomic for exon_skip)
 
@@ -1189,7 +1223,7 @@ def create_splicing_modality(sj_counts: pd.DataFrame,
     if splicing_type == 'sj':
         # Raw SJ counts as binomial with gene counts as denominator
         sj_filtered, gene_denom, sj_meta_filtered = process_sj_counts(
-            sj_counts, sj_meta, gene_counts
+            sj_counts, sj_meta, gene_counts, cis_gene_counts=cis_gene_counts
         )
 
         # Extract cell_names if not provided

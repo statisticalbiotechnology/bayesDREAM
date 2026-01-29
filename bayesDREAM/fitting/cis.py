@@ -224,6 +224,7 @@ class CisFitter:
         cis_feature: str = None,
         manual_guide_effects: pd.DataFrame = None,
         prior_strength: float = 1.0,
+        use_posterior: bool = False,
         lr: float = 1e-3,
         niters: int = 100_000,
         nsamples: int = 1000,
@@ -235,7 +236,7 @@ class CisFitter:
         epsilon: float = 1e-6,
         alpha_dirichlet: float = 0.1,
         minibatch_size: int = None,
-        independent_mu_sigma: bool = False,   # <--- NEW
+        independent_mu_sigma: bool = False,
         **kwargs
     ):
         """
@@ -264,6 +265,11 @@ class CisFitter:
         prior_strength : float
             Weight for manual guide effects (default: 1.0)
             0 = ignore manual effects, higher = trust more
+        use_posterior : bool, default=False
+            If False (default), converts alpha_x_prefit from technical fit to point
+            estimates (mean over posterior samples) before fitting. This is faster
+            and usually sufficient. If True, uses full posterior samples for
+            uncertainty propagation (slower but more accurate).
         lr : float
             Learning rate for Adam
         niters : int
@@ -280,6 +286,21 @@ class CisFitter:
             Additional arguments controlling priors, etc.
         """
         print("Running fit_cis...")
+
+        # Handle use_posterior flag - convert posteriors to point estimates if needed
+        has_alpha_x = self.model.alpha_x_prefit is not None
+
+        if not has_alpha_x:
+            # No prefit - warn if user explicitly set use_posterior
+            # (We can't detect if user explicitly set it vs default, so just note it)
+            pass  # Will warn below if technical_covariates provided but no prefit
+
+        if not use_posterior and has_alpha_x:
+            # Convert alpha_x_prefit to point estimate if it's a posterior
+            if getattr(self.model, 'alpha_x_type', None) == 'posterior':
+                print("[INFO] use_posterior=False: Converting alpha_x_prefit to point estimate (mean)")
+                self.model.alpha_x_prefit = self.model.alpha_x_prefit.mean(dim=0)
+                self.model.alpha_x_type = 'point'
 
         if self.model.cis_gene is None:
             raise ValueError("self.model.cis_gene must be set.")

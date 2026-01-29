@@ -22,6 +22,8 @@ class SplicingModalityMixin:
         sj_meta: pd.DataFrame,
         splicing_types: Union[str, List[str]] = ['donor', 'acceptor', 'exon_skip'],
         gene_counts: Optional[pd.DataFrame] = None,
+        cis_gene_counts: Optional[pd.DataFrame] = None,
+        include_cis_gene: bool = True,
         min_cell_total: int = 1,
         min_total_exon: int = 2,
         cell_names: Optional[List[str]] = None,
@@ -45,6 +47,15 @@ class SplicingModalityMixin:
         gene_counts : pd.DataFrame, optional
             Gene-level counts for SJ denominator (genes × cells).
             If not provided, will use primary gene counts from model (self.counts).
+        cis_gene_counts : pd.DataFrame, optional
+            Counts for the cis gene (genes × cells). Only used for splicing_type='sj'.
+            If not provided and include_cis_gene=True, will be extracted from
+            self.counts_original or self.counts using self.cis_gene.
+        include_cis_gene : bool, default=True
+            If True and cis_gene_counts is not provided, automatically extract
+            cis gene counts from the model to include SJs mapping to the cis gene
+            in the 'sj' modality. This is important when gene_counts excludes
+            the cis gene (common in trans modeling setups).
         min_cell_total : int
             Minimum reads for donor/acceptor
         min_total_exon : int
@@ -82,6 +93,25 @@ class SplicingModalityMixin:
                 raise ValueError("gene_counts must be provided or model must have been initialized with counts")
         else:
             gene_counts_to_use = gene_counts
+
+        # Auto-populate cis_gene_counts if requested and not provided
+        cis_gene_counts_to_use = cis_gene_counts
+        if cis_gene_counts is None and include_cis_gene and 'sj' in splicing_types:
+            cis_gene = getattr(self, 'cis_gene', None)
+            if cis_gene is not None:
+                # Try to get cis gene counts from counts_original or counts
+                counts_source = getattr(self, 'counts_original', None)
+                if counts_source is None:
+                    counts_source = self.counts
+
+                if counts_source is not None:
+                    # Check if cis gene is in gene_counts_to_use
+                    cis_gene_in_gene_counts = cis_gene in gene_counts_to_use.index
+
+                    # Only extract if cis gene is NOT already in gene_counts
+                    if not cis_gene_in_gene_counts and cis_gene in counts_source.index:
+                        cis_gene_counts_to_use = counts_source.loc[[cis_gene]].copy()
+                        print(f"[INFO] Auto-extracted cis gene '{cis_gene}' counts for SJ modality")
 
         # Subset sj_counts to valid cells (cells in model.meta)
         # Allow sj_counts to have extra cells (will be discarded)
@@ -139,6 +169,7 @@ class SplicingModalityMixin:
                 gene_counts=gene_counts_to_use,
                 min_cell_total=min_cell_total,
                 min_total_exon=min_total_exon,
-                cell_names=extracted_cell_names
+                cell_names=extracted_cell_names,
+                cis_gene_counts=cis_gene_counts_to_use if stype == 'sj' else None
             )
             self.add_modality(f'splicing_{stype}', modality, overwrite=overwrite)

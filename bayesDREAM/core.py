@@ -417,6 +417,10 @@ class _BayesDREAMCore(PlottingMixin):
         if guide_covariates_ntc is None:
             guide_covariates_ntc = []
 
+        # Store guide covariates for later use (e.g., subset_cells)
+        self.guide_covariates = guide_covariates
+        self.guide_covariates_ntc = guide_covariates_ntc
+
         # Input checks - different requirements for single-guide vs high MOI mode
         if self.is_high_moi:
             # High MOI mode: do NOT require 'guide' or 'target' in meta
@@ -759,8 +763,7 @@ class _BayesDREAMCore(PlottingMixin):
         # Bookkeeping for results
         self.alpha_x_prefit = None    # from step1
         self.alpha_x_type = None    # from step1
-        # NOTE: alpha_y_prefit is stored per-modality (modality.alpha_y_prefit), not on the model
-        self.alpha_y_type = None    # from step1 (type is still tracked at model level for backward compat)
+        # NOTE: alpha_y_prefit and alpha_y_type are stored per-modality, not on the model
         self.trace_cellline = None    # from step1
         self.trace_x = None          # from step2
         self.trace_y = None          # from step3
@@ -907,23 +910,24 @@ class _BayesDREAMCore(PlottingMixin):
         # Convert alpha_y to tensor
         alpha_y = sample_or_use_point("alpha_y_posterior", alpha_y, self.device)
     
+        # Determine type based on shape
         if is_posterior:
             if not (alpha_y.ndim == 3 and alpha_y.shape[1] == C and alpha_y.shape[2] == T):
                 raise ValueError(
                     f"When it is a posterior, alpha_y is expected to have shape S x C-1 x T, but got {alpha_y.shape}."
                 )
-            self.alpha_y_type = 'posterior'
+            alpha_y_type = 'posterior'
         else:
             if not (alpha_y.ndim == 2 and alpha_y.shape[0] == C and alpha_y.shape[1] == T):
                 raise ValueError(
                     f"When it is a point estimate, alpha_y must have shape C-1 x T, but got {alpha_y.shape}."
                 )
-            self.alpha_y_type = 'point'
-    
+            alpha_y_type = 'point'
+
         # Store in primary modality (not model-level)
         primary_mod = self.get_modality(self.primary_modality)
-        primary_mod.alpha_y_prefit = alpha_y
-        primary_mod.alpha_y_type = self.alpha_y_type
+        primary_mod.alpha_y_prefit = alpha_y  # Uses property to store in distribution-specific attribute
+        primary_mod.alpha_y_type = alpha_y_type
 
     def set_o_x_grouped(
         self,
@@ -1149,16 +1153,18 @@ class _BayesDREAMCore(PlottingMixin):
         self,
         sum_factor_col_old: str = "sum_factor",
         sum_factor_col_refit: str = "sum_factor_new",
-        covariates: list[str] = None, # Technical group covariates (e.g., ["lane", "cell_line"]) or could be empty
+        covariates: list[str] = None,
         n_knots: int = 5,
         degree: int = 3,
-        alpha: float = 0.1
+        alpha: float = 0.1,
+        use_per_group_splines: bool = None,
+        use_log2: bool = True
     ):
         """
         Step 2 of sum factor adjustment: Remove cis gene contribution.
 
         Use AFTER fit_cis() and BEFORE fit_trans().
-        Fits a spline regression: (sum_factor - baseline_ntc) ~ f(x_true)
+        Fits a spline regression: (sum_factor - baseline_ntc) ~ f(log2_x_true)
         Then removes the predicted x_true contribution from sum factors.
 
         This ensures trans modeling isn't confounded by cis expression levels.
@@ -1183,6 +1189,14 @@ class _BayesDREAMCore(PlottingMixin):
             Polynomial degree of spline pieces (default: 3)
         alpha : float
             Ridge regression regularization parameter (default: 0.1)
+        use_per_group_splines : bool, optional
+            If True, fit separate splines per group and merge them in the overlap region.
+            If False, use the original algorithm with NTC baseline.
+            If None (default), auto-detect: use per-group splines if no NTC cells exist.
+        use_log2 : bool, default True
+            If True (recommended), use log2(x_true) for the spline regression.
+            This typically gives better fits since the sum_factor vs x_true relationship
+            is more linear in log space.
 
         Returns
         -------
@@ -1191,19 +1205,28 @@ class _BayesDREAMCore(PlottingMixin):
 
         Notes
         -----
-        Algorithm:
+        Algorithm (with NTC):
         1. Compute baseline NTC sum factor for each covariate group
         2. Compute leftover = sum_factor - baseline_ntc
-        3. Fit spline model: leftover ~ f(x_true)
-        4. Predict x_true contribution: y_pred = model(x_true)
+        3. Fit spline model: leftover ~ f(log2_x_true)
+        4. Predict x_true contribution: y_pred = model(log2_x_true)
         5. Adjusted sum factor = max(0, leftover - y_pred + baseline_ntc)
 
+        Algorithm (without NTC, per-group splines):
+        1. Fit separate spline: sum_factor ~ f(log2_x_true) for each group
+        2. Choose reference group (group with widest x_true range)
+        3. For other groups, compute offset to align with reference in overlap region
+        4. Alignment is weighted by density (KDE) in overlap region
+        5. Apply offsets and compute residuals from aligned splines
+
         Requires:
-        - self.x_true must be set (from fit_cis())
+        - self.x_true (or self.log2_x_true) must be set (from fit_cis())
         - self.x_true_type must be 'posterior' or 'point'
         """
+        from scipy.stats import gaussian_kde
+
         sum_factor_data = self.meta[sum_factor_col_old].values  # shape (N,)
-        
+
         if covariates is None:
             covariates = []
 
@@ -1216,60 +1239,224 @@ class _BayesDREAMCore(PlottingMixin):
             # No grouping, treat all samples as a single group
             groups, group_id = np.array(["all"]), np.zeros(len(self.meta), dtype=int)
             n_groups = 1
-        
+
+        # Get x_true values (optionally in log2 space)
+        if use_log2:
+            # Use log2_x_true if available, otherwise compute from x_true
+            if hasattr(self, 'log2_x_true') and self.log2_x_true is not None:
+                if self.x_true_type == 'posterior':
+                    X_true = self.log2_x_true.mean(dim=0).cpu().numpy()
+                else:
+                    X_true = self.log2_x_true.cpu().numpy() if hasattr(self.log2_x_true, 'cpu') else np.array(self.log2_x_true)
+            else:
+                # Compute log2 from x_true
+                if self.x_true_type == 'posterior':
+                    x_raw = self.x_true.mean(dim=0).cpu().numpy()
+                else:
+                    x_raw = self.x_true.cpu().numpy() if hasattr(self.x_true, 'cpu') else np.array(self.x_true)
+                X_true = np.log2(np.maximum(x_raw, 1e-6))  # Small epsilon to avoid log(0)
+            print(f"[INFO] Using log2(x_true) for spline fitting (range: [{X_true.min():.2f}, {X_true.max():.2f}])")
+        else:
+            if self.x_true_type == 'posterior':
+                X_true = self.x_true.mean(dim=0).cpu().numpy()
+            else:
+                X_true = self.x_true.cpu().numpy() if hasattr(self.x_true, 'cpu') else np.array(self.x_true)
+            print(f"[INFO] Using x_true (linear scale) for spline fitting (range: [{X_true.min():.2f}, {X_true.max():.2f}])")
+
+        # Check if we have NTC cells
+        has_ntc = 'target' in self.meta.columns and (self.meta['target'] == 'ntc').any()
+
+        # Auto-detect whether to use per-group splines
+        if use_per_group_splines is None:
+            use_per_group_splines = not has_ntc and n_groups > 1
+            if use_per_group_splines:
+                print(f"[INFO] No NTC cells detected with {n_groups} groups. Using per-group spline alignment.")
+
+        if use_per_group_splines and n_groups > 1:
+            # =========================================================================
+            # Per-group spline fitting with density-weighted alignment
+            # =========================================================================
+
+            # Step 1: Fit separate splines for each group
+            group_models = {}
+            group_x_ranges = {}
+
+            for grp_idx, grp_name in enumerate(groups):
+                mask = (group_id == grp_idx)
+                x_grp = X_true[mask]
+                y_grp = sum_factor_data[mask]
+
+                if len(x_grp) < 10:
+                    print(f"[WARN] Group '{grp_name}' has only {len(x_grp)} cells, skipping spline fit")
+                    continue
+
+                model = make_pipeline(
+                    SplineTransformer(n_knots=n_knots, degree=degree),
+                    Ridge(alpha=alpha)
+                )
+                model.fit(x_grp.reshape(-1, 1), y_grp)
+
+                group_models[grp_idx] = model
+                group_x_ranges[grp_idx] = (x_grp.min(), x_grp.max())
+
+                print(f"[INFO] Fitted spline for group '{grp_name}': x_true range [{x_grp.min():.2f}, {x_grp.max():.2f}]")
+
+            if len(group_models) < 2:
+                print(f"[WARN] Only {len(group_models)} group(s) with enough cells. Falling back to global spline.")
+                use_per_group_splines = False
+            else:
+                # Step 2: Choose reference group (widest x_true range)
+                ref_grp = max(group_x_ranges.keys(), key=lambda g: group_x_ranges[g][1] - group_x_ranges[g][0])
+                ref_name = groups[ref_grp]
+                print(f"[INFO] Reference group: '{ref_name}' (widest x_true range)")
+
+                # Step 3: Compute offsets for other groups
+                group_offsets = {ref_grp: 0.0}
+
+                for grp_idx in group_models:
+                    if grp_idx == ref_grp:
+                        continue
+
+                    grp_name = groups[grp_idx]
+
+                    # Find overlap region
+                    ref_min, ref_max = group_x_ranges[ref_grp]
+                    grp_min, grp_max = group_x_ranges[grp_idx]
+
+                    overlap_min = max(ref_min, grp_min)
+                    overlap_max = min(ref_max, grp_max)
+
+                    if overlap_min >= overlap_max:
+                        print(f"[WARN] No overlap between '{ref_name}' and '{grp_name}'. Using median offset.")
+                        # Fallback: use median difference at closest points
+                        ref_mask = (group_id == ref_grp)
+                        grp_mask = (group_id == grp_idx)
+                        offset = np.median(sum_factor_data[ref_mask]) - np.median(sum_factor_data[grp_mask])
+                        group_offsets[grp_idx] = offset
+                        continue
+
+                    # Create evaluation grid in overlap region
+                    x_eval = np.linspace(overlap_min, overlap_max, 100)
+
+                    # Predict from both splines
+                    y_ref = group_models[ref_grp].predict(x_eval.reshape(-1, 1))
+                    y_grp = group_models[grp_idx].predict(x_eval.reshape(-1, 1))
+
+                    # Compute density weights using KDE
+                    ref_mask = (group_id == ref_grp)
+                    grp_mask = (group_id == grp_idx)
+
+                    x_ref_data = X_true[ref_mask]
+                    x_grp_data = X_true[grp_mask]
+
+                    # Filter to overlap region for KDE
+                    x_ref_overlap = x_ref_data[(x_ref_data >= overlap_min) & (x_ref_data <= overlap_max)]
+                    x_grp_overlap = x_grp_data[(x_grp_data >= overlap_min) & (x_grp_data <= overlap_max)]
+
+                    if len(x_ref_overlap) < 5 or len(x_grp_overlap) < 5:
+                        print(f"[WARN] Sparse overlap between '{ref_name}' and '{grp_name}'. Using uniform weights.")
+                        weights = np.ones(len(x_eval))
+                    else:
+                        # KDE for both groups
+                        try:
+                            kde_ref = gaussian_kde(x_ref_overlap)
+                            kde_grp = gaussian_kde(x_grp_overlap)
+
+                            # Combined density (geometric mean)
+                            density_ref = kde_ref(x_eval)
+                            density_grp = kde_grp(x_eval)
+                            weights = np.sqrt(density_ref * density_grp)
+                            weights = weights / weights.sum()  # Normalize
+                        except Exception as e:
+                            print(f"[WARN] KDE failed for '{grp_name}': {e}. Using uniform weights.")
+                            weights = np.ones(len(x_eval)) / len(x_eval)
+
+                    # Compute weighted offset: minimize sum(w * (y_ref - (y_grp + offset))^2)
+                    # Optimal offset = sum(w * (y_ref - y_grp)) / sum(w)
+                    offset = np.sum(weights * (y_ref - y_grp)) / np.sum(weights)
+                    group_offsets[grp_idx] = offset
+
+                    print(f"[INFO] Offset for group '{grp_name}': {offset:.4f} (overlap: [{overlap_min:.2f}, {overlap_max:.2f}])")
+
+                # Step 4: Compute predictions with offsets
+                y_pred = np.zeros(len(X_true))
+
+                for grp_idx in group_models:
+                    mask = (group_id == grp_idx)
+                    x_grp = X_true[mask]
+
+                    # Predict and add offset
+                    pred = group_models[grp_idx].predict(x_grp.reshape(-1, 1))
+                    pred_aligned = pred + group_offsets[grp_idx]
+                    y_pred[mask] = pred_aligned
+
+                # Handle any groups without models (too few cells)
+                missing_mask = np.zeros(len(X_true), dtype=bool)
+                for grp_idx in range(n_groups):
+                    if grp_idx not in group_models:
+                        missing_mask |= (group_id == grp_idx)
+
+                if missing_mask.any():
+                    # Use reference group's model for missing groups
+                    y_pred[missing_mask] = group_models[ref_grp].predict(X_true[missing_mask].reshape(-1, 1))
+
+                # Compute residuals (sum_factor - predicted trend)
+                residuals = sum_factor_data - y_pred
+
+                # The adjusted sum factor removes the x_true-dependent trend
+                # We want to keep the baseline level, so add back the global mean predicted value
+                global_baseline = np.mean(y_pred)
+                self.meta[sum_factor_col_refit] = np.maximum(0, residuals + global_baseline)
+
+                print(f"[INFO] Created '{sum_factor_col_refit}' using per-group spline alignment.")
+                return
+
+        # =========================================================================
+        # Original algorithm: NTC-based baseline subtraction
+        # =========================================================================
         baseline_ntc_of_group = np.zeros(n_groups)
         if covariates:
             for grp, grp_name in enumerate(groups):
                 mask_grp = (tech_group == grp_name)
-                # Among that group, pick rows with gene == 'ntc'
-                mask_ntc = (self.meta['target'] == 'ntc') & mask_grp
-            
-                # If a group has no NTC, you must decide on a fallback
-                # For example, use the overall mean or 1.0, or skip that group
+                # Among that group, pick rows with target == 'ntc'
+                if 'target' in self.meta.columns:
+                    mask_ntc = (self.meta['target'] == 'ntc') & mask_grp
+                else:
+                    mask_ntc = np.zeros(len(self.meta), dtype=bool)
+
+                # If a group has no NTC, use fallback
                 if not np.any(mask_ntc):
                     baseline_ntc_of_group[grp] = 1.0  # fallback
                 else:
-                    # The mean of sum_factor_data among the NTC rows
                     baseline_ntc_of_group[grp] = np.mean(sum_factor_data[mask_ntc])
         else:
             grp = 0
-            mask_ntc = (self.meta['target'] == 'ntc')
-            # If a group has no NTC, you must decide on a fallback
-            # For example, use the overall mean or 1.0, or skip that group
+            if 'target' in self.meta.columns:
+                mask_ntc = (self.meta['target'] == 'ntc')
+            else:
+                mask_ntc = np.zeros(len(self.meta), dtype=bool)
+
             if not np.any(mask_ntc):
                 baseline_ntc_of_group[grp] = 1.0  # fallback
             else:
-                # The mean of sum_factor_data among the NTC rows
                 baseline_ntc_of_group[grp] = np.mean(sum_factor_data[mask_ntc])
-        
+
         # leftover_data[i] = sum_factor[i] - baseline_ntc_of_group[group_id[i]]
         leftover_data = sum_factor_data - baseline_ntc_of_group[group_id]
-    
-        # ------------------------------------------------------------------------------
-        # Build a pipeline with a Spline transformer + Linear regression
-        # ------------------------------------------------------------------------------
-        # 'n_knots' is how many spline knots to use;
-        # 'degree' is the polynomial degree of each spline piece.
+
+        # Build spline + ridge pipeline
         model_spline_ridge = make_pipeline(
             SplineTransformer(n_knots=n_knots, degree=degree),
-            Ridge(alpha=alpha)  # alpha > 0 adds penalty
+            Ridge(alpha=alpha)
         )
-        
-        # ------------------------------------------------------------------------------
-        # Fit the model on training data
-        # ------------------------------------------------------------------------------
-        if self.x_true_type == 'posterior':
-            X_true = self.x_true.mean(dim=0)
-        else:
-            X_true = self.x_true
+
+        # Fit the model
         model_spline_ridge.fit(X_true.reshape(-1, 1), leftover_data)
-        
-        # ------------------------------------------------------------------------------
-        # Predict on train & test
-        # ------------------------------------------------------------------------------
+
+        # Predict and adjust
         y_pred = model_spline_ridge.predict(X_true.reshape(-1, 1))
-        self.meta[sum_factor_col_refit] = np.max(np.vstack((leftover_data - y_pred + baseline_ntc_of_group[group_id], np.zeros_like(leftover_data))), axis=0)
-        print(f"[INFO] Created '{sum_factor_col_refit}' in meta with xtrue-based adjustment.")
+        self.meta[sum_factor_col_refit] = np.maximum(0, leftover_data - y_pred + baseline_ntc_of_group[group_id])
+        print(f"[INFO] Created '{sum_factor_col_refit}' in meta with x_true-based adjustment.")
 
     def permute_genes(
         self,
@@ -1543,12 +1730,25 @@ class _BayesDREAMCore(PlottingMixin):
         # Create new model instance
         from .model import bayesDREAM
 
+        # For high MOI mode, reconstruct guide_target DataFrame from guide_targets_dict
+        # This preserves many-to-many guide-target relationships
+        guide_target_df = None
+        if self.is_high_moi and hasattr(self, 'guide_targets_dict') and self.guide_targets_dict:
+            guide_target_rows = []
+            for guide, targets in self.guide_targets_dict.items():
+                for target in targets:
+                    guide_target_rows.append({'guide': guide, 'target': target})
+            if guide_target_rows:
+                guide_target_df = pd.DataFrame(guide_target_rows)
+
         model_new = bayesDREAM(
             meta=meta_subset,
             counts=counts_subset,
             modality_name=self.primary_modality,  # Use same primary modality name
             feature_meta=self.gene_meta.copy() if hasattr(self, 'gene_meta') else None,
             cis_gene=self.cis_gene,
+            guide_covariates=self.guide_covariates,  # Preserve guide covariates
+            guide_covariates_ntc=self.guide_covariates_ntc,  # Preserve NTC guide covariates
             output_dir=self.output_dir,
             label=f"{self.label}_subset",
             device=str(self.device),
@@ -1556,7 +1756,7 @@ class _BayesDREAMCore(PlottingMixin):
             cores=1,
             guide_assignment=guide_assignment_subset,
             guide_meta=self.guide_meta.copy() if self.is_high_moi else None,
-            guide_target=None,  # Already encoded in guide_meta
+            guide_target=guide_target_df,  # Preserve many-to-many guide-target relationships
             require_ntc=False  # Allow subsetting without NTC cells
         )
 
@@ -1581,8 +1781,7 @@ class _BayesDREAMCore(PlottingMixin):
 
             # Copy all fit attributes from original modalities to new modalities
             # (including 'gene' and 'cis' which were recreated during initialization)
-            if self.alpha_y_type is not None:
-                model_new.alpha_y_type = self.alpha_y_type
+            # NOTE: alpha_y_type is now stored per-modality only, not at model level
 
             # Helper to clone tensors
             def _clone_attr(val):
@@ -1591,8 +1790,9 @@ class _BayesDREAMCore(PlottingMixin):
                 return val
 
             # Modality-level attributes to copy from fit_technical and fit_trans
+            # NOTE: alpha_y_prefit is a property, not an attribute - it derives from _mult/_add
             modality_attrs = [
-                'alpha_y_prefit', 'alpha_y_type', 'alpha_y_prefit_mult', 'alpha_y_prefit_add',
+                'alpha_y_type', 'alpha_y_prefit_mult', 'alpha_y_prefit_add',
                 'posterior_samples_technical', 'posterior_samples_trans', 'losses_trans'
             ]
             for mod_name in self.modalities:

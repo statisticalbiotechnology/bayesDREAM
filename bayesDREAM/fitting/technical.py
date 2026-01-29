@@ -1989,16 +1989,15 @@ class TechnicalFitter:
                     all_idx = list(range(full_alpha_y_mult.shape[-1]))
                     trans_idx = [i for i in all_idx if i != cis_idx_orig]
 
-                    # Choose correct correction type based on distribution
+                    # Set distribution-appropriate correction type only
                     # negbinom: multiplicative, others: additive
+                    modality.alpha_y_type = 'posterior'
                     if modality.distribution == 'negbinom':
-                        modality.alpha_y_prefit = full_alpha_y_mult[..., trans_idx]
+                        modality.alpha_y_prefit_mult = full_alpha_y_mult[..., trans_idx]
+                        # Don't set alpha_y_prefit_add for negbinom
                     else:  # binomial, multinomial, normal, studentt use additive
-                        modality.alpha_y_prefit = full_alpha_y_add[..., trans_idx]
-
-                    modality.alpha_y_type        = 'posterior'
-                    modality.alpha_y_prefit_mult = full_alpha_y_mult[..., trans_idx]
-                    modality.alpha_y_prefit_add  = full_alpha_y_add[..., trans_idx]
+                        modality.alpha_y_prefit_add = full_alpha_y_add[..., trans_idx]
+                        # Don't set alpha_y_prefit_mult for additive modalities
 
                     # ========================================
                     # Extract cis gene posterior samples and store in cis modality
@@ -2052,9 +2051,12 @@ class TechnicalFitter:
                     # ========================================
                     # Exclude cis gene from ALL primary modality posterior samples
                     # ========================================
-                    posterior_samples["alpha_y"]      = modality.alpha_y_prefit
-                    posterior_samples["alpha_y_mult"] = modality.alpha_y_prefit_mult
-                    posterior_samples["alpha_y_add"]  = modality.alpha_y_prefit_add
+                    # Store distribution-appropriate alpha_y in posterior samples
+                    posterior_samples["alpha_y"] = modality.alpha_y_prefit  # Property returns correct one
+                    if modality.distribution == 'negbinom':
+                        posterior_samples["alpha_y_mult"] = modality.alpha_y_prefit_mult
+                    else:
+                        posterior_samples["alpha_y_add"] = modality.alpha_y_prefit_add
 
                     # CRITICAL: Also exclude cis gene from ALL raw posterior samples
                     # These raw samples are used for analysis/diagnostics, so they must match gene modality
@@ -2069,22 +2071,25 @@ class TechnicalFitter:
                     print(f"[INFO] Extracted alpha_x for cis '{self.model.cis_gene}' and excluded it from ALL primary modality posterior samples")
                 else:
                     # Cis gene not present after filtering; store as-is
-                    modality.alpha_y_prefit      = posterior_samples["alpha_y"]
-                    modality.alpha_y_type        = 'posterior'
-                    modality.alpha_y_prefit_mult = posterior_samples["alpha_y_mult"]
-                    modality.alpha_y_prefit_add  = posterior_samples["alpha_y_add"]
+                    modality.alpha_y_type = 'posterior'
+                    if modality.distribution == 'negbinom':
+                        modality.alpha_y_prefit_mult = posterior_samples["alpha_y_mult"]
+                    else:
+                        modality.alpha_y_prefit_add = posterior_samples["alpha_y_add"]
             else:
                 # Cis gene not in counts; store as-is
-                modality.alpha_y_prefit      = posterior_samples["alpha_y"]
-                modality.alpha_y_type        = 'posterior'
-                modality.alpha_y_prefit_mult = posterior_samples["alpha_y_mult"]
-                modality.alpha_y_prefit_add  = posterior_samples["alpha_y_add"]
+                modality.alpha_y_type = 'posterior'
+                if modality.distribution == 'negbinom':
+                    modality.alpha_y_prefit_mult = posterior_samples["alpha_y_mult"]
+                else:
+                    modality.alpha_y_prefit_add = posterior_samples["alpha_y_add"]
         else:
             # Not primary modality or no cis gene, store as-is
-            modality.alpha_y_prefit      = posterior_samples["alpha_y"]
-            modality.alpha_y_type        = 'posterior'
-            modality.alpha_y_prefit_mult = posterior_samples["alpha_y_mult"]
-            modality.alpha_y_prefit_add  = posterior_samples["alpha_y_add"]
+            modality.alpha_y_type = 'posterior'
+            if modality.distribution == 'negbinom':
+                modality.alpha_y_prefit_mult = posterior_samples["alpha_y_mult"]
+            else:
+                modality.alpha_y_prefit_add = posterior_samples["alpha_y_add"]
 
         modality.posterior_samples_technical = posterior_samples
 

@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 from .colors import ColorScheme
 
 
-def plot_sum_factor_comparison(model, cis_genes, sf_col1='clustered.sum.factor',
+def plot_sum_factor_comparison(model, cis_gene=None, sf_col1='clustered.sum.factor',
                                sf_col2='sum_factor_adj', color_scheme=None, show=True):
     """
     Plot pairwise comparison of sum factors (e.g., original vs adjusted).
@@ -19,8 +19,8 @@ def plot_sum_factor_comparison(model, cis_genes, sf_col1='clustered.sum.factor',
     ----------
     model : bayesDREAM
         Fitted bayesDREAM model
-    cis_genes : list of str
-        Cis gene names to plot
+    cis_gene : str, optional
+        Cis gene name for title (defaults to model.cis_gene)
     sf_col1 : str
         First sum factor column name
     sf_col2 : str
@@ -37,48 +37,42 @@ def plot_sum_factor_comparison(model, cis_genes, sf_col1='clustered.sum.factor',
     if color_scheme is None:
         color_scheme = ColorScheme()
 
-    n_genes = len(cis_genes)
-    fig, axes = plt.subplots(1, n_genes, figsize=(5*n_genes, 4),
-                            sharex=False, sharey=False)
-    if n_genes == 1:
-        axes = [axes]
+    if cis_gene is None:
+        cis_gene = getattr(model, 'cis_gene', 'cis')
 
-    for ax, cg in zip(axes, cis_genes):
-        if cg not in model:
-            print(f"[{cg}] not found in model, skipping.")
-            continue
+    fig, ax = plt.subplots(figsize=(5, 4))
 
-        df = model[cg].meta.copy()
+    df = model.meta.copy()
 
-        # Filter to positive values
-        if sf_col1 not in df.columns or sf_col2 not in df.columns:
-            print(f"[{cg}] missing sum factor columns, skipping.")
-            continue
+    # Filter to positive values
+    if sf_col1 not in df.columns or sf_col2 not in df.columns:
+        print(f"Missing sum factor columns. Available: {list(df.columns)}")
+        return fig
 
-        df = df[(df[sf_col1] > 0) & (df[sf_col2] > 0)]
+    df = df[(df[sf_col1] > 0) & (df[sf_col2] > 0)]
 
-        # Plot by guide
-        for guide, sub in df.groupby('guide'):
-            color = color_scheme.get_guide_color(guide, 'black')
-            ax.scatter(
-                sub[sf_col1],
-                sub[sf_col2],
-                s=12,
-                alpha=0.8,
-                color=color,
-                label=guide
-            )
+    # Plot by guide
+    for guide, sub in df.groupby('guide'):
+        color = color_scheme.get_guide_color(guide, 'black')
+        ax.scatter(
+            sub[sf_col1],
+            sub[sf_col2],
+            s=12,
+            alpha=0.8,
+            color=color,
+            label=guide
+        )
 
-        # Identity line
-        all_sf = np.concatenate([df[sf_col1].values, df[sf_col2].values])
-        sf_min, sf_max = all_sf.min(), all_sf.max()
-        ax.plot([sf_min, sf_max], [sf_min, sf_max], 'k--', linewidth=1, alpha=0.6)
+    # Identity line
+    all_sf = np.concatenate([df[sf_col1].values, df[sf_col2].values])
+    sf_min, sf_max = all_sf.min(), all_sf.max()
+    ax.plot([sf_min, sf_max], [sf_min, sf_max], 'k--', linewidth=1, alpha=0.6)
 
-        ax.set_xlabel(sf_col1, fontsize=10)
-        ax.set_ylabel(sf_col2, fontsize=10)
-        ax.set_title(f'{cg}: sum factor comparison', fontsize=11)
-        ax.legend(fontsize=8, markerscale=1.2, frameon=False)
-        ax.grid(True, linewidth=0.5, alpha=0.3)
+    ax.set_xlabel(sf_col1, fontsize=10)
+    ax.set_ylabel(sf_col2, fontsize=10)
+    ax.set_title(f'{cis_gene}: sum factor comparison', fontsize=11)
+    ax.legend(fontsize=8, markerscale=1.2, frameon=False)
+    ax.grid(True, linewidth=0.5, alpha=0.3)
 
     plt.tight_layout()
 
