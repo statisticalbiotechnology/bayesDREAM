@@ -337,9 +337,9 @@ class ModelSummarizer:
         - x_ntc: NTC mean for cis gene (same for all trans genes)
         - y_ntc: NTC mean for each trans gene
         - log2fc_at_u0: log2FC value at u=0 (x = x_ntc), i.e., g(0) = log2(y(x_ntc)) - log2(y_ntc)
-        - dg_du_at_u0: First derivative of log2FC at u=0 (dg/du at x = x_ntc)
-        - d2g_du2_at_u0: Second derivative of log2FC at u=0 (d²g/du² at x = x_ntc)
-        - d3g_du3_at_u0: Third derivative of log2FC at u=0 (d³g/du³ at x = x_ntc)
+        - dg_du_at_u0, dg_du_at_u0_lower, dg_du_at_u0_upper: First derivative of log2FC at u=0 with 95% CI
+        - d2g_du2_at_u0, d2g_du2_at_u0_lower, d2g_du2_at_u0_upper: Second derivative at u=0 with 95% CI
+        - d3g_du3_at_u0, d3g_du3_at_u0_lower, d3g_du3_at_u0_upper: Third derivative at u=0 with 95% CI
         - EC50_a_log2fc, EC50_b_log2fc: EC50 in log2FC x-space (log2(K) - log2(x_ntc))
         - inflection_a_log2fc, inflection_b_log2fc: Inflection points in log2FC x-space
         - first_deriv_roots_log2fc, second_deriv_roots_log2fc, third_deriv_roots_log2fc: Roots in log2FC x-space
@@ -1159,6 +1159,69 @@ class ModelSummarizer:
             d2g_du2_at_0 = np.full(n_features, np.nan)
             d3g_du3_at_0 = np.full(n_features, np.nan)
 
+            # CI arrays
+            dg_du_at_0_lower = np.full(n_features, np.nan)
+            dg_du_at_0_upper = np.full(n_features, np.nan)
+            d2g_du2_at_0_lower = np.full(n_features, np.nan)
+            d2g_du2_at_0_upper = np.full(n_features, np.nan)
+            d3g_du3_at_0_lower = np.full(n_features, np.nan)
+            d3g_du3_at_0_upper = np.full(n_features, np.nan)
+
+            # Helper function to compute y(x) given parameters
+            def _hill_value(x, Vmax, K, n):
+                x_safe = max(x, epsilon)
+                K_safe = max(K, epsilon)
+                x_n = x_safe ** n
+                K_n = K_safe ** n
+                return Vmax * x_n / (K_n + x_n + epsilon)
+
+            # Helper to compute all three derivatives at u=0 for given parameters
+            def _compute_derivs_at_u0(alpha_i, beta_i, Vmax_a_i, Vmax_b_i, K_a_i, K_b_i, n_a_i, n_b_i, A_i, y_ntc_i):
+                H_a_at_ntc = _hill_value(x_ntc, Vmax_a_i, K_a_i, n_a_i)
+                H_b_at_ntc = _hill_value(x_ntc, Vmax_b_i, K_b_i, n_b_i)
+                y_at_ntc = A_i + alpha_i * H_a_at_ntc + beta_i * H_b_at_ntc
+
+                if y_at_ntc <= epsilon or y_ntc_i <= epsilon:
+                    return np.nan, np.nan, np.nan
+
+                S_prime = self._additive_hill_first_derivative(
+                    x_ntc, alpha_i, Vmax_a_i, K_a_i, n_a_i,
+                    beta_i, Vmax_b_i, K_b_i, n_b_i
+                )
+                S_double_prime = self._additive_hill_second_derivative(
+                    x_ntc, alpha_i, Vmax_a_i, K_a_i, n_a_i,
+                    beta_i, Vmax_b_i, K_b_i, n_b_i
+                )
+                S_triple_prime = self._additive_hill_third_derivative(
+                    x_ntc, alpha_i, Vmax_a_i, K_a_i, n_a_i,
+                    beta_i, Vmax_b_i, K_b_i, n_b_i
+                )
+
+                # dg/du = x * S'(x) / S(x)
+                dg_du = x_ntc * S_prime / y_at_ntc
+
+                # d²g/du² = ln(2) * [x*S'/S + x²*S''/S - x²*(S'/S)²]
+                term1 = x_ntc * S_prime / y_at_ntc
+                term2 = (x_ntc ** 2) * S_double_prime / y_at_ntc
+                term3 = (x_ntc ** 2) * (S_prime / y_at_ntc) ** 2
+                d2g_du2 = ln2 * (term1 + term2 - term3)
+
+                # d³g/du³
+                S_ratio = S_prime / y_at_ntc
+                S2_ratio = S_double_prime / y_at_ntc
+                S3_ratio = S_triple_prime / y_at_ntc
+                x2 = x_ntc ** 2
+
+                t1 = x2 * S3_ratio
+                t2 = -3 * x2 * S_ratio * S2_ratio
+                t3 = 3 * x_ntc * S2_ratio
+                t4 = 2 * x2 * S_ratio ** 3
+                t5 = -3 * x_ntc * S_ratio ** 2
+                t6 = S_ratio
+                d3g_du3 = ln2 * (t1 + t2 + t3 + t4 + t5 + t6)
+
+                return dg_du, d2g_du2, d3g_du3
+
             for i in range(n_features):
                 # Get mean parameters for this feature
                 alpha_i = alpha_mean[i]
@@ -1173,13 +1236,6 @@ class ModelSummarizer:
                 y_ntc_i = y_ntc[i] if y_ntc is not None else 1.0
 
                 # Compute y(x_ntc) using Hill function
-                def _hill_value(x, Vmax, K, n):
-                    x_safe = max(x, epsilon)
-                    K_safe = max(K, epsilon)
-                    x_n = x_safe ** n
-                    K_n = K_safe ** n
-                    return Vmax * x_n / (K_n + x_n + epsilon)
-
                 H_a_at_ntc = _hill_value(x_ntc, Vmax_a_i, K_a_i, n_a_i)
                 H_b_at_ntc = _hill_value(x_ntc, Vmax_b_i, K_b_i, n_b_i)
                 y_at_ntc = A_i + alpha_i * H_a_at_ntc + beta_i * H_b_at_ntc
@@ -1188,54 +1244,70 @@ class ModelSummarizer:
                 if y_at_ntc > epsilon and y_ntc_i > epsilon:
                     log2fc_at_0[i] = np.log2(y_at_ntc) - np.log2(y_ntc_i)
 
-                    # First derivative S'(x_ntc)
-                    S_prime = self._additive_hill_first_derivative(
-                        x_ntc, alpha_i, Vmax_a_i, K_a_i, n_a_i,
-                        beta_i, Vmax_b_i, K_b_i, n_b_i
+                    # Compute mean derivatives
+                    dg_du, d2g_du2, d3g_du3 = _compute_derivs_at_u0(
+                        alpha_i, beta_i, Vmax_a_i, Vmax_b_i, K_a_i, K_b_i, n_a_i, n_b_i, A_i, y_ntc_i
                     )
+                    dg_du_at_0[i] = dg_du
+                    d2g_du2_at_0[i] = d2g_du2
+                    d3g_du3_at_0[i] = d3g_du3
 
-                    # Second derivative S''(x_ntc)
-                    S_double_prime = self._additive_hill_second_derivative(
-                        x_ntc, alpha_i, Vmax_a_i, K_a_i, n_a_i,
-                        beta_i, Vmax_b_i, K_b_i, n_b_i
-                    )
+                    # Compute CI from posterior samples
+                    if use_posterior_samples and Vmax_a_full.ndim > 1:
+                        n_samples = min(Vmax_a_full.shape[0], 1000)
+                        sample_dg_du = []
+                        sample_d2g_du2 = []
+                        sample_d3g_du3 = []
 
-                    # dg/du = x * S'(x) / S(x) at x = x_ntc
-                    # Note: S(x) = y(x), so we use y_at_ntc
-                    dg_du_at_0[i] = x_ntc * S_prime / y_at_ntc
+                        for s in range(n_samples):
+                            alpha_s = alpha_full[s, i] if alpha_full.ndim > 1 else alpha_full[i]
+                            beta_s = beta_full[s, i] if beta_full.ndim > 1 else beta_full[i]
+                            Vmax_a_s = Vmax_a_full[s, i]
+                            Vmax_b_s = Vmax_b_full[s, i]
+                            K_a_s = K_a_full[s, i]
+                            K_b_s = K_b_full[s, i]
+                            n_a_s = n_a_full[s, i]
+                            n_b_s = n_b_full[s, i]
+                            A_s = A_full[s, i] if A_full.ndim > 1 else A_full[i]
 
-                    # d²g/du² = ln(2) * [x*S'/S + x²*S''/S - x²*(S'/S)²]
-                    term1 = x_ntc * S_prime / y_at_ntc
-                    term2 = (x_ntc ** 2) * S_double_prime / y_at_ntc
-                    term3 = (x_ntc ** 2) * (S_prime / y_at_ntc) ** 2
-                    d2g_du2_at_0[i] = ln2 * (term1 + term2 - term3)
+                            dg, d2g, d3g = _compute_derivs_at_u0(
+                                alpha_s, beta_s, Vmax_a_s, Vmax_b_s, K_a_s, K_b_s, n_a_s, n_b_s, A_s, y_ntc_i
+                            )
+                            if not np.isnan(dg):
+                                sample_dg_du.append(dg)
+                            if not np.isnan(d2g):
+                                sample_d2g_du2.append(d2g)
+                            if not np.isnan(d3g):
+                                sample_d3g_du3.append(d3g)
 
-                    # Third derivative S'''(x_ntc)
-                    S_triple_prime = self._additive_hill_third_derivative(
-                        x_ntc, alpha_i, Vmax_a_i, K_a_i, n_a_i,
-                        beta_i, Vmax_b_i, K_b_i, n_b_i
-                    )
-
-                    # d³g/du³ = ln(2) * (x²*S'''/S - 3x²*S'*S''/S² + 3x*S''/S
-                    #                    + 2x²*S'³/S³ - 3x*S'²/S² + S'/S)
-                    S_ratio = S_prime / y_at_ntc  # S'/S
-                    S2_ratio = S_double_prime / y_at_ntc  # S''/S
-                    S3_ratio = S_triple_prime / y_at_ntc  # S'''/S
-                    x2 = x_ntc ** 2
-
-                    t1 = x2 * S3_ratio                   # x²*S'''/S
-                    t2 = -3 * x2 * S_ratio * S2_ratio    # -3x²*S'*S''/S²
-                    t3 = 3 * x_ntc * S2_ratio            # 3x*S''/S
-                    t4 = 2 * x2 * S_ratio ** 3           # 2x²*S'³/S³
-                    t5 = -3 * x_ntc * S_ratio ** 2       # -3x*S'²/S²
-                    t6 = S_ratio                         # S'/S
-
-                    d3g_du3_at_0[i] = ln2 * (t1 + t2 + t3 + t4 + t5 + t6)
+                        if sample_dg_du:
+                            dg_du_at_0_lower[i] = np.quantile(sample_dg_du, 0.025)
+                            dg_du_at_0_upper[i] = np.quantile(sample_dg_du, 0.975)
+                        if sample_d2g_du2:
+                            d2g_du2_at_0_lower[i] = np.quantile(sample_d2g_du2, 0.025)
+                            d2g_du2_at_0_upper[i] = np.quantile(sample_d2g_du2, 0.975)
+                        if sample_d3g_du3:
+                            d3g_du3_at_0_lower[i] = np.quantile(sample_d3g_du3, 0.025)
+                            d3g_du3_at_0_upper[i] = np.quantile(sample_d3g_du3, 0.975)
+                    else:
+                        # No posterior samples, use mean as lower/upper
+                        dg_du_at_0_lower[i] = dg_du
+                        dg_du_at_0_upper[i] = dg_du
+                        d2g_du2_at_0_lower[i] = d2g_du2
+                        d2g_du2_at_0_upper[i] = d2g_du2
+                        d3g_du3_at_0_lower[i] = d3g_du3
+                        d3g_du3_at_0_upper[i] = d3g_du3
 
             data['log2fc_at_u0'] = log2fc_at_0
             data['dg_du_at_u0'] = dg_du_at_0
+            data['dg_du_at_u0_lower'] = dg_du_at_0_lower
+            data['dg_du_at_u0_upper'] = dg_du_at_0_upper
             data['d2g_du2_at_u0'] = d2g_du2_at_0
+            data['d2g_du2_at_u0_lower'] = d2g_du2_at_0_lower
+            data['d2g_du2_at_u0_upper'] = d2g_du2_at_0_upper
             data['d3g_du3_at_u0'] = d3g_du3_at_0
+            data['d3g_du3_at_u0_lower'] = d3g_du3_at_0_lower
+            data['d3g_du3_at_u0_upper'] = d3g_du3_at_0_upper
 
             # EC50 in log2FC space: log2(K) - log2(x_ntc)
             data['EC50_a_log2fc'] = np.log2(np.maximum(K_a_mean, epsilon)) - log2_x_ntc
@@ -1495,11 +1567,17 @@ class ModelSummarizer:
             denom = (K_n + x_n) ** 2
 
             result = (K_n * Vmax * n * x_nm1) / (denom + epsilon)
-            if np.isnan(result) or np.isinf(result):
-                return 0.0
+            # Handle both scalar and array results
+            if np.isscalar(result):
+                if np.isnan(result) or np.isinf(result):
+                    return 0.0
+            else:
+                result = np.where(np.isnan(result) | np.isinf(result), 0.0, result)
             return result
         except (OverflowError, FloatingPointError):
-            return 0.0
+            if np.isscalar(x):
+                return 0.0
+            return np.zeros_like(x)
 
     def _hill_second_derivative(self, x, Vmax, K, n, epsilon=1e-6):
         """
@@ -1523,11 +1601,17 @@ class ModelSummarizer:
             inner = (n + 1) * x_n - K_n * (n - 1)
 
             result = -(K_n * Vmax * n * x_nm2 * inner) / (denom + epsilon)
-            if np.isnan(result) or np.isinf(result):
-                return 0.0
+            # Handle both scalar and array results
+            if np.isscalar(result):
+                if np.isnan(result) or np.isinf(result):
+                    return 0.0
+            else:
+                result = np.where(np.isnan(result) | np.isinf(result), 0.0, result)
             return result
         except (OverflowError, FloatingPointError):
-            return 0.0
+            if np.isscalar(x):
+                return 0.0
+            return np.zeros_like(x)
 
     def _additive_hill_first_derivative(self, x, alpha, Vmax_a, K_a, n_a,
                                          beta, Vmax_b, K_b, n_b, epsilon=1e-6):
@@ -1580,11 +1664,17 @@ class ModelSummarizer:
             numer = K_n * Vmax * n * x_nm3 * (term1 + term2 + term3)
 
             result = numer / (denom + epsilon)
-            if np.isnan(result) or np.isinf(result):
-                return 0.0
+            # Handle both scalar and array results
+            if np.isscalar(result):
+                if np.isnan(result) or np.isinf(result):
+                    return 0.0
+            else:
+                result = np.where(np.isnan(result) | np.isinf(result), 0.0, result)
             return result
         except (OverflowError, FloatingPointError):
-            return 0.0
+            if np.isscalar(x):
+                return 0.0
+            return np.zeros_like(x)
 
     def _additive_hill_third_derivative(self, x, alpha, Vmax_a, K_a, n_a,
                                          beta, Vmax_b, K_b, n_b, epsilon=1e-6):
