@@ -619,6 +619,59 @@ class PlottingMixin:
         from .xy_plots import plot_xy_data
         return plot_xy_data(self, *args, **kwargs)
 
+    def plot_trans_functions(self, features, **kwargs):
+        """
+        Plot fitted trans functions and/or their derivatives.
+
+        Simple plot showing just the fitted Hill functions (no smoothed data).
+        Useful for comparing multiple genes or viewing function shape with derivatives.
+
+        Parameters
+        ----------
+        features : str or list of str
+            Single feature name or list of feature names to plot
+        modality_name : str, optional
+            Modality name (default: primary modality)
+        show_function : bool
+            Show the fitted function y(x) (default: True)
+        show_first_derivative : bool
+            Show first derivative dy/dx (default: False)
+        show_second_derivative : bool
+            Show second derivative d²y/dx² (default: False)
+        x_range : np.ndarray, optional
+            X values to plot at. If None, uses range from model's x_true.
+        n_points : int
+            Number of points for x_range if auto-generated (default: 200)
+        use_log2_x : bool
+            Use log2(x) for x-axis (default: True)
+        colors : str, list, or dict, optional
+            Colors for each feature
+        figsize : tuple, optional
+            Figure size (width, height)
+        title : str, optional
+            Plot title
+        legend : bool
+            Show legend (default: True)
+
+        Returns
+        -------
+        plt.Figure
+            Matplotlib figure
+
+        Examples
+        --------
+        >>> # Plot function and derivatives for one gene
+        >>> model.plot_trans_functions('TET2', show_first_derivative=True,
+        ...                            show_second_derivative=True)
+
+        >>> # Plot first derivative of multiple genes
+        >>> model.plot_trans_functions(['TET2', 'MYB', 'GFI1B'],
+        ...                            show_function=False,
+        ...                            show_first_derivative=True)
+        """
+        from .xy_plots import plot_trans_functions
+        return plot_trans_functions(self, features, **kwargs)
+
     def plot_parameter_ci_panel(self, params: list, **kwargs):
         """
         Forest plot (dot + whisker CI) for posterior parameters across trans genes.

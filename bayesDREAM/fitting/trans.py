@@ -65,7 +65,7 @@ class TransFitter:
         Vmax_alpha_tensor,
         n_mu_tensor,
         Amean_tensor,
-        p_n_tensor,
+        p_n_logits_tensor,
         epsilon_tensor,
         x_true_sample,
         log2_x_true_sample,
@@ -256,7 +256,7 @@ class TransFitter:
 
             if use_alpha:
                 # Relaxed Bernoulli: alpha ~ (0,1), becomes more discrete as temperature -> 0
-                alpha = pyro.sample("alpha", alpha_dist(temperature=temperature, probs=p_n_tensor))
+                alpha = pyro.sample("alpha", alpha_dist(temperature=temperature, logits=p_n_logits_tensor))
             else:
                 alpha = torch.ones((T,), device=self.model.device)
             
@@ -380,7 +380,7 @@ class TransFitter:
 
                 # Sample all required parameters (additive_hill and nested_hill need second set)
                 if function_type in ['additive_hill', 'nested_hill']:
-                    beta = pyro.sample("beta", alpha_dist(temperature=temperature, probs=p_n_tensor))
+                    beta = pyro.sample("beta", alpha_dist(temperature=temperature, logits=p_n_logits_tensor))
 
                     # n_b: per-category for multinomial, single for others
                     if distribution == 'multinomial' and K is not None:
@@ -1206,6 +1206,9 @@ class TransFitter:
         y_obs_tensor = torch.tensor(y_obs, dtype=torch.float32, device=self.model.device)
         epsilon_tensor = torch.tensor(epsilon, dtype=torch.float32, device=self.model.device)
         p_n_tensor = torch.tensor(p_n, dtype=torch.float32, device=self.model.device)
+        # Pre-compute logits for RelaxedBernoulli (more numerically stable than probs)
+        # logits = log(p / (1-p))
+        p_n_logits_tensor = torch.tensor(np.log(p_n / (1 - p_n)), dtype=torch.float32, device=self.model.device)
 
         # --- robust, finite bounds for n to avoid overflow in x**n ---
         # use the same x_true sample type you use elsewhere
@@ -1754,7 +1757,7 @@ class TransFitter:
                 Vmax_alpha_tensor,
                 n_mu_tensor,
                 Amean_tensor,
-                p_n_tensor,
+                p_n_logits_tensor,
                 epsilon_tensor,
                 x_true_sample = self.model.x_true.mean(dim=0) if self.model.x_true_type == "posterior" else self.model.x_true,
                 log2_x_true_sample = self.model.log2_x_true.mean(dim=0) if self.model.log2_x_true_type == "posterior" else self.model.log2_x_true,
@@ -1812,7 +1815,7 @@ class TransFitter:
             # Simple Adam for Hill-based function types (single_hill, additive_hill, nested_hill)
             guide_y = pyro.infer.autoguide.AutoNormalMessenger(self._model_y)
             hill_lr = 1e-3 if lr is None else lr
-            optimizer = pyro.optim.Adam({"lr": hill_lr})
+            optimizer = pyro.optim.ClippedAdam({"lr": hill_lr, "clip_norm": 10.0})
             svi = pyro.infer.SVI(
                 self._model_y,
                 guide_y,
@@ -1893,7 +1896,7 @@ class TransFitter:
                 Vmax_alpha_tensor,
                 n_mu_tensor,
                 Amean_tensor,
-                p_n_tensor,
+                p_n_logits_tensor,
                 epsilon_tensor,
                 x_true_sample = x_true_sample,
                 log2_x_true_sample = log2_x_true_sample,
@@ -1917,6 +1920,18 @@ class TransFitter:
                 use_lognormal_priors=use_lognormal_priors,
                 use_epsilon=use_epsilon,
             )
+
+            # NaN detection and early stopping
+            if np.isnan(loss) or np.isinf(loss):
+                print(f"[WARNING] NaN/Inf detected in loss at step {step}! Stopping optimization.")
+                print(f"  - temperature: {current_temp}")
+                print(f"  - p_n_tensor: {p_n_tensor.item()}")
+                # Check parameters for NaN
+                for name, value in pyro.get_param_store().items():
+                    if torch.isnan(value).any():
+                        nan_count = torch.isnan(value).sum().item()
+                        print(f"  - Parameter '{name}' has {nan_count} NaN values")
+                break
 
             self.losses_trans.append(loss)
             if step % 1000 == 0:
@@ -1950,7 +1965,7 @@ class TransFitter:
                 "Vmax_alpha_tensor": self._to_cpu(Vmax_alpha_tensor),
                 "n_mu_tensor": self._to_cpu(n_mu_tensor),
                 "Amean_tensor": self._to_cpu(Amean_tensor),
-                "p_n_tensor": self._to_cpu(p_n_tensor),
+                "p_n_logits_tensor": self._to_cpu(p_n_logits_tensor),
                 "epsilon_tensor": self._to_cpu(epsilon_tensor),
                 "x_true_sample": self._to_cpu(self.model.x_true.mean(dim=0) if self.model.x_true_type == "posterior" else self.model.x_true),
                 "log2_x_true_sample": self._to_cpu(self.model.log2_x_true.mean(dim=0) if self.model.log2_x_true_type == "posterior" else self.model.log2_x_true),
@@ -1993,7 +2008,7 @@ class TransFitter:
                 "Vmax_alpha_tensor": Vmax_alpha_tensor,
                 "n_mu_tensor": n_mu_tensor,
                 "Amean_tensor": Amean_tensor,
-                "p_n_tensor": p_n_tensor,
+                "p_n_logits_tensor": p_n_logits_tensor,
                 "epsilon_tensor": epsilon_tensor,
                 "x_true_sample": self.model.x_true.mean(dim=0) if self.model.x_true_type == "posterior" else self.model.x_true,
                 "log2_x_true_sample": self.model.log2_x_true.mean(dim=0) if self.model.log2_x_true_type == "posterior" else self.model.log2_x_true,

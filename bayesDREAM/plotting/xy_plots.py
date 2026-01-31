@@ -767,6 +767,1044 @@ def Hill_based_positive(x, Vmax, A, K, n, epsilon=1e-6):
     return Vmax * (x_n / denominator) + A
 
 
+def Hill_first_derivative(x, Vmax, K, n, epsilon=1e-6):
+    """
+    First derivative of Hill function: d/dx [V * x^n / (K^n + x^n)]
+
+    Formula: (K^n * V * n * x^(n-1)) / (K^n + x^n)^2
+
+    Parameters
+    ----------
+    x : array
+        Input values
+    Vmax : float or array
+        Maximum effect
+    K : float or array
+        Half-maximal concentration
+    n : float or array
+        Hill coefficient
+    epsilon : float
+        Small constant for numerical stability
+
+    Returns
+    -------
+    array
+        First derivative values
+    """
+    x_safe = np.maximum(x, epsilon)
+    K_safe = np.maximum(K, epsilon)
+
+    x_n = np.power(x_safe, n)
+    K_n = np.power(K_safe, n)
+    x_nm1 = np.power(x_safe, n - 1)
+
+    denom = np.power(K_n + x_n, 2)
+
+    return (K_n * Vmax * n * x_nm1) / denom
+
+
+def Hill_second_derivative(x, Vmax, K, n, epsilon=1e-6):
+    """
+    Second derivative of Hill function: d²/dx² [V * x^n / (K^n + x^n)]
+
+    Formula: -(K^n * V * n * x^(n-2) * ((n+1)*x^n - K^n*(n-1))) / (K^n + x^n)^3
+
+    Parameters
+    ----------
+    x : array
+        Input values
+    Vmax : float or array
+        Maximum effect
+    K : float or array
+        Half-maximal concentration
+    n : float or array
+        Hill coefficient
+    epsilon : float
+        Small constant for numerical stability
+
+    Returns
+    -------
+    array
+        Second derivative values
+    """
+    x_safe = np.maximum(x, epsilon)
+    K_safe = np.maximum(K, epsilon)
+
+    x_n = np.power(x_safe, n)
+    K_n = np.power(K_safe, n)
+    x_nm2 = np.power(x_safe, n - 2)
+
+    denom = np.power(K_n + x_n, 3)
+
+    # Numerator: -K^n * V * n * x^(n-2) * ((n+1)*x^n - K^n*(n-1))
+    inner_term = (n + 1) * x_n - K_n * (n - 1)
+    numer = -K_n * Vmax * n * x_nm2 * inner_term
+
+    return numer / denom
+
+
+def log2fc_first_derivative(x, S, dS_dx, epsilon=1e-10):
+    """
+    First derivative in log2FC space: dg/du where g(u) = log2(S(x(u))) - y_ntc.
+
+    With u = log2(x) - x_ntc, we have x = x_ntc * 2^u, so dx/du = x * ln(2).
+
+    Formula: dg/du = x * S'(x) / S(x)
+
+    Parameters
+    ----------
+    x : array
+        Input x values (not log-transformed)
+    S : array
+        Function values S(x)
+    dS_dx : array
+        First derivative S'(x)
+    epsilon : float
+        Small constant for numerical stability
+
+    Returns
+    -------
+    array
+        First derivative in log2FC space
+    """
+    S_safe = np.maximum(np.abs(S), epsilon)
+    return x * dS_dx / S_safe
+
+
+def log2fc_second_derivative(x, S, dS_dx, d2S_dx2, epsilon=1e-10):
+    """
+    Second derivative in log2FC space: d²g/du².
+
+    Formula: d²g/du² = ln(2) * (x * S'/S + x² * S''/S - x² * (S'/S)²)
+
+    Parameters
+    ----------
+    x : array
+        Input x values (not log-transformed)
+    S : array
+        Function values S(x)
+    dS_dx : array
+        First derivative S'(x)
+    d2S_dx2 : array
+        Second derivative S''(x)
+    epsilon : float
+        Small constant for numerical stability
+
+    Returns
+    -------
+    array
+        Second derivative in log2FC space
+    """
+    S_safe = np.maximum(np.abs(S), epsilon)
+    ln2 = np.log(2)
+
+    term1 = x * dS_dx / S_safe
+    term2 = x**2 * d2S_dx2 / S_safe
+    term3 = x**2 * (dS_dx / S_safe)**2
+
+    return ln2 * (term1 + term2 - term3)
+
+
+def Hill_third_derivative(x, Vmax, K, n, epsilon=1e-6):
+    """
+    Third derivative of Hill function: d³/dx³ [V * x^n / (K^n + x^n)]
+
+    Formula: (K^n * V * n * x^(n-3) * ((n²+3n+2)*x^(2n) + (4K^n - 4K^n*n²)*x^n
+             + K^(2n)*n² - 3K^(2n)*n + 2K^(2n))) / (K^n + x^n)^4
+
+    Parameters
+    ----------
+    x : array
+        Input values
+    Vmax : float or array
+        Maximum effect
+    K : float or array
+        Half-maximal concentration
+    n : float or array
+        Hill coefficient
+    epsilon : float
+        Small constant for numerical stability
+
+    Returns
+    -------
+    array
+        Third derivative values
+    """
+    x_safe = np.maximum(x, epsilon)
+    K_safe = np.maximum(K, epsilon)
+
+    x_n = np.power(x_safe, n)
+    x_2n = np.power(x_safe, 2 * n)
+    K_n = np.power(K_safe, n)
+    K_2n = np.power(K_safe, 2 * n)
+    x_nm3 = np.power(x_safe, n - 3)
+
+    denom = np.power(K_n + x_n, 4)
+
+    # Numerator terms
+    # (n² + 3n + 2) * x^(2n)
+    term1 = (n**2 + 3*n + 2) * x_2n
+    # (4K^n - 4K^n*n²) * x^n = 4K^n * (1 - n²) * x^n
+    term2 = 4 * K_n * (1 - n**2) * x_n
+    # K^(2n) * n² - 3K^(2n) * n + 2K^(2n) = K^(2n) * (n² - 3n + 2)
+    term3 = K_2n * (n**2 - 3*n + 2)
+
+    numer = K_n * Vmax * n * x_nm3 * (term1 + term2 + term3)
+
+    return numer / denom
+
+
+def log2fc_third_derivative(x, S, dS_dx, d2S_dx2, d3S_dx3, epsilon=1e-10):
+    """
+    Third derivative in log2FC space: d³g/du³.
+
+    Formula: d³g/du³ = ln(2) * (x²*S'''/S - 3x²*S'*S''/S² + 3x*S''/S
+                                + 2x²*S'³/S³ - 3x*S'²/S² + S'/S)
+
+    Parameters
+    ----------
+    x : array
+        Input x values (not log-transformed)
+    S : array
+        Function values S(x)
+    dS_dx : array
+        First derivative S'(x)
+    d2S_dx2 : array
+        Second derivative S''(x)
+    d3S_dx3 : array
+        Third derivative S'''(x)
+    epsilon : float
+        Small constant for numerical stability
+
+    Returns
+    -------
+    array
+        Third derivative in log2FC space
+    """
+    S_safe = np.maximum(np.abs(S), epsilon)
+    ln2 = np.log(2)
+
+    S_ratio = dS_dx / S_safe
+    S2_ratio = d2S_dx2 / S_safe
+    S3_ratio = d3S_dx3 / S_safe
+
+    # x²*S'''/S
+    term1 = x**2 * S3_ratio
+    # -3x²*S'*S''/S²
+    term2 = -3 * x**2 * S_ratio * S2_ratio
+    # 3x*S''/S
+    term3 = 3 * x * S2_ratio
+    # 2x²*S'³/S³
+    term4 = 2 * x**2 * S_ratio**3
+    # -3x*S'²/S²
+    term5 = -3 * x * S_ratio**2
+    # S'/S
+    term6 = S_ratio
+
+    return ln2 * (term1 + term2 + term3 + term4 + term5 + term6)
+
+
+def predict_trans_derivatives(
+    model,
+    feature: str,
+    x_range: np.ndarray,
+    modality_name: Optional[str] = None
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
+    """
+    Compute first, second, and third derivatives of trans effect function.
+
+    Only supports single_hill and additive_hill function types.
+
+    Parameters
+    ----------
+    model : bayesDREAM
+        Model with fit_trans() completed
+    feature : str
+        Feature name to predict
+    x_range : np.ndarray
+        X values to compute derivatives at
+    modality_name : str, optional
+        Modality name (default: primary modality)
+
+    Returns
+    -------
+    Tuple[np.ndarray or None, np.ndarray or None, np.ndarray or None]
+        (first_derivative, second_derivative, third_derivative) at x_range values,
+        or (None, None, None) if trans model not fitted or unsupported function type
+
+    Raises
+    ------
+    ValueError
+        If function type is not single_hill or additive_hill
+    """
+    # Determine which modality to use
+    if modality_name is None:
+        modality_name = model.primary_modality
+
+    # Check if trans model fitted for this modality
+    if modality_name == model.primary_modality:
+        if not hasattr(model, 'posterior_samples_trans') or model.posterior_samples_trans is None:
+            return None, None, None
+        posterior = model.posterior_samples_trans
+    else:
+        modality = model.get_modality(modality_name)
+        if not hasattr(modality, 'posterior_samples_trans') or modality.posterior_samples_trans is None:
+            return None, None, None
+        posterior = modality.posterior_samples_trans
+
+    # Get baseline A (present in all function types)
+    if 'A' not in posterior:
+        return None, None, None
+
+    A_samples = posterior['A']
+
+    # Get feature list
+    if modality_name == model.primary_modality:
+        feature_list = model.trans_genes if hasattr(model, 'trans_genes') else []
+    else:
+        modality = model.get_modality(modality_name)
+        if modality.feature_meta is not None:
+            feature_list = None
+            for col in ['feature_id', 'feature', 'coord.intron', 'junction_id', 'gene_name', 'gene']:
+                if col in modality.feature_meta.columns:
+                    feature_list = modality.feature_meta[col].tolist()
+                    break
+            if feature_list is None:
+                feature_list = modality.feature_meta.index.tolist()
+        else:
+            return None, None, None
+
+    # Get dimensions
+    if hasattr(A_samples, 'mean'):
+        A_mean = A_samples.mean(dim=0)
+        if A_mean.ndim > 1:
+            A_mean = A_mean.squeeze(0)
+        n_genes_posterior = A_mean.shape[0]
+    else:
+        A_mean = A_samples.mean(axis=0)
+        if A_mean.ndim > 1:
+            A_mean = A_mean.squeeze(0)
+        n_genes_posterior = A_mean.shape[0]
+
+    if n_genes_posterior != len(feature_list):
+        return None, None, None
+
+    if feature not in feature_list:
+        return None, None, None
+
+    feature_idx = feature_list.index(feature)
+
+    # Helper function to extract parameter value
+    def _extract_param(param_samples, feature_idx):
+        if hasattr(param_samples, 'mean'):
+            param_mean = param_samples.mean(dim=0)
+        else:
+            param_mean = param_samples.mean(axis=0)
+        if param_mean.ndim > 1:
+            param_mean = param_mean.squeeze(0)
+        val = param_mean[feature_idx]
+        return val.item() if hasattr(val, 'item') else val
+
+    # Check function type and compute derivatives
+    if 'Vmax_a' in posterior and 'Vmax_b' in posterior:
+        # ===== ADDITIVE HILL =====
+        try:
+            alpha = _extract_param(posterior['alpha'], feature_idx)
+            beta = _extract_param(posterior['beta'], feature_idx)
+            Vmax_a = _extract_param(posterior['Vmax_a'], feature_idx)
+            Vmax_b = _extract_param(posterior['Vmax_b'], feature_idx)
+            K_a = _extract_param(posterior['K_a'], feature_idx)
+            K_b = _extract_param(posterior['K_b'], feature_idx)
+            n_a = _extract_param(posterior['n_a'], feature_idx)
+            n_b = _extract_param(posterior['n_b'], feature_idx)
+
+            # First derivatives
+            dHill_a = Hill_first_derivative(x_range, Vmax=Vmax_a, K=K_a, n=n_a)
+            dHill_b = Hill_first_derivative(x_range, Vmax=Vmax_b, K=K_b, n=n_b)
+            first_deriv = alpha * dHill_a + beta * dHill_b
+
+            # Second derivatives
+            d2Hill_a = Hill_second_derivative(x_range, Vmax=Vmax_a, K=K_a, n=n_a)
+            d2Hill_b = Hill_second_derivative(x_range, Vmax=Vmax_b, K=K_b, n=n_b)
+            second_deriv = alpha * d2Hill_a + beta * d2Hill_b
+
+            # Third derivatives
+            d3Hill_a = Hill_third_derivative(x_range, Vmax=Vmax_a, K=K_a, n=n_a)
+            d3Hill_b = Hill_third_derivative(x_range, Vmax=Vmax_b, K=K_b, n=n_b)
+            third_deriv = alpha * d3Hill_a + beta * d3Hill_b
+
+            return first_deriv, second_deriv, third_deriv
+
+        except (KeyError, IndexError, AttributeError):
+            return None, None, None
+
+    elif 'upper_limit' in posterior and 'Vmax_a' in posterior and 'Vmax_b' in posterior:
+        # ===== ADDITIVE HILL (binomial/multinomial) =====
+        try:
+            alpha = _extract_param(posterior['alpha'], feature_idx)
+            beta = _extract_param(posterior['beta'], feature_idx)
+            Vmax_a = _extract_param(posterior['Vmax_a'], feature_idx)
+            Vmax_b = _extract_param(posterior['Vmax_b'], feature_idx)
+            K_a = _extract_param(posterior['K_a'], feature_idx)
+            K_b = _extract_param(posterior['K_b'], feature_idx)
+            n_a = _extract_param(posterior['n_a'], feature_idx)
+            n_b = _extract_param(posterior['n_b'], feature_idx)
+
+            # First derivatives
+            dHill_a = Hill_first_derivative(x_range, Vmax=Vmax_a, K=K_a, n=n_a)
+            dHill_b = Hill_first_derivative(x_range, Vmax=Vmax_b, K=K_b, n=n_b)
+            first_deriv = alpha * dHill_a + beta * dHill_b
+
+            # Second derivatives
+            d2Hill_a = Hill_second_derivative(x_range, Vmax=Vmax_a, K=K_a, n=n_a)
+            d2Hill_b = Hill_second_derivative(x_range, Vmax=Vmax_b, K=K_b, n=n_b)
+            second_deriv = alpha * d2Hill_a + beta * d2Hill_b
+
+            # Third derivatives
+            d3Hill_a = Hill_third_derivative(x_range, Vmax=Vmax_a, K=K_a, n=n_a)
+            d3Hill_b = Hill_third_derivative(x_range, Vmax=Vmax_b, K=K_b, n=n_b)
+            third_deriv = alpha * d3Hill_a + beta * d3Hill_b
+
+            return first_deriv, second_deriv, third_deriv
+
+        except (KeyError, IndexError, AttributeError):
+            return None, None, None
+
+    elif 'Vmax' in posterior and 'K' in posterior and 'n' in posterior:
+        # ===== SINGLE HILL =====
+        try:
+            Vmax = _extract_param(posterior['Vmax'], feature_idx)
+            K = _extract_param(posterior['K'], feature_idx)
+            n = _extract_param(posterior['n'], feature_idx)
+
+            # First derivative
+            first_deriv = Hill_first_derivative(x_range, Vmax=Vmax, K=K, n=n)
+
+            # Second derivative
+            second_deriv = Hill_second_derivative(x_range, Vmax=Vmax, K=K, n=n)
+
+            # Third derivative
+            third_deriv = Hill_third_derivative(x_range, Vmax=Vmax, K=K, n=n)
+
+            return first_deriv, second_deriv, third_deriv
+
+        except (KeyError, IndexError, AttributeError):
+            return None, None, None
+
+    elif 'theta' in posterior:
+        # ===== POLYNOMIAL - NOT SUPPORTED =====
+        raise ValueError(
+            "Derivative plotting not supported for polynomial function type. "
+            "Only single_hill and additive_hill are supported."
+        )
+
+    else:
+        # Unknown function type
+        return None, None, None
+
+
+def predict_trans_log2fc(
+    model,
+    feature: str,
+    x_range: np.ndarray,
+    modality_name: Optional[str] = None,
+    return_derivatives: bool = True
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
+    """
+    Compute trans effect function and derivatives in log2FC space.
+
+    Transforms:
+    - x-axis: u = log2(x) - log2(x_ntc)  (cis gene log2FC)
+    - y-axis: g(u) = log2(S(x(u))) - log2(y_ntc)  (trans gene log2FC)
+
+    Where x_ntc is the NTC mean for the cis gene, and y_ntc is the NTC mean for the trans gene.
+
+    Derivative formulas:
+    - dg/du = x * S'(x) / S(x)
+    - d²g/du² = ln(2) * (x * S'/S + x² * S''/S - x² * (S'/S)²)
+    - d³g/du³ = ln(2) * (x²*S'''/S - 3x²*S'*S''/S² + 3x*S''/S + 2x²*S'³/S³ - 3x*S'²/S² + S'/S)
+
+    Parameters
+    ----------
+    model : bayesDREAM
+        Model with fit_trans() completed and posterior_samples_technical available
+    feature : str
+        Feature name (trans gene) to predict
+    x_range : np.ndarray
+        X values (cis expression, NOT log-transformed)
+    modality_name : str, optional
+        Modality name (default: primary modality)
+    return_derivatives : bool
+        Whether to compute and return derivatives (default: True)
+
+    Returns
+    -------
+    Tuple of (y_log2fc, u_range, first_deriv_log2fc, second_deriv_log2fc, third_deriv_log2fc)
+        - y_log2fc: log2FC of trans gene relative to NTC
+        - u_range: log2FC of cis gene relative to NTC
+        - first_deriv_log2fc: dg/du (None if return_derivatives=False)
+        - second_deriv_log2fc: d²g/du² (None if return_derivatives=False)
+        - third_deriv_log2fc: d³g/du³ (None if return_derivatives=False)
+        All are None if computation fails
+    """
+    # Get S(x) - the function values
+    y_pred = predict_trans_function(model, feature, x_range, modality_name=modality_name)
+    if y_pred is None:
+        return None, None, None, None, None
+
+    # Get NTC means
+    # Cis NTC (for x-axis transformation)
+    cis_mod = model.get_modality('cis')
+    if cis_mod is None or not hasattr(cis_mod, 'posterior_samples_technical'):
+        return None, None, None, None, None
+
+    cis_mu_ntc = cis_mod.posterior_samples_technical.get('mu_ntc', None)
+    if cis_mu_ntc is None:
+        return None, None, None, None, None
+
+    if hasattr(cis_mu_ntc, 'mean'):
+        x_ntc = cis_mu_ntc.mean(dim=0).squeeze().cpu().numpy()
+    else:
+        x_ntc = np.mean(cis_mu_ntc, axis=0).squeeze()
+
+    # Handle case where x_ntc is a scalar or 1-element array
+    if np.ndim(x_ntc) == 0:
+        x_ntc = float(x_ntc)
+    elif len(x_ntc) == 1:
+        x_ntc = float(x_ntc[0])
+    else:
+        x_ntc = float(x_ntc[0])  # Take first if multiple (shouldn't happen for cis)
+
+    # Trans NTC (for y-axis transformation)
+    if modality_name is None:
+        modality_name = model.primary_modality
+    trans_mod = model.get_modality(modality_name)
+
+    if not hasattr(trans_mod, 'posterior_samples_technical'):
+        return None, None, None, None, None
+
+    trans_mu_ntc = trans_mod.posterior_samples_technical.get('mu_ntc', None)
+    if trans_mu_ntc is None:
+        return None, None, None, None, None
+
+    if hasattr(trans_mu_ntc, 'mean'):
+        y_ntc_all = trans_mu_ntc.mean(dim=0).squeeze().cpu().numpy()
+    else:
+        y_ntc_all = np.mean(trans_mu_ntc, axis=0).squeeze()
+
+    # Find the feature index to get the right NTC
+    feature_list = trans_mod.feature_meta.index.tolist() if trans_mod.feature_meta is not None else []
+    if feature not in feature_list:
+        # Try other column names
+        for col in ['feature_id', 'feature', 'gene_name', 'gene']:
+            if trans_mod.feature_meta is not None and col in trans_mod.feature_meta.columns:
+                feature_list = trans_mod.feature_meta[col].tolist()
+                if feature in feature_list:
+                    break
+
+    if feature not in feature_list:
+        return None, None, None, None, None
+
+    feature_idx = feature_list.index(feature)
+    y_ntc = float(y_ntc_all[feature_idx]) if np.ndim(y_ntc_all) > 0 else float(y_ntc_all)
+
+    # Compute log2FC transformations
+    epsilon = 1e-10
+    u_range = np.log2(np.maximum(x_range, epsilon)) - np.log2(max(x_ntc, epsilon))
+    y_log2fc = np.log2(np.maximum(y_pred, epsilon)) - np.log2(max(y_ntc, epsilon))
+
+    if not return_derivatives:
+        return y_log2fc, u_range, None, None, None
+
+    # Get S'(x), S''(x), and S'''(x)
+    first_deriv, second_deriv, third_deriv = predict_trans_derivatives(model, feature, x_range, modality_name=modality_name)
+    if first_deriv is None:
+        return y_log2fc, u_range, None, None, None
+
+    # Compute log2FC derivatives
+    first_deriv_log2fc = log2fc_first_derivative(x_range, y_pred, first_deriv, epsilon)
+    second_deriv_log2fc = log2fc_second_derivative(x_range, y_pred, first_deriv, second_deriv, epsilon)
+    third_deriv_log2fc = log2fc_third_derivative(x_range, y_pred, first_deriv, second_deriv, third_deriv, epsilon)
+
+    return y_log2fc, u_range, first_deriv_log2fc, second_deriv_log2fc, third_deriv_log2fc
+
+
+def predict_trans_log2fc_samples(
+    model,
+    feature: str,
+    x_range: np.ndarray,
+    modality_name: Optional[str] = None,
+    max_samples: Optional[int] = None
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """
+    Compute trans effect function in log2FC space for all posterior samples.
+
+    Parameters
+    ----------
+    model : bayesDREAM
+        Model with fit_trans() completed
+    feature : str
+        Feature name (trans gene) to predict
+    x_range : np.ndarray
+        X values (cis expression, NOT log-transformed)
+    modality_name : str, optional
+        Modality name (default: primary modality)
+    max_samples : int, optional
+        Maximum number of samples to return
+
+    Returns
+    -------
+    Tuple of (y_log2fc_samples, u_range)
+        - y_log2fc_samples: [n_samples, n_points] log2FC predictions for each posterior sample
+        - u_range: [n_points] log2FC of cis gene relative to NTC
+        Both are None if computation fails
+    """
+    # Get all posterior samples for S(x)
+    y_samples = predict_trans_function_samples(
+        model, feature, x_range, modality_name=modality_name, max_samples=max_samples
+    )
+    if y_samples is None:
+        return None, None
+
+    # Get NTC means (same logic as predict_trans_log2fc)
+    cis_mod = model.get_modality('cis')
+    if cis_mod is None or not hasattr(cis_mod, 'posterior_samples_technical'):
+        return None, None
+
+    cis_mu_ntc = cis_mod.posterior_samples_technical.get('mu_ntc', None)
+    if cis_mu_ntc is None:
+        return None, None
+
+    if hasattr(cis_mu_ntc, 'mean'):
+        x_ntc = cis_mu_ntc.mean(dim=0).squeeze().cpu().numpy()
+    else:
+        x_ntc = np.mean(cis_mu_ntc, axis=0).squeeze()
+
+    if np.ndim(x_ntc) == 0:
+        x_ntc = float(x_ntc)
+    elif len(x_ntc) == 1:
+        x_ntc = float(x_ntc[0])
+    else:
+        x_ntc = float(x_ntc[0])
+
+    # Trans NTC
+    if modality_name is None:
+        modality_name = model.primary_modality
+    trans_mod = model.get_modality(modality_name)
+
+    if not hasattr(trans_mod, 'posterior_samples_technical'):
+        return None, None
+
+    trans_mu_ntc = trans_mod.posterior_samples_technical.get('mu_ntc', None)
+    if trans_mu_ntc is None:
+        return None, None
+
+    if hasattr(trans_mu_ntc, 'mean'):
+        y_ntc_all = trans_mu_ntc.mean(dim=0).squeeze().cpu().numpy()
+    else:
+        y_ntc_all = np.mean(trans_mu_ntc, axis=0).squeeze()
+
+    # Find feature index
+    feature_list = trans_mod.feature_meta.index.tolist() if trans_mod.feature_meta is not None else []
+    if feature not in feature_list:
+        for col in ['feature_id', 'feature', 'gene_name', 'gene']:
+            if trans_mod.feature_meta is not None and col in trans_mod.feature_meta.columns:
+                feature_list = trans_mod.feature_meta[col].tolist()
+                if feature in feature_list:
+                    break
+
+    if feature not in feature_list:
+        return None, None
+
+    feature_idx = feature_list.index(feature)
+    y_ntc = float(y_ntc_all[feature_idx]) if np.ndim(y_ntc_all) > 0 else float(y_ntc_all)
+
+    # Compute log2FC transformations for all samples
+    epsilon = 1e-10
+    u_range = np.log2(np.maximum(x_range, epsilon)) - np.log2(max(x_ntc, epsilon))
+
+    # Transform each sample: log2(y_sample) - log2(y_ntc)
+    y_log2fc_samples = np.log2(np.maximum(y_samples, epsilon)) - np.log2(max(y_ntc, epsilon))
+
+    return y_log2fc_samples, u_range
+
+
+def plot_trans_functions(
+    model,
+    features: Union[str, List[str]],
+    modality_name: Optional[str] = None,
+    show_function: bool = True,
+    show_first_derivative: bool = False,
+    show_second_derivative: bool = False,
+    x_range: Optional[np.ndarray] = None,
+    n_points: int = 2000,
+    use_log2_x: bool = True,
+    use_log2fc: bool = False,
+    show_posterior_samples: bool = False,
+    show_ci: bool = False,
+    posterior_alpha: float = 0.1,
+    ci_alpha: float = 0.3,
+    max_posterior_samples: int = 1000,
+    colors: Optional[Union[str, List[str], Dict[str, str]]] = None,
+    alpha: float = 0.8,
+    linewidth: float = 1.5,
+    figsize: Optional[Tuple[float, float]] = None,
+    title: Optional[str] = None,
+    legend: bool = True,
+    ax: Optional[plt.Axes] = None,
+) -> plt.Figure:
+    """
+    Plot fitted trans functions and/or their derivatives.
+
+    Simple plot showing just the fitted Hill functions (no smoothed data).
+    Useful for comparing multiple genes or viewing function shape with derivatives.
+
+    Parameters
+    ----------
+    model : bayesDREAM
+        Model with fit_trans() completed
+    features : str or list of str
+        Single feature name or list of feature names to plot
+    modality_name : str, optional
+        Modality name (default: primary modality)
+    show_function : bool
+        Show the fitted function y(x) (default: True)
+    show_first_derivative : bool
+        Show first derivative dy/dx (default: False)
+    show_second_derivative : bool
+        Show second derivative d²y/dx² (default: False)
+    x_range : np.ndarray, optional
+        X values to plot at. If None, generates evenly spaced points in log2 space
+        from model's x_true range.
+    n_points : int
+        Number of points for x_range if auto-generated (default: 2000).
+        Points are evenly spaced in log2 space for smooth curves on log-log plots.
+    use_log2_x : bool
+        Use log2(x) for x-axis (default: True). Ignored if use_log2fc=True.
+    use_log2fc : bool
+        If True, plot in log2 fold-change space relative to NTC (default: False).
+        - x-axis: log2FC = log2(x) - log2(x_ntc) where x_ntc is cis gene NTC mean
+        - y-axis: log2FC = log2(y) - log2(y_ntc) where y_ntc is trans gene NTC mean
+        - Derivatives: dg/du and d²g/du² (chain rule transformed)
+        Requires posterior_samples_technical to be available for both cis and trans modalities.
+    show_posterior_samples : bool
+        If True, plot individual posterior fits behind the mean line (default: False).
+        Each posterior sample is plotted with transparency set by `posterior_alpha`.
+    show_ci : bool
+        If True, show 95% credible interval band around the mean line (default: False).
+        The CI is computed at each x point and shown as a shaded region.
+    posterior_alpha : float
+        Transparency for individual posterior sample lines (default: 0.1).
+        Only used when show_posterior_samples=True.
+    ci_alpha : float
+        Transparency for the 95% CI shaded region (default: 0.3).
+        Only used when show_ci=True.
+    max_posterior_samples : int
+        Maximum number of posterior samples to plot (default: 1000).
+        Only used when show_posterior_samples=True.
+    colors : str, list, or dict, optional
+        Colors for each feature. Can be:
+        - Single color string (all features same color)
+        - List of colors (one per feature)
+        - Dict mapping feature names to colors
+        If None, uses default color cycle.
+    alpha : float
+        Line transparency (default: 0.8)
+    linewidth : float
+        Line width (default: 1.5)
+    figsize : tuple, optional
+        Figure size (width, height). Auto-sized if None.
+    title : str, optional
+        Plot title. If None, auto-generated.
+    legend : bool
+        Show legend (default: True)
+    ax : plt.Axes, optional
+        Existing axes to plot on. If None, creates new figure.
+
+    Returns
+    -------
+    plt.Figure
+        Matplotlib figure
+
+    Raises
+    ------
+    ValueError
+        If function type is polynomial (derivatives not supported)
+        If no features could be plotted
+        If use_log2fc=True but NTC means not available
+
+    Examples
+    --------
+    >>> # Plot function and derivatives for one gene
+    >>> model.plot_trans_functions('TET2', show_first_derivative=True,
+    ...                            show_second_derivative=True)
+
+    >>> # Plot first derivative of multiple genes
+    >>> model.plot_trans_functions(['TET2', 'MYB', 'GFI1B'],
+    ...                            show_function=False,
+    ...                            show_first_derivative=True)
+
+    >>> # Plot all non-monotonic genes (genes where derivative changes sign)
+    >>> non_monotonic = [g for g in model.trans_genes if is_non_monotonic(model, g)]
+    >>> model.plot_trans_functions(non_monotonic, show_first_derivative=True)
+    """
+    import matplotlib.pyplot as plt
+
+    # Ensure at least one thing to plot
+    if not (show_function or show_first_derivative or show_second_derivative):
+        raise ValueError("At least one of show_function, show_first_derivative, "
+                        "show_second_derivative must be True")
+
+    # Convert single feature to list
+    if isinstance(features, str):
+        features = [features]
+
+    # Determine modality
+    if modality_name is None:
+        modality_name = model.primary_modality
+
+    # Get x_range from model if not provided
+    if x_range is None:
+        if hasattr(model, 'x_true') and model.x_true is not None:
+            x_true_np = model.x_true.cpu().numpy() if hasattr(model.x_true, 'cpu') else np.array(model.x_true)
+            if x_true_np.ndim > 1:
+                x_true_np = x_true_np.mean(axis=0)  # Average over posterior samples
+            x_min = max(x_true_np.min(), 1e-6)  # Avoid log(0)
+            x_max = x_true_np.max()
+            # Evenly spaced points in log2 space for smooth curve on log-log plot
+            log2_min = np.log2(x_min)
+            log2_max = np.log2(x_max)
+            x_range = 2 ** np.linspace(log2_min, log2_max, n_points)
+        else:
+            raise ValueError("x_range must be provided if model.x_true is not set")
+
+    # Setup colors
+    if colors is None:
+        color_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
+        colors_list = [color_cycle[i % len(color_cycle)] for i in range(len(features))]
+    elif isinstance(colors, str):
+        colors_list = [colors] * len(features)
+    elif isinstance(colors, dict):
+        colors_list = [colors.get(f, 'gray') for f in features]
+    else:
+        colors_list = list(colors)
+
+    # Count how many subplots we need
+    n_plots = sum([show_function, show_first_derivative, show_second_derivative])
+
+    # Create figure if no axes provided
+    if ax is None:
+        if figsize is None:
+            figsize = (5 * n_plots, 4)
+        fig, axes = plt.subplots(1, n_plots, figsize=figsize, squeeze=False)
+        axes = axes[0]  # Flatten to 1D
+    else:
+        if n_plots > 1:
+            raise ValueError("Cannot use single ax with multiple subplots. "
+                           "Pass ax=None to create new figure.")
+        fig = ax.figure
+        axes = [ax]
+
+    # Track which plot index we're on
+    plot_idx = 0
+    plot_types = []
+
+    # Set up plot types with appropriate labels
+    if use_log2fc:
+        if show_function:
+            plot_types.append(('function', 'log₂FC (y)'))
+        if show_first_derivative:
+            plot_types.append(('first_deriv', "dg/du"))
+        if show_second_derivative:
+            plot_types.append(('second_deriv', "d²g/du²"))
+    else:
+        if show_function:
+            plot_types.append(('function', 'y'))
+        if show_first_derivative:
+            plot_types.append(('first_deriv', "dy/dx"))
+        if show_second_derivative:
+            plot_types.append(('second_deriv', "d²y/dx²"))
+
+    # Track successful plots
+    successful_features = []
+
+    for feat_idx, feature in enumerate(features):
+        color = colors_list[feat_idx % len(colors_list)]
+
+        # Get function and derivatives (mean values)
+        try:
+            if use_log2fc:
+                # Get log2FC transformed values
+                y_log2fc, u_range, first_deriv, second_deriv, third_deriv = predict_trans_log2fc(
+                    model, feature, x_range, modality_name=modality_name, return_derivatives=True
+                )
+                if y_log2fc is None:
+                    continue
+                y_pred = y_log2fc
+                x_plot_feat = u_range  # Use u (log2FC of x) for this feature
+            else:
+                y_pred = predict_trans_function(model, feature, x_range, modality_name=modality_name)
+                first_deriv, second_deriv, third_deriv = predict_trans_derivatives(model, feature, x_range, modality_name=modality_name)
+                # X values for plotting (same for all features when not using log2fc)
+                x_plot_feat = np.log2(x_range) if use_log2_x else x_range
+        except ValueError as e:
+            # Polynomial not supported
+            raise e
+
+        if y_pred is None and first_deriv is None:
+            continue  # Skip features that couldn't be computed
+
+        successful_features.append(feature)
+
+        # Get posterior samples if needed for uncertainty visualization
+        y_samples = None
+        first_deriv_samples = None
+        second_deriv_samples = None
+        third_deriv_samples = None
+
+        if show_posterior_samples or show_ci:
+            # Get derivative samples if we need them
+            need_derivs = show_first_derivative or show_second_derivative
+
+            if use_log2fc:
+                # Get function samples in log2FC space
+                if show_function:
+                    y_log2fc_samples, _ = predict_trans_log2fc_samples(
+                        model, feature, x_range,
+                        modality_name=modality_name,
+                        max_samples=max_posterior_samples
+                    )
+                    y_samples = y_log2fc_samples
+
+                # For derivatives in log2FC mode, we need S(x), S'(x), S''(x), S'''(x) samples
+                # then transform using chain rule
+                if need_derivs:
+                    S_samples, dS_samples, d2S_samples, d3S_samples = predict_trans_derivatives_samples(
+                        model, feature, x_range,
+                        modality_name=modality_name,
+                        max_samples=max_posterior_samples
+                    )
+                    if S_samples is not None and dS_samples is not None:
+                        # Transform derivatives to log2FC space using chain rule
+                        # dg/du = x * S'(x) / S(x)
+                        # d²g/du² = ln(2) * (x * S'/S + x² * S''/S - x² * (S'/S)²)
+                        epsilon = 1e-10
+                        S_safe = np.maximum(np.abs(S_samples), epsilon)
+                        ln2 = np.log(2)
+
+                        # First derivative: dg/du = x * S'(x) / S(x)
+                        first_deriv_samples = x_range[np.newaxis, :] * dS_samples / S_safe
+
+                        # Second derivative: d²g/du² = ln(2) * (x*S'/S + x²*S''/S - x²*(S'/S)²)
+                        if d2S_samples is not None:
+                            term1 = x_range[np.newaxis, :] * dS_samples / S_safe
+                            term2 = (x_range[np.newaxis, :] ** 2) * d2S_samples / S_safe
+                            term3 = (x_range[np.newaxis, :] ** 2) * (dS_samples / S_safe) ** 2
+                            second_deriv_samples = ln2 * (term1 + term2 - term3)
+            else:
+                # Non-log2FC mode
+                if show_function:
+                    y_samples = predict_trans_function_samples(
+                        model, feature, x_range,
+                        modality_name=modality_name,
+                        max_samples=max_posterior_samples
+                    )
+
+                if need_derivs:
+                    _, first_deriv_samples, second_deriv_samples, third_deriv_samples = predict_trans_derivatives_samples(
+                        model, feature, x_range,
+                        modality_name=modality_name,
+                        max_samples=max_posterior_samples
+                    )
+
+        # Plot each requested type
+        for plot_i, (plot_type, ylabel) in enumerate(plot_types):
+            ax_curr = axes[plot_i]
+
+            if plot_type == 'function' and y_pred is not None:
+                # Plot uncertainty visualization first (so mean line is on top)
+                if y_samples is not None:
+                    if show_posterior_samples:
+                        for s in range(y_samples.shape[0]):
+                            ax_curr.plot(x_plot_feat, y_samples[s, :], color=color,
+                                       alpha=posterior_alpha, linewidth=0.5)
+                    if show_ci:
+                        y_lower = np.percentile(y_samples, 2.5, axis=0)
+                        y_upper = np.percentile(y_samples, 97.5, axis=0)
+                        ax_curr.fill_between(x_plot_feat, y_lower, y_upper,
+                                           color=color, alpha=ci_alpha, linewidth=0)
+
+                # Plot mean line on top
+                ax_curr.plot(x_plot_feat, y_pred, color=color, alpha=alpha,
+                           linewidth=linewidth, label=feature if feat_idx < 20 else None)
+
+            elif plot_type == 'first_deriv' and first_deriv is not None:
+                # Plot uncertainty for first derivative
+                if first_deriv_samples is not None:
+                    if show_posterior_samples:
+                        for s in range(first_deriv_samples.shape[0]):
+                            ax_curr.plot(x_plot_feat, first_deriv_samples[s, :], color=color,
+                                       alpha=posterior_alpha, linewidth=0.5)
+                    if show_ci:
+                        d1_lower = np.percentile(first_deriv_samples, 2.5, axis=0)
+                        d1_upper = np.percentile(first_deriv_samples, 97.5, axis=0)
+                        ax_curr.fill_between(x_plot_feat, d1_lower, d1_upper,
+                                           color=color, alpha=ci_alpha, linewidth=0)
+
+                ax_curr.plot(x_plot_feat, first_deriv, color=color, alpha=alpha,
+                           linewidth=linewidth, label=feature if feat_idx < 20 else None)
+
+            elif plot_type == 'second_deriv' and second_deriv is not None:
+                # Plot uncertainty for second derivative
+                if second_deriv_samples is not None:
+                    if show_posterior_samples:
+                        for s in range(second_deriv_samples.shape[0]):
+                            ax_curr.plot(x_plot_feat, second_deriv_samples[s, :], color=color,
+                                       alpha=posterior_alpha, linewidth=0.5)
+                    if show_ci:
+                        d2_lower = np.percentile(second_deriv_samples, 2.5, axis=0)
+                        d2_upper = np.percentile(second_deriv_samples, 97.5, axis=0)
+                        ax_curr.fill_between(x_plot_feat, d2_lower, d2_upper,
+                                           color=color, alpha=ci_alpha, linewidth=0)
+
+                ax_curr.plot(x_plot_feat, second_deriv, color=color, alpha=alpha,
+                           linewidth=linewidth, label=feature if feat_idx < 20 else None)
+
+    if not successful_features:
+        raise ValueError(f"Could not plot any of the requested features: {features}")
+
+    # Set labels and formatting
+    if use_log2fc:
+        xlabel = "log₂FC (x)"
+    else:
+        xlabel = "log₂(x)" if use_log2_x else "x"
+
+    for plot_i, (plot_type, ylabel) in enumerate(plot_types):
+        ax_curr = axes[plot_i]
+        ax_curr.set_xlabel(xlabel)
+        ax_curr.set_ylabel(ylabel)
+        ax_curr.axhline(y=0, color='gray', linestyle='--', linewidth=0.5, alpha=0.5)
+
+        # Add vertical line at u=0 (x = x_ntc) in log2FC mode
+        if use_log2fc:
+            ax_curr.axvline(x=0, color='gray', linestyle='--', linewidth=0.5, alpha=0.5)
+
+        if legend and len(successful_features) <= 20:
+            ax_curr.legend(frameon=False, fontsize=8)
+
+    # Title
+    if title is None:
+        suffix = " (log₂FC)" if use_log2fc else ""
+        if len(successful_features) == 1:
+            title = f"Trans function: {successful_features[0]}{suffix}"
+        else:
+            title = f"Trans functions ({len(successful_features)} features){suffix}"
+    fig.suptitle(title)
+
+    plt.tight_layout()
+    return fig
+
+
 def predict_trans_function(
     model,
     feature: str,
@@ -1012,6 +2050,398 @@ def predict_trans_function(
         return None
 
 
+def predict_trans_function_samples(
+    model,
+    feature: str,
+    x_range: np.ndarray,
+    modality_name: Optional[str] = None,
+    max_samples: Optional[int] = None
+) -> Optional[np.ndarray]:
+    """
+    Predict trans effect function for all posterior samples.
+
+    Like predict_trans_function but returns predictions for each posterior sample
+    instead of just the mean.
+
+    Parameters
+    ----------
+    model : bayesDREAM
+        Model with fit_trans() completed
+    feature : str
+        Feature name to predict
+    x_range : np.ndarray
+        X values to predict at (cis expression levels)
+    modality_name : str, optional
+        Modality name (default: primary modality)
+    max_samples : int, optional
+        Maximum number of samples to return. If None, returns all samples.
+
+    Returns
+    -------
+    np.ndarray or None
+        Predicted y values with shape [n_samples, n_points], or None if prediction fails.
+    """
+    # Determine which modality to use
+    if modality_name is None:
+        modality_name = model.primary_modality
+
+    # Check if trans model fitted for this modality
+    if modality_name == model.primary_modality:
+        if not hasattr(model, 'posterior_samples_trans') or model.posterior_samples_trans is None:
+            return None
+        posterior = model.posterior_samples_trans
+    else:
+        modality = model.get_modality(modality_name)
+        if not hasattr(modality, 'posterior_samples_trans') or modality.posterior_samples_trans is None:
+            return None
+        posterior = modality.posterior_samples_trans
+
+    # Get baseline A
+    if 'A' not in posterior:
+        return None
+
+    A_samples = posterior['A']
+    if hasattr(A_samples, 'cpu'):
+        A_samples = A_samples.cpu().numpy()
+    else:
+        A_samples = np.array(A_samples)
+
+    # Get feature list
+    if modality_name == model.primary_modality:
+        feature_list = model.trans_genes if hasattr(model, 'trans_genes') else []
+    else:
+        modality = model.get_modality(modality_name)
+        if modality.feature_meta is not None:
+            feature_list = None
+            for col in ['feature_id', 'feature', 'coord.intron', 'junction_id', 'gene_name', 'gene']:
+                if col in modality.feature_meta.columns:
+                    feature_list = modality.feature_meta[col].tolist()
+                    break
+            if feature_list is None:
+                feature_list = modality.feature_meta.index.tolist()
+        else:
+            return None
+
+    # Handle dimension squeezing for non-primary modalities
+    # A_samples shape: (S, T) for primary, (S, C, T) for non-primary
+    if A_samples.ndim > 2:
+        A_samples = A_samples.squeeze(1)  # Remove cis gene dimension
+
+    # Get number of features in posterior
+    n_features_posterior = A_samples.shape[1]
+    n_features_list = len(feature_list)
+
+    # Check dimension consistency
+    if n_features_posterior != n_features_list:
+        # Mismatch - likely cis gene excluded from posterior
+        # Try to find correct index by checking if cis gene is in list
+        if hasattr(model, 'cis_gene') and model.cis_gene in feature_list:
+            # Remove cis gene from feature list for indexing
+            feature_list_adjusted = [f for f in feature_list if f != model.cis_gene]
+            if feature not in feature_list_adjusted:
+                return None
+            if len(feature_list_adjusted) != n_features_posterior:
+                return None  # Still mismatched
+            feature_idx = feature_list_adjusted.index(feature)
+        else:
+            return None
+    else:
+        if feature not in feature_list:
+            return None
+        feature_idx = feature_list.index(feature)
+
+    # Helper to extract all samples for a parameter
+    def _extract_samples(param_name, feature_idx):
+        """Extract all posterior samples for a specific feature."""
+        samples = posterior[param_name]
+        if hasattr(samples, 'cpu'):
+            samples = samples.cpu().numpy()
+        else:
+            samples = np.array(samples)
+        # Squeeze cis gene dimension if present
+        if samples.ndim > 2:
+            samples = samples.squeeze(1)
+        return samples[:, feature_idx]  # [n_samples]
+
+    # Determine function type and compute predictions
+    if 'Vmax_a' in posterior and 'Vmax_b' in posterior:
+        # ===== ADDITIVE HILL =====
+        try:
+            A = A_samples[:, feature_idx]  # [n_samples]
+            alpha = _extract_samples('alpha', feature_idx)
+            beta = _extract_samples('beta', feature_idx)
+            Vmax_a = _extract_samples('Vmax_a', feature_idx)
+            Vmax_b = _extract_samples('Vmax_b', feature_idx)
+            K_a = _extract_samples('K_a', feature_idx)
+            K_b = _extract_samples('K_b', feature_idx)
+            n_a = _extract_samples('n_a', feature_idx)
+            n_b = _extract_samples('n_b', feature_idx)
+
+            n_samples = A.shape[0]
+            if max_samples is not None and max_samples < n_samples:
+                # Subsample
+                indices = np.random.choice(n_samples, max_samples, replace=False)
+                A = A[indices]
+                alpha = alpha[indices]
+                beta = beta[indices]
+                Vmax_a = Vmax_a[indices]
+                Vmax_b = Vmax_b[indices]
+                K_a = K_a[indices]
+                K_b = K_b[indices]
+                n_a = n_a[indices]
+                n_b = n_b[indices]
+                n_samples = max_samples
+
+            # Compute predictions for each sample
+            # x_range is [n_points], we need to broadcast to [n_samples, n_points]
+            n_points = len(x_range)
+            y_pred = np.zeros((n_samples, n_points))
+
+            for s in range(n_samples):
+                Hill_a = Hill_based_positive(x_range, Vmax=Vmax_a[s], A=0, K=K_a[s], n=n_a[s])
+                Hill_b = Hill_based_positive(x_range, Vmax=Vmax_b[s], A=0, K=K_b[s], n=n_b[s])
+                y_pred[s, :] = A[s] + alpha[s] * Hill_a + beta[s] * Hill_b
+
+            return y_pred
+
+        except (KeyError, IndexError, AttributeError):
+            return None
+
+    elif 'Vmax' in posterior and 'K' in posterior and 'n' in posterior:
+        # ===== SINGLE HILL =====
+        try:
+            A = A_samples[:, feature_idx]
+            Vmax = _extract_samples('Vmax', feature_idx)
+            K = _extract_samples('K', feature_idx)
+            n = _extract_samples('n', feature_idx)
+
+            n_samples = A.shape[0]
+            if max_samples is not None and max_samples < n_samples:
+                indices = np.random.choice(n_samples, max_samples, replace=False)
+                A = A[indices]
+                Vmax = Vmax[indices]
+                K = K[indices]
+                n = n[indices]
+                n_samples = max_samples
+
+            n_points = len(x_range)
+            y_pred = np.zeros((n_samples, n_points))
+
+            for s in range(n_samples):
+                y_pred[s, :] = Hill_based_positive(x_range, Vmax=Vmax[s], A=A[s], K=K[s], n=n[s])
+
+            return y_pred
+
+        except (KeyError, IndexError, AttributeError):
+            return None
+
+    else:
+        # Polynomial or unknown - not supported for samples
+        return None
+
+
+def predict_trans_derivatives_samples(
+    model,
+    feature: str,
+    x_range: np.ndarray,
+    modality_name: Optional[str] = None,
+    max_samples: Optional[int] = None
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
+    """
+    Compute trans function and derivatives for all posterior samples.
+
+    Parameters
+    ----------
+    model : bayesDREAM
+        Model with fit_trans() completed
+    feature : str
+        Feature name to predict
+    x_range : np.ndarray
+        X values to compute at
+    modality_name : str, optional
+        Modality name (default: primary modality)
+    max_samples : int, optional
+        Maximum number of samples to return
+
+    Returns
+    -------
+    Tuple of (y_samples, first_deriv_samples, second_deriv_samples, third_deriv_samples)
+        Each has shape [n_samples, n_points], or None if computation fails
+    """
+    # Determine which modality to use
+    if modality_name is None:
+        modality_name = model.primary_modality
+
+    # Check if trans model fitted
+    if modality_name == model.primary_modality:
+        if not hasattr(model, 'posterior_samples_trans') or model.posterior_samples_trans is None:
+            return None, None, None, None
+        posterior = model.posterior_samples_trans
+    else:
+        modality = model.get_modality(modality_name)
+        if not hasattr(modality, 'posterior_samples_trans') or modality.posterior_samples_trans is None:
+            return None, None, None, None
+        posterior = modality.posterior_samples_trans
+
+    # Get baseline A
+    if 'A' not in posterior:
+        return None, None, None, None
+
+    A_samples = posterior['A']
+    if hasattr(A_samples, 'cpu'):
+        A_samples = A_samples.cpu().numpy()
+    else:
+        A_samples = np.array(A_samples)
+
+    # Get feature list
+    if modality_name == model.primary_modality:
+        feature_list = model.trans_genes if hasattr(model, 'trans_genes') else []
+    else:
+        modality = model.get_modality(modality_name)
+        if modality.feature_meta is not None:
+            feature_list = None
+            for col in ['feature_id', 'feature', 'coord.intron', 'junction_id', 'gene_name', 'gene']:
+                if col in modality.feature_meta.columns:
+                    feature_list = modality.feature_meta[col].tolist()
+                    break
+            if feature_list is None:
+                feature_list = modality.feature_meta.index.tolist()
+        else:
+            return None, None, None, None
+
+    # Handle dimension squeezing
+    if A_samples.ndim > 2:
+        A_samples = A_samples.squeeze(1)
+
+    # Check dimension consistency
+    n_features_posterior = A_samples.shape[1]
+    n_features_list = len(feature_list)
+
+    if n_features_posterior != n_features_list:
+        if hasattr(model, 'cis_gene') and model.cis_gene in feature_list:
+            feature_list_adjusted = [f for f in feature_list if f != model.cis_gene]
+            if feature not in feature_list_adjusted:
+                return None, None, None, None
+            if len(feature_list_adjusted) != n_features_posterior:
+                return None, None, None, None
+            feature_idx = feature_list_adjusted.index(feature)
+        else:
+            return None, None, None, None
+    else:
+        if feature not in feature_list:
+            return None, None, None, None
+        feature_idx = feature_list.index(feature)
+
+    # Helper to extract all samples for a parameter
+    def _extract_samples(param_name, feature_idx):
+        samples = posterior[param_name]
+        if hasattr(samples, 'cpu'):
+            samples = samples.cpu().numpy()
+        else:
+            samples = np.array(samples)
+        if samples.ndim > 2:
+            samples = samples.squeeze(1)
+        return samples[:, feature_idx]
+
+    # Compute based on function type
+    if 'Vmax_a' in posterior and 'Vmax_b' in posterior:
+        # ===== ADDITIVE HILL =====
+        try:
+            A = A_samples[:, feature_idx]
+            alpha = _extract_samples('alpha', feature_idx)
+            beta = _extract_samples('beta', feature_idx)
+            Vmax_a = _extract_samples('Vmax_a', feature_idx)
+            Vmax_b = _extract_samples('Vmax_b', feature_idx)
+            K_a = _extract_samples('K_a', feature_idx)
+            K_b = _extract_samples('K_b', feature_idx)
+            n_a = _extract_samples('n_a', feature_idx)
+            n_b = _extract_samples('n_b', feature_idx)
+
+            n_samples = A.shape[0]
+            if max_samples is not None and max_samples < n_samples:
+                indices = np.random.choice(n_samples, max_samples, replace=False)
+                A = A[indices]
+                alpha = alpha[indices]
+                beta = beta[indices]
+                Vmax_a = Vmax_a[indices]
+                Vmax_b = Vmax_b[indices]
+                K_a = K_a[indices]
+                K_b = K_b[indices]
+                n_a = n_a[indices]
+                n_b = n_b[indices]
+                n_samples = max_samples
+
+            n_points = len(x_range)
+            y_samples = np.zeros((n_samples, n_points))
+            first_deriv_samples = np.zeros((n_samples, n_points))
+            second_deriv_samples = np.zeros((n_samples, n_points))
+            third_deriv_samples = np.zeros((n_samples, n_points))
+
+            for s in range(n_samples):
+                # Function values
+                Hill_a = Hill_based_positive(x_range, Vmax=Vmax_a[s], A=0, K=K_a[s], n=n_a[s])
+                Hill_b = Hill_based_positive(x_range, Vmax=Vmax_b[s], A=0, K=K_b[s], n=n_b[s])
+                y_samples[s, :] = A[s] + alpha[s] * Hill_a + beta[s] * Hill_b
+
+                # First derivatives
+                dHill_a = Hill_first_derivative(x_range, Vmax=Vmax_a[s], K=K_a[s], n=n_a[s])
+                dHill_b = Hill_first_derivative(x_range, Vmax=Vmax_b[s], K=K_b[s], n=n_b[s])
+                first_deriv_samples[s, :] = alpha[s] * dHill_a + beta[s] * dHill_b
+
+                # Second derivatives
+                d2Hill_a = Hill_second_derivative(x_range, Vmax=Vmax_a[s], K=K_a[s], n=n_a[s])
+                d2Hill_b = Hill_second_derivative(x_range, Vmax=Vmax_b[s], K=K_b[s], n=n_b[s])
+                second_deriv_samples[s, :] = alpha[s] * d2Hill_a + beta[s] * d2Hill_b
+
+                # Third derivatives
+                d3Hill_a = Hill_third_derivative(x_range, Vmax=Vmax_a[s], K=K_a[s], n=n_a[s])
+                d3Hill_b = Hill_third_derivative(x_range, Vmax=Vmax_b[s], K=K_b[s], n=n_b[s])
+                third_deriv_samples[s, :] = alpha[s] * d3Hill_a + beta[s] * d3Hill_b
+
+            return y_samples, first_deriv_samples, second_deriv_samples, third_deriv_samples
+
+        except (KeyError, IndexError, AttributeError):
+            return None, None, None, None
+
+    elif 'Vmax' in posterior and 'K' in posterior and 'n' in posterior:
+        # ===== SINGLE HILL =====
+        try:
+            A = A_samples[:, feature_idx]
+            Vmax = _extract_samples('Vmax', feature_idx)
+            K = _extract_samples('K', feature_idx)
+            n = _extract_samples('n', feature_idx)
+
+            n_samples = A.shape[0]
+            if max_samples is not None and max_samples < n_samples:
+                indices = np.random.choice(n_samples, max_samples, replace=False)
+                A = A[indices]
+                Vmax = Vmax[indices]
+                K = K[indices]
+                n = n[indices]
+                n_samples = max_samples
+
+            n_points = len(x_range)
+            y_samples = np.zeros((n_samples, n_points))
+            first_deriv_samples = np.zeros((n_samples, n_points))
+            second_deriv_samples = np.zeros((n_samples, n_points))
+            third_deriv_samples = np.zeros((n_samples, n_points))
+
+            for s in range(n_samples):
+                y_samples[s, :] = Hill_based_positive(x_range, Vmax=Vmax[s], A=A[s], K=K[s], n=n[s])
+                first_deriv_samples[s, :] = Hill_first_derivative(x_range, Vmax=Vmax[s], K=K[s], n=n[s])
+                second_deriv_samples[s, :] = Hill_second_derivative(x_range, Vmax=Vmax[s], K=K[s], n=n[s])
+                third_deriv_samples[s, :] = Hill_third_derivative(x_range, Vmax=Vmax[s], K=K[s], n=n[s])
+
+            return y_samples, first_deriv_samples, second_deriv_samples, third_deriv_samples
+
+        except (KeyError, IndexError, AttributeError):
+            return None, None, None, None
+
+    else:
+        # Polynomial or unknown - not supported
+        return None, None, None, None
+
+
 # ============================================================================
 # Distribution-Specific Plotting Functions
 # ============================================================================
@@ -1244,7 +2674,10 @@ def plot_negbinom_xy(
         # Trans function overlay (if trans model fitted)
         # Show on corrected plot only (trans model was fitted on corrected data)
         if show_hill_function and corrected:
-            x_range = np.linspace(x_true.min(), x_true.max(), 100)
+            # Evenly spaced points in log2 space for smooth curve on log-log plot
+            log2_min = np.log2(max(x_true.min(), 1e-6))
+            log2_max = np.log2(x_true.max())
+            x_range = 2 ** np.linspace(log2_min, log2_max, 2000)
             y_pred = predict_trans_function(model, feature, x_range, modality_name=None)
 
             if y_pred is not None:
@@ -1503,7 +2936,10 @@ def plot_binomial_xy(
         # Trans function overlay (if trans model fitted)
         # Show on corrected plot only (trans model was fitted on corrected data)
         if show_trans_function and corrected:
-            x_range = np.linspace(x_true.min(), x_true.max(), 100)
+            # Evenly spaced points in log2 space for smooth curve on log-log plot
+            log2_min = np.log2(max(x_true.min(), 1e-6))
+            log2_max = np.log2(x_true.max())
+            x_range = 2 ** np.linspace(log2_min, log2_max, 2000)
             y_pred = predict_trans_function(model, feature, x_range, modality_name=modality.name)
 
             if y_pred is not None:
@@ -2027,7 +3463,10 @@ def plot_normal_xy(
         # Trans function overlay (if trans model fitted)
         # Show on corrected plot only (trans model was fitted on corrected data)
         if show_trans_function and corrected:
-            x_range = np.linspace(x_true.min(), x_true.max(), 100)
+            # Evenly spaced points in log2 space for smooth curve on log-log plot
+            log2_min = np.log2(max(x_true.min(), 1e-6))
+            log2_max = np.log2(x_true.max())
+            x_range = 2 ** np.linspace(log2_min, log2_max, 2000)
             y_pred = predict_trans_function(model, feature, x_range, modality_name=modality.name)
 
             if y_pred is not None:
