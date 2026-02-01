@@ -1206,19 +1206,22 @@ class ModelSummarizer:
                 term3 = (x_ntc ** 2) * (S_prime / y_at_ntc) ** 2
                 d2g_du2 = ln2 * (term1 + term2 - term3)
 
-                # d³g/du³
-                S_ratio = S_prime / y_at_ntc
-                S2_ratio = S_double_prime / y_at_ntc
-                S3_ratio = S_triple_prime / y_at_ntc
+                # d³g/du³ = (ln(2))² * [x*S'/S + 3x²*S''/S - 3x²*(S'/S)²
+                #                      + x³*S'''/S - 3x³*(S'/S)*(S''/S) + 2x³*(S'/S)³]
+                S_ratio = S_prime / y_at_ntc      # S'/S
+                S2_ratio = S_double_prime / y_at_ntc  # S''/S
+                S3_ratio = S_triple_prime / y_at_ntc  # S'''/S
                 x2 = x_ntc ** 2
+                x3 = x_ntc ** 3
+                ln2_sq = ln2 ** 2
 
-                t1 = x2 * S3_ratio
-                t2 = -3 * x2 * S_ratio * S2_ratio
-                t3 = 3 * x_ntc * S2_ratio
-                t4 = 2 * x2 * S_ratio ** 3
-                t5 = -3 * x_ntc * S_ratio ** 2
-                t6 = S_ratio
-                d3g_du3 = ln2 * (t1 + t2 + t3 + t4 + t5 + t6)
+                t1 = x_ntc * S_ratio              # x*S'/S
+                t2 = 3 * x2 * S2_ratio            # 3x²*S''/S
+                t3 = -3 * x2 * S_ratio ** 2       # -3x²*(S'/S)²
+                t4 = x3 * S3_ratio                # x³*S'''/S
+                t5 = -3 * x3 * S_ratio * S2_ratio # -3x³*(S'/S)*(S''/S)
+                t6 = 2 * x3 * S_ratio ** 3        # 2x³*(S'/S)³
+                d3g_du3 = ln2_sq * (t1 + t2 + t3 + t4 + t5 + t6)
 
                 return dg_du, d2g_du2, d3g_du3
 

@@ -958,8 +958,9 @@ def log2fc_third_derivative(x, S, dS_dx, d2S_dx2, d3S_dx3, epsilon=1e-10):
     """
     Third derivative in log2FC space: d³g/du³.
 
-    Formula: d³g/du³ = ln(2) * (x²*S'''/S - 3x²*S'*S''/S² + 3x*S''/S
-                                + 2x²*S'³/S³ - 3x*S'²/S² + S'/S)
+    Derived by differentiating d²g/du² with respect to u:
+    d³g/du³ = (ln(2))² * [x*S'/S + 3x²*S''/S - 3x²*(S'/S)²
+                         + x³*S'''/S - 3x³*(S'/S)*(S''/S) + 2x³*(S'/S)³]
 
     Parameters
     ----------
@@ -983,25 +984,29 @@ def log2fc_third_derivative(x, S, dS_dx, d2S_dx2, d3S_dx3, epsilon=1e-10):
     """
     S_safe = np.maximum(np.abs(S), epsilon)
     ln2 = np.log(2)
+    ln2_sq = ln2 ** 2
 
-    S_ratio = dS_dx / S_safe
-    S2_ratio = d2S_dx2 / S_safe
-    S3_ratio = d3S_dx3 / S_safe
+    S_ratio = dS_dx / S_safe      # S'/S
+    S2_ratio = d2S_dx2 / S_safe   # S''/S
+    S3_ratio = d3S_dx3 / S_safe   # S'''/S
 
-    # x²*S'''/S
-    term1 = x**2 * S3_ratio
-    # -3x²*S'*S''/S²
-    term2 = -3 * x**2 * S_ratio * S2_ratio
-    # 3x*S''/S
-    term3 = 3 * x * S2_ratio
-    # 2x²*S'³/S³
-    term4 = 2 * x**2 * S_ratio**3
-    # -3x*S'²/S²
-    term5 = -3 * x * S_ratio**2
-    # S'/S
-    term6 = S_ratio
+    x2 = x ** 2
+    x3 = x ** 3
 
-    return ln2 * (term1 + term2 + term3 + term4 + term5 + term6)
+    # x*S'/S
+    term1 = x * S_ratio
+    # 3x²*S''/S
+    term2 = 3 * x2 * S2_ratio
+    # -3x²*(S'/S)²
+    term3 = -3 * x2 * S_ratio**2
+    # x³*S'''/S
+    term4 = x3 * S3_ratio
+    # -3x³*(S'/S)*(S''/S)
+    term5 = -3 * x3 * S_ratio * S2_ratio
+    # 2x³*(S'/S)³
+    term6 = 2 * x3 * S_ratio**3
+
+    return ln2_sq * (term1 + term2 + term3 + term4 + term5 + term6)
 
 
 def predict_trans_derivatives(
