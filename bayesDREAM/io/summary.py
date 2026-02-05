@@ -2449,14 +2449,17 @@ class ModelSummarizer:
 
                 if is_binomial:
                     # For binomial: compute dp/du (delta_p derivatives in u-space)
-                    # dp/du = x · ln(2) · S'(x)
-                    dp_du = x_ntc * ln2 * S_prime
+                    # where p = S(x) and u = log2(x) - log2(x_ntc), so dx/du = x * ln(2)
+                    #
+                    # dp/du = ln(2) · x · S'
+                    dp_du = ln2 * x_ntc * S_prime
 
-                    # d²p/du² = ln(2) · (x · S' + x² · ln(2) · S'')
-                    d2p_du2 = ln2 * (x_ntc * S_prime + x2 * ln2 * S_double_prime)
+                    # d²p/du² = (ln2)² · x · (S' + x·S'')
+                    d2p_du2 = ln2_sq * x_ntc * (S_prime + x_ntc * S_double_prime)
 
-                    # d³p/du³ = (ln(2))² · (x · S' + 3x² · ln(2) · S'' + x³ · (ln(2))² · S''')
-                    d3p_du3 = ln2_sq * (x_ntc * S_prime + 3 * x2 * ln2 * S_double_prime + x3 * ln2_sq * S_triple_prime)
+                    # d³p/du³ = (ln2)³ · x · (S' + 3x·S'' + x²·S''')
+                    ln2_cubed = ln2_sq * ln2
+                    d3p_du3 = ln2_cubed * x_ntc * (S_prime + 3 * x_ntc * S_double_prime + x2 * S_triple_prime)
 
                     return dp_du, d2p_du2, d3p_du3
                 else:

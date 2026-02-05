@@ -1581,17 +1581,15 @@ def predict_trans_delta_p(
     ln2 = np.log(2.0)
     x_safe = np.maximum(x_range, epsilon)
 
-    # First derivative: dp/du = x * ln(2) * dp/dx
-    first_deriv = x_safe * ln2 * first_deriv_dx
+    # First derivative: dp/du = ln(2) * x * dp/dx
+    first_deriv = ln2 * x_safe * first_deriv_dx
 
-    # Second derivative: d²p/du² = d/du(dp/du)
-    # Using chain rule: d²p/du² = ln(2) * (x * dp/dx + x² * ln(2) * d²p/dx²)
-    second_deriv = ln2 * (x_safe * first_deriv_dx + x_safe**2 * ln2 * second_deriv_dx)
+    # Second derivative: d²p/du² = (ln2)² * x * (dp/dx + x * d²p/dx²)
+    second_deriv = ln2**2 * x_safe * (first_deriv_dx + x_safe * second_deriv_dx)
 
-    # Third derivative: d³p/du³
-    # d³p/du³ = (ln2)² * (x * dp/dx + 3 * x² * ln(2) * d²p/dx² + x³ * (ln2)² * d³p/dx³)
-    third_deriv = ln2**2 * (x_safe * first_deriv_dx + 3 * x_safe**2 * ln2 * second_deriv_dx
-                            + x_safe**3 * ln2**2 * third_deriv_dx)
+    # Third derivative: d³p/du³ = (ln2)³ * x * (dp/dx + 3x * d²p/dx² + x² * d³p/dx³)
+    third_deriv = ln2**3 * x_safe * (first_deriv_dx + 3 * x_safe * second_deriv_dx
+                                      + x_safe**2 * third_deriv_dx)
 
     return delta_p, u_range, first_deriv, second_deriv, third_deriv
 
@@ -2007,21 +2005,19 @@ def plot_trans_functions(
                         epsilon = 1e-10
                         ln2 = np.log(2)
 
-                        # First derivative: dp/du = x * ln(2) * dp/dx
-                        first_deriv_samples = x_range[np.newaxis, :] * ln2 * dS_samples
+                        # First derivative: dp/du = ln(2) * x * dp/dx
+                        first_deriv_samples = ln2 * x_range[np.newaxis, :] * dS_samples
 
-                        # Second derivative: d²p/du² = ln(2) * (x * dp/dx + x² * ln(2) * d²p/dx²)
+                        # Second derivative: d²p/du² = (ln2)² * x * (dp/dx + x * d²p/dx²)
                         if d2S_samples is not None:
-                            term1 = x_range[np.newaxis, :] * dS_samples
-                            term2 = (x_range[np.newaxis, :] ** 2) * ln2 * d2S_samples
-                            second_deriv_samples = ln2 * (term1 + term2)
+                            x_arr = x_range[np.newaxis, :]
+                            second_deriv_samples = (ln2**2) * x_arr * (dS_samples + x_arr * d2S_samples)
 
-                        # Third derivative: d³p/du³ = (ln2)² * (x*dp/dx + 3x²*ln2*d²p/dx² + x³*(ln2)²*d³p/dx³)
+                        # Third derivative: d³p/du³ = (ln2)³ * x * (dp/dx + 3x*d²p/dx² + x²*d³p/dx³)
                         if d3S_samples is not None and d2S_samples is not None:
-                            term1 = x_range[np.newaxis, :] * dS_samples
-                            term2 = 3 * (x_range[np.newaxis, :] ** 2) * ln2 * d2S_samples
-                            term3 = (x_range[np.newaxis, :] ** 3) * (ln2**2) * d3S_samples
-                            third_deriv_samples = (ln2**2) * (term1 + term2 + term3)
+                            x_arr = x_range[np.newaxis, :]
+                            third_deriv_samples = (ln2**3) * x_arr * (dS_samples + 3 * x_arr * d2S_samples
+                                                                       + x_arr**2 * d3S_samples)
 
             elif use_log2fc:
                 # Get function samples in log2FC space
