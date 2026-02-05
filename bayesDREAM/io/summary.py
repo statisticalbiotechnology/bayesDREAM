@@ -3631,8 +3631,10 @@ class ModelSummarizer:
             Formula: (dep_mask_a & dep_mask_b) & (n_a >= 0) & (n_b >= 0)
         - 'additive_negative': Both components active, both with negative n
             Formula: (dep_mask_a & dep_mask_b) & (n_a <= 0) & (n_b <= 0)
-        - 'non_monotonic_min': Both active, opposite signs, at minimum at x=x_ntc (S''(x_ntc) > 0)
-        - 'non_monotonic_max': Both active, opposite signs, at maximum at x=x_ntc (S''(x_ntc) < 0)
+        - 'non_monotonic_min': Both active, opposite signs, local minimum at nearest extremum to x_ntc
+            (where S'=0, checked via S'' > 0 at that point)
+        - 'non_monotonic_max': Both active, opposite signs, local maximum at nearest extremum to x_ntc
+            (where S'=0, checked via S'' < 0 at that point)
         """
         # Define dependency masks
         # Component is "active" if its weight is non-zero AND its Hill coefficient is non-zero
@@ -3681,32 +3683,36 @@ class ModelSummarizer:
                     return 'additive_negative'
             else:
                 # Non-monotonic: opposite signs of n
-                # Determine min vs max based on second derivative at x_ntc (curvature test)
-                # S''(x_ntc) > 0 → concave up → local minimum
-                # S''(x_ntc) < 0 → concave down → local maximum
+                # Determine min vs max based on second derivative at the extremum
+                # (where first derivative = 0)
+                # S''(x_extremum) > 0 → concave up → local minimum
+                # S''(x_extremum) < 0 → concave down → local maximum
+                #
+                # If multiple extrema, pick the one closest to x_ntc (u=0)
 
-                if x_ntc is not None:
-                    # Compute second derivative at x_ntc
-                    S_double_prime = self._additive_hill_second_derivative(
-                        x_ntc, alpha, Vmax_a, K_a, n_a, beta, Vmax_b, K_b, n_b
-                    )
-                    if S_double_prime > 0:
-                        return 'non_monotonic_min'  # Concave up at x_ntc → local minimum
-                    else:
-                        return 'non_monotonic_max'  # Concave down at x_ntc → local maximum
-                else:
-                    # Fallback: use boundary analysis
-                    if len(first_deriv_roots) > 0:
-                        # Has interior extremum - check curvature at the extremum
-                        x_extremum = first_deriv_roots[0]
-                        d2_extremum = self._additive_hill_second_derivative(
-                            x_extremum, alpha, Vmax_a, K_a, n_a, beta, Vmax_b, K_b, n_b
-                        )
-                        if d2_extremum > 0:
-                            return 'non_monotonic_min'  # Concave up at extremum → local min
+                if len(first_deriv_roots) > 0:
+                    # Find the extremum closest to x_ntc
+                    if x_ntc is not None and x_ntc > 0:
+                        # Find root closest to x_ntc
+                        distances = [abs(np.log2(r) - np.log2(x_ntc)) for r in first_deriv_roots if r > 0]
+                        if distances:
+                            closest_idx = np.argmin(distances)
+                            x_extremum = first_deriv_roots[closest_idx]
                         else:
-                            return 'non_monotonic_max'  # Concave down at extremum → local max
-                    return 'non_monotonic'  # Generic non-monotonic fallback
+                            x_extremum = first_deriv_roots[0]
+                    else:
+                        x_extremum = first_deriv_roots[0]
+
+                    # Check curvature at the extremum
+                    d2_extremum = self._additive_hill_second_derivative(
+                        x_extremum, alpha, Vmax_a, K_a, n_a, beta, Vmax_b, K_b, n_b
+                    )
+                    if d2_extremum > 0:
+                        return 'non_monotonic_min'  # Concave up at extremum → local min
+                    else:
+                        return 'non_monotonic_max'  # Concave down at extremum → local max
+
+                return 'non_monotonic'  # Generic non-monotonic fallback (no roots found)
 
         # No active components or indeterminate
         return 'flat'
