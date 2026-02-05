@@ -1434,6 +1434,244 @@ def predict_trans_log2fc_samples(
     return y_log2fc_samples, u_range
 
 
+def predict_trans_delta_p(
+    model,
+    feature: str,
+    x_range: np.ndarray,
+    modality_name: Optional[str] = None,
+    return_derivatives: bool = True
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
+    """
+    Compute trans effect function in delta_p (probability difference) space for binomial modalities.
+
+    Transforms:
+    - x-axis: u = log2(x) - log2(x_ntc)  (cis gene log2FC)
+    - y-axis: delta_p(u) = p(x(u)) - p_ntc  (probability difference from NTC)
+
+    Where x_ntc is the NTC mean for the cis gene, and p_ntc is the NTC probability for the trans feature.
+
+    Parameters
+    ----------
+    model : bayesDREAM
+        Model with fit_trans() completed and posterior_samples_technical available
+    feature : str
+        Feature name (trans gene/SJ) to predict
+    x_range : np.ndarray
+        X values (cis expression, NOT log-transformed)
+    modality_name : str, optional
+        Modality name (default: primary modality)
+    return_derivatives : bool
+        Whether to compute and return derivatives (default: True)
+        Note: derivatives are dp/du, d²p/du², d³p/du³ (probability space)
+
+    Returns
+    -------
+    Tuple of (delta_p, u_range, first_deriv, second_deriv, third_deriv)
+        - delta_p: probability difference from NTC (p - p_ntc)
+        - u_range: log2FC of cis gene relative to NTC
+        - first_deriv: dp/du (None if return_derivatives=False)
+        - second_deriv: d²p/du² (None if return_derivatives=False)
+        - third_deriv: d³p/du³ (None if return_derivatives=False)
+        All are None if computation fails
+    """
+    # Get p(x) - the probability values from fitted function
+    y_pred = predict_trans_function(model, feature, x_range, modality_name=modality_name)
+    if y_pred is None:
+        return None, None, None, None, None
+
+    # Get NTC means
+    # Cis NTC (for x-axis transformation)
+    cis_mod = model.get_modality('cis')
+    if cis_mod is None or not hasattr(cis_mod, 'posterior_samples_technical'):
+        return None, None, None, None, None
+
+    cis_mu_ntc = cis_mod.posterior_samples_technical.get('mu_ntc', None)
+    if cis_mu_ntc is None:
+        return None, None, None, None, None
+
+    if hasattr(cis_mu_ntc, 'mean'):
+        x_ntc = cis_mu_ntc.mean(dim=0).squeeze().cpu().numpy()
+    else:
+        x_ntc = np.mean(cis_mu_ntc, axis=0).squeeze()
+
+    # Handle case where x_ntc is a scalar or 1-element array
+    if np.ndim(x_ntc) == 0:
+        x_ntc = float(x_ntc)
+    elif len(x_ntc) == 1:
+        x_ntc = float(x_ntc[0])
+    else:
+        x_ntc = float(x_ntc[0])  # Take first if multiple
+
+    # Trans NTC (for y-axis transformation)
+    if modality_name is None:
+        modality_name = model.primary_modality
+    trans_mod = model.get_modality(modality_name)
+
+    if not hasattr(trans_mod, 'posterior_samples_technical'):
+        return None, None, None, None, None
+
+    trans_mu_ntc = trans_mod.posterior_samples_technical.get('mu_ntc', None)
+    if trans_mu_ntc is None:
+        return None, None, None, None, None
+
+    if hasattr(trans_mu_ntc, 'mean'):
+        y_ntc_all = trans_mu_ntc.mean(dim=0).squeeze().cpu().numpy()
+    else:
+        y_ntc_all = np.mean(trans_mu_ntc, axis=0).squeeze()
+
+    # Find the feature index to get the right NTC
+    feature_list = trans_mod.feature_meta.index.tolist() if trans_mod.feature_meta is not None else []
+    if feature not in feature_list:
+        for col in ['feature_id', 'feature', 'gene_name', 'gene']:
+            if trans_mod.feature_meta is not None and col in trans_mod.feature_meta.columns:
+                feature_list = trans_mod.feature_meta[col].tolist()
+                if feature in feature_list:
+                    break
+
+    if feature not in feature_list:
+        return None, None, None, None, None
+
+    feature_idx = feature_list.index(feature)
+    p_ntc = float(y_ntc_all[feature_idx]) if np.ndim(y_ntc_all) > 0 else float(y_ntc_all)
+
+    # Compute delta_p transformation
+    epsilon = 1e-10
+    u_range = np.log2(np.maximum(x_range, epsilon)) - np.log2(max(x_ntc, epsilon))
+    delta_p = y_pred - p_ntc  # Simple difference for probability space
+
+    if not return_derivatives:
+        return delta_p, u_range, None, None, None
+
+    # Get dp/dx derivatives
+    first_deriv_dx, second_deriv_dx, third_deriv_dx = predict_trans_derivatives(
+        model, feature, x_range, modality_name=modality_name
+    )
+    if first_deriv_dx is None:
+        return delta_p, u_range, None, None, None
+
+    # Convert dp/dx to dp/du using chain rule:
+    # u = log2(x) - log2(x_ntc)
+    # du/dx = 1/(x * ln(2))
+    # dx/du = x * ln(2)
+    # dp/du = dp/dx * dx/du = dp/dx * x * ln(2)
+    ln2 = np.log(2.0)
+    x_safe = np.maximum(x_range, epsilon)
+
+    # First derivative: dp/du = x * ln(2) * dp/dx
+    first_deriv = x_safe * ln2 * first_deriv_dx
+
+    # Second derivative: d²p/du² = d/du(dp/du)
+    # Using chain rule: d²p/du² = ln(2) * (x * dp/dx + x² * ln(2) * d²p/dx²)
+    second_deriv = ln2 * (x_safe * first_deriv_dx + x_safe**2 * ln2 * second_deriv_dx)
+
+    # Third derivative: d³p/du³
+    # d³p/du³ = (ln2)² * (x * dp/dx + 3 * x² * ln(2) * d²p/dx² + x³ * (ln2)² * d³p/dx³)
+    third_deriv = ln2**2 * (x_safe * first_deriv_dx + 3 * x_safe**2 * ln2 * second_deriv_dx
+                            + x_safe**3 * ln2**2 * third_deriv_dx)
+
+    return delta_p, u_range, first_deriv, second_deriv, third_deriv
+
+
+def predict_trans_delta_p_samples(
+    model,
+    feature: str,
+    x_range: np.ndarray,
+    modality_name: Optional[str] = None,
+    max_samples: Optional[int] = None
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """
+    Compute trans effect function in delta_p space for all posterior samples.
+
+    Parameters
+    ----------
+    model : bayesDREAM
+        Model with fit_trans() completed
+    feature : str
+        Feature name (trans gene/SJ) to predict
+    x_range : np.ndarray
+        X values (cis expression, NOT log-transformed)
+    modality_name : str, optional
+        Modality name (default: primary modality)
+    max_samples : int, optional
+        Maximum number of samples to return
+
+    Returns
+    -------
+    Tuple of (delta_p_samples, u_range)
+        - delta_p_samples: [n_samples, n_points] delta_p predictions for each posterior sample
+        - u_range: [n_points] log2FC of cis gene relative to NTC
+        Both are None if computation fails
+    """
+    # Get all posterior samples for p(x)
+    y_samples = predict_trans_function_samples(
+        model, feature, x_range, modality_name=modality_name, max_samples=max_samples
+    )
+    if y_samples is None:
+        return None, None
+
+    # Get NTC means (same logic as predict_trans_delta_p)
+    cis_mod = model.get_modality('cis')
+    if cis_mod is None or not hasattr(cis_mod, 'posterior_samples_technical'):
+        return None, None
+
+    cis_mu_ntc = cis_mod.posterior_samples_technical.get('mu_ntc', None)
+    if cis_mu_ntc is None:
+        return None, None
+
+    if hasattr(cis_mu_ntc, 'mean'):
+        x_ntc = cis_mu_ntc.mean(dim=0).squeeze().cpu().numpy()
+    else:
+        x_ntc = np.mean(cis_mu_ntc, axis=0).squeeze()
+
+    if np.ndim(x_ntc) == 0:
+        x_ntc = float(x_ntc)
+    elif len(x_ntc) == 1:
+        x_ntc = float(x_ntc[0])
+    else:
+        x_ntc = float(x_ntc[0])
+
+    # Trans NTC
+    if modality_name is None:
+        modality_name = model.primary_modality
+    trans_mod = model.get_modality(modality_name)
+
+    if not hasattr(trans_mod, 'posterior_samples_technical'):
+        return None, None
+
+    trans_mu_ntc = trans_mod.posterior_samples_technical.get('mu_ntc', None)
+    if trans_mu_ntc is None:
+        return None, None
+
+    if hasattr(trans_mu_ntc, 'mean'):
+        y_ntc_all = trans_mu_ntc.mean(dim=0).squeeze().cpu().numpy()
+    else:
+        y_ntc_all = np.mean(trans_mu_ntc, axis=0).squeeze()
+
+    # Find feature index
+    feature_list = trans_mod.feature_meta.index.tolist() if trans_mod.feature_meta is not None else []
+    if feature not in feature_list:
+        for col in ['feature_id', 'feature', 'gene_name', 'gene']:
+            if trans_mod.feature_meta is not None and col in trans_mod.feature_meta.columns:
+                feature_list = trans_mod.feature_meta[col].tolist()
+                if feature in feature_list:
+                    break
+
+    if feature not in feature_list:
+        return None, None
+
+    feature_idx = feature_list.index(feature)
+    p_ntc = float(y_ntc_all[feature_idx]) if np.ndim(y_ntc_all) > 0 else float(y_ntc_all)
+
+    # Compute delta_p transformations for all samples
+    epsilon = 1e-10
+    u_range = np.log2(np.maximum(x_range, epsilon)) - np.log2(max(x_ntc, epsilon))
+
+    # Transform each sample: p_sample - p_ntc
+    delta_p_samples = y_samples - p_ntc
+
+    return delta_p_samples, u_range
+
+
 def plot_trans_functions(
     model,
     features: Union[str, List[str]],
@@ -1441,10 +1679,12 @@ def plot_trans_functions(
     show_function: bool = True,
     show_first_derivative: bool = False,
     show_second_derivative: bool = False,
+    show_third_derivative: bool = False,
     x_range: Optional[np.ndarray] = None,
     n_points: int = 2000,
     use_log2_x: bool = True,
     use_log2fc: bool = False,
+    use_delta_p: bool = False,
     show_posterior_samples: bool = False,
     show_ci: bool = False,
     posterior_alpha: float = 0.1,
@@ -1478,6 +1718,8 @@ def plot_trans_functions(
         Show first derivative dy/dx (default: False)
     show_second_derivative : bool
         Show second derivative d²y/dx² (default: False)
+    show_third_derivative : bool
+        Show second derivative d3y/dx3 (default: False)
     x_range : np.ndarray, optional
         X values to plot at. If None, generates evenly spaced points in log2 space
         from model's x_true range.
@@ -1492,6 +1734,15 @@ def plot_trans_functions(
         - y-axis: log2FC = log2(y) - log2(y_ntc) where y_ntc is trans gene NTC mean
         - Derivatives: dg/du and d²g/du² (chain rule transformed)
         Requires posterior_samples_technical to be available for both cis and trans modalities.
+        Not recommended for binomial modalities (use use_delta_p instead).
+    use_delta_p : bool
+        If True, plot in probability difference space relative to NTC (default: False).
+        Designed for binomial modalities (e.g., splicing_sj).
+        - x-axis: log2FC = log2(x) - log2(x_ntc) where x_ntc is cis gene NTC mean
+        - y-axis: Δp = p - p_ntc where p is probability and p_ntc is NTC probability
+        - Derivatives: dp/du and d²p/du² (chain rule transformed)
+        Requires posterior_samples_technical to be available for both cis and trans modalities.
+        Mutually exclusive with use_log2fc.
     show_posterior_samples : bool
         If True, plot individual posterior fits behind the mean line (default: False).
         Each posterior sample is plotted with transparency set by `posterior_alpha`.
@@ -1537,6 +1788,8 @@ def plot_trans_functions(
         If function type is polynomial (derivatives not supported)
         If no features could be plotted
         If use_log2fc=True but NTC means not available
+        If use_delta_p=True but NTC means not available
+        If both use_log2fc and use_delta_p are True (mutually exclusive)
 
     Examples
     --------
@@ -1556,9 +1809,14 @@ def plot_trans_functions(
     import matplotlib.pyplot as plt
 
     # Ensure at least one thing to plot
-    if not (show_function or show_first_derivative or show_second_derivative):
+    if not (show_function or show_first_derivative or show_second_derivative or show_third_derivative):
         raise ValueError("At least one of show_function, show_first_derivative, "
-                        "show_second_derivative must be True")
+                        "show_second_derivative, or show_third_derivative must be True")
+
+    # Validate mutually exclusive options
+    if use_log2fc and use_delta_p:
+        raise ValueError("use_log2fc and use_delta_p are mutually exclusive. "
+                        "Use use_log2fc for negbinom modalities, use_delta_p for binomial modalities.")
 
     # Convert single feature to list
     if isinstance(features, str):
@@ -1595,7 +1853,7 @@ def plot_trans_functions(
         colors_list = list(colors)
 
     # Count how many subplots we need
-    n_plots = sum([show_function, show_first_derivative, show_second_derivative])
+    n_plots = sum([show_function, show_first_derivative, show_second_derivative, show_third_derivative])
 
     # Create figure if no axes provided
     if ax is None:
@@ -1622,6 +1880,17 @@ def plot_trans_functions(
             plot_types.append(('first_deriv', "dg/du"))
         if show_second_derivative:
             plot_types.append(('second_deriv', "d²g/du²"))
+        if show_third_derivative:
+            plot_types.append(('third_deriv', "d³g/du³"))
+    elif use_delta_p:
+        if show_function:
+            plot_types.append(('function', 'Δp'))
+        if show_first_derivative:
+            plot_types.append(('first_deriv', "dp/du"))
+        if show_second_derivative:
+            plot_types.append(('second_deriv', "d²p/du²"))
+        if show_third_derivative:
+            plot_types.append(('third_deriv', "d³p/du³"))
     else:
         if show_function:
             plot_types.append(('function', 'y'))
@@ -1629,6 +1898,8 @@ def plot_trans_functions(
             plot_types.append(('first_deriv', "dy/dx"))
         if show_second_derivative:
             plot_types.append(('second_deriv', "d²y/dx²"))
+        if show_third_derivative:
+            plot_types.append(('third_deriv', "d³y/dx³"))
 
     # Track successful plots
     successful_features = []
@@ -1647,10 +1918,19 @@ def plot_trans_functions(
                     continue
                 y_pred = y_log2fc
                 x_plot_feat = u_range  # Use u (log2FC of x) for this feature
+            elif use_delta_p:
+                # Get delta_p transformed values (probability difference from NTC)
+                delta_p, u_range, first_deriv, second_deriv, third_deriv = predict_trans_delta_p(
+                    model, feature, x_range, modality_name=modality_name, return_derivatives=True
+                )
+                if delta_p is None:
+                    continue
+                y_pred = delta_p
+                x_plot_feat = u_range  # Use u (log2FC of x) for this feature
             else:
                 y_pred = predict_trans_function(model, feature, x_range, modality_name=modality_name)
                 first_deriv, second_deriv, third_deriv = predict_trans_derivatives(model, feature, x_range, modality_name=modality_name)
-                # X values for plotting (same for all features when not using log2fc)
+                # X values for plotting (same for all features when not using log2fc/delta_p)
                 x_plot_feat = np.log2(x_range) if use_log2_x else x_range
         except ValueError as e:
             # Polynomial not supported
@@ -1669,9 +1949,50 @@ def plot_trans_functions(
 
         if show_posterior_samples or show_ci:
             # Get derivative samples if we need them
-            need_derivs = show_first_derivative or show_second_derivative
+            need_derivs = show_first_derivative or show_second_derivative or show_third_derivative
 
-            if use_log2fc:
+            if use_delta_p:
+                # Get function samples in delta_p space
+                if show_function:
+                    delta_p_samples, _ = predict_trans_delta_p_samples(
+                        model, feature, x_range,
+                        modality_name=modality_name,
+                        max_samples=max_posterior_samples
+                    )
+                    y_samples = delta_p_samples
+
+                # For derivatives in delta_p mode, we need p(x), dp/dx samples
+                # then transform using chain rule: dp/du = x * ln(2) * dp/dx
+                if need_derivs:
+                    S_samples, dS_samples, d2S_samples, d3S_samples = predict_trans_derivatives_samples(
+                        model, feature, x_range,
+                        modality_name=modality_name,
+                        max_samples=max_posterior_samples
+                    )
+                    if S_samples is not None and dS_samples is not None:
+                        # Transform derivatives to delta_p u-space using chain rule
+                        # dp/du = x * ln(2) * dp/dx
+                        # d²p/du² = ln(2) * (x * dp/dx + x² * ln(2) * d²p/dx²)
+                        epsilon = 1e-10
+                        ln2 = np.log(2)
+
+                        # First derivative: dp/du = x * ln(2) * dp/dx
+                        first_deriv_samples = x_range[np.newaxis, :] * ln2 * dS_samples
+
+                        # Second derivative: d²p/du² = ln(2) * (x * dp/dx + x² * ln(2) * d²p/dx²)
+                        if d2S_samples is not None:
+                            term1 = x_range[np.newaxis, :] * dS_samples
+                            term2 = (x_range[np.newaxis, :] ** 2) * ln2 * d2S_samples
+                            second_deriv_samples = ln2 * (term1 + term2)
+
+                        # Third derivative: d³p/du³ = (ln2)² * (x*dp/dx + 3x²*ln2*d²p/dx² + x³*(ln2)²*d³p/dx³)
+                        if d3S_samples is not None and d2S_samples is not None:
+                            term1 = x_range[np.newaxis, :] * dS_samples
+                            term2 = 3 * (x_range[np.newaxis, :] ** 2) * ln2 * d2S_samples
+                            term3 = (x_range[np.newaxis, :] ** 3) * (ln2**2) * d3S_samples
+                            third_deriv_samples = (ln2**2) * (term1 + term2 + term3)
+
+            elif use_log2fc:
                 # Get function samples in log2FC space
                 if show_function:
                     y_log2fc_samples, _ = predict_trans_log2fc_samples(
@@ -1706,6 +2027,17 @@ def plot_trans_functions(
                             term2 = (x_range[np.newaxis, :] ** 2) * d2S_samples / S_safe
                             term3 = (x_range[np.newaxis, :] ** 2) * (dS_samples / S_safe) ** 2
                             second_deriv_samples = ln2 * (term1 + term2 - term3)
+
+                        # Third derivative: d³g/du³ = (ln(2))² * [x*S'/S + 3x²*S''/S - 3x²*(S'/S)²
+                        #                                         + x³*S'''/S - 3x³*(S'/S)*(S''/S) + 2x³*(S'/S)³]
+                        if d3S_samples is not None and d2S_samples is not None:
+                            term1 = x_range[np.newaxis, :] * (dS_samples / S_safe)
+                            term2 = 3 * (x_range[np.newaxis, :] ** 2) * d2S_samples / S_safe
+                            term3 = -3 * (x_range[np.newaxis, :] ** 2) * (dS_samples / S_safe) ** 2
+                            term4 = (x_range[np.newaxis, :] ** 3) * (d3S_samples / S_safe)
+                            term5 = -3 * (x_range[np.newaxis, :] ** 3) * (dS_samples / S_safe) * d2S_samples / S_safe
+                            term6 = 2 * (x_range[np.newaxis, :] ** 3) * (dS_samples / S_safe) ** 3
+                            third_deriv_samples = (ln2**2) * (term1 + term2 + term3 + term4 + term5 + term6)
             else:
                 # Non-log2FC mode
                 if show_function:
@@ -1775,11 +2107,27 @@ def plot_trans_functions(
                 ax_curr.plot(x_plot_feat, second_deriv, color=color, alpha=alpha,
                            linewidth=linewidth, label=feature if feat_idx < 20 else None)
 
+            elif plot_type == 'third_deriv' and third_deriv is not None:
+                # Plot uncertainty for third derivative
+                if third_deriv_samples is not None:
+                    if show_posterior_samples:
+                        for s in range(third_deriv_samples.shape[0]):
+                            ax_curr.plot(x_plot_feat, third_deriv_samples[s, :], color=color,
+                                       alpha=posterior_alpha, linewidth=0.5)
+                    if show_ci:
+                        d3_lower = np.percentile(third_deriv_samples, 2.5, axis=0)
+                        d3_upper = np.percentile(third_deriv_samples, 97.5, axis=0)
+                        ax_curr.fill_between(x_plot_feat, d3_lower, d3_upper,
+                                           color=color, alpha=ci_alpha, linewidth=0)
+
+                ax_curr.plot(x_plot_feat, third_deriv, color=color, alpha=alpha,
+                           linewidth=linewidth, label=feature if feat_idx < 20 else None)
+
     if not successful_features:
         raise ValueError(f"Could not plot any of the requested features: {features}")
 
     # Set labels and formatting
-    if use_log2fc:
+    if use_log2fc or use_delta_p:
         xlabel = "log₂FC (x)"
     else:
         xlabel = "log₂(x)" if use_log2_x else "x"
@@ -1790,8 +2138,8 @@ def plot_trans_functions(
         ax_curr.set_ylabel(ylabel)
         ax_curr.axhline(y=0, color='gray', linestyle='--', linewidth=0.5, alpha=0.5)
 
-        # Add vertical line at u=0 (x = x_ntc) in log2FC mode
-        if use_log2fc:
+        # Add vertical line at u=0 (x = x_ntc) in log2FC or delta_p mode
+        if use_log2fc or use_delta_p:
             ax_curr.axvline(x=0, color='gray', linestyle='--', linewidth=0.5, alpha=0.5)
 
         if legend and len(successful_features) <= 20:
@@ -1799,7 +2147,12 @@ def plot_trans_functions(
 
     # Title
     if title is None:
-        suffix = " (log₂FC)" if use_log2fc else ""
+        if use_log2fc:
+            suffix = " (log₂FC)"
+        elif use_delta_p:
+            suffix = " (Δp)"
+        else:
+            suffix = ""
         if len(successful_features) == 1:
             title = f"Trans function: {successful_features[0]}{suffix}"
         else:

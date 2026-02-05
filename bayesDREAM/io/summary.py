@@ -1118,6 +1118,7 @@ class ModelSummarizer:
         - x_ntc: NTC mean for cis gene (same for all trans genes)
         - y_ntc: NTC mean for each trans gene
         - log2fc_at_u0: log2FC value at u=0 (x = x_ntc), i.e., g(0) = log2(y(x_ntc)) - log2(y_ntc)
+        - delta_p_at_u0: (binomial only) probability difference at u=0, i.e., p(x_ntc) - p_ntc
         - dg_du_at_u0, dg_du_at_u0_lower, dg_du_at_u0_upper: First derivative of log2FC at u=0 with 95% CI
         - d2g_du2_at_u0, d2g_du2_at_u0_lower, d2g_du2_at_u0_upper: Second derivative at u=0 with 95% CI
         - d3g_du3_at_u0, d3g_du3_at_u0_lower, d3g_du3_at_u0_upper: Third derivative at u=0 with 95% CI
@@ -2080,6 +2081,7 @@ class ModelSummarizer:
             #                    + 2x²*S'³/S³ - 3x*S'²/S² + S'/S)
 
             log2fc_at_0 = np.full(n_features, np.nan)
+            delta_p_at_0 = np.full(n_features, np.nan)  # For binomial: p(x_ntc) - p_ntc
             dg_du_at_0 = np.full(n_features, np.nan)
             d2g_du2_at_0 = np.full(n_features, np.nan)
             d3g_du3_at_0 = np.full(n_features, np.nan)
@@ -2091,6 +2093,10 @@ class ModelSummarizer:
             d2g_du2_at_0_upper = np.full(n_features, np.nan)
             d3g_du3_at_0_lower = np.full(n_features, np.nan)
             d3g_du3_at_0_upper = np.full(n_features, np.nan)
+
+            # Check if this is a binomial distribution (for delta_p computation)
+            distribution = data.get('distribution', 'negbinom')
+            is_binomial = (distribution == 'binomial')
 
             # Helper to compute all three derivatives at u=0 for given parameters
             def _compute_derivs_at_u0(alpha_i, beta_i, Vmax_a_i, Vmax_b_i, K_a_i, K_b_i, n_a_i, n_b_i, A_i, y_ntc_i):
@@ -2156,6 +2162,9 @@ class ModelSummarizer:
                         log2fc_at_0[i] = np.log2(y_at_ntc) - np.log2(y_ntc_i)
                     else:
                         log2fc_at_0[i] = np.nan
+                    # For binomial: compute delta_p = p(x_ntc) - p_ntc
+                    if is_binomial and np.isfinite(y_ntc_i):
+                        delta_p_at_0[i] = y_at_ntc - y_ntc_i
                     dg_du_at_0[i] = 0.0
                     d2g_du2_at_0[i] = 0.0
                     d3g_du3_at_0[i] = 0.0
@@ -2185,6 +2194,10 @@ class ModelSummarizer:
                 y_at_ntc = A_i + alpha_i * H_a_at_ntc + beta_i * H_b_at_ntc
 
                 # log2FC at u=0: g(0) = log2(y(x_ntc)) - log2(y_ntc)
+                # For binomial: also compute delta_p = p(x_ntc) - p_ntc
+                if is_binomial and np.isfinite(y_ntc_i):
+                    delta_p_at_0[i] = y_at_ntc - y_ntc_i
+
                 if y_at_ntc > epsilon and y_ntc_i > epsilon:
                     log2fc_at_0[i] = np.log2(y_at_ntc) - np.log2(y_ntc_i)
 
@@ -2243,6 +2256,9 @@ class ModelSummarizer:
                         d3g_du3_at_0_upper[i] = d3g_du3
 
             data['log2fc_at_u0'] = log2fc_at_0
+            # For binomial distributions: add delta_p_at_u0 (probability difference from NTC)
+            if is_binomial:
+                data['delta_p_at_u0'] = delta_p_at_0
             data['dg_du_at_u0'] = dg_du_at_0
             data['dg_du_at_u0_lower'] = dg_du_at_0_lower
             data['dg_du_at_u0_upper'] = dg_du_at_0_upper
