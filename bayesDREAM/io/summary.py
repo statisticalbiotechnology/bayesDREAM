@@ -5,7 +5,12 @@ Exports model results as R-friendly CSV files with:
 - Mean and 95% credible intervals for all parameters
 - Cell-wise and feature-wise summaries
 - Observed log2FC, predicted log2FC, inflection points for trans fits
-- Derivative roots and function classification for additive Hill
+- Derivative roots and function classification
+
+Supports three function types:
+- additive_hill: Two Hill components with independent weights
+- single_hill: Single Hill function with optional weight
+- polynomial: Polynomial in x with configurable degree
 """
 
 import os
@@ -36,6 +41,783 @@ class ModelSummarizer:
             Fitted bayesDREAM model instance
         """
         self.model = model
+
+    # ========================================================================
+    # Grid and Range Building Helpers
+    # ========================================================================
+
+    def _build_x_range_from_x_true(self, x_true: np.ndarray, n_grid: int = 2000, eps: float = 1e-6) -> Tuple[np.ndarray, float, float]:
+        """
+        Build a dense x grid spanning observed x_true range, spaced evenly in log2(x).
+        Returns x_range and (x_obs_min, x_obs_max).
+        """
+        x_true = np.asarray(x_true, dtype=float)
+        x_obs_min = max(np.nanmin(x_true), eps)
+        x_obs_max = np.nanmax(x_true)
+        if not np.isfinite(x_obs_min) or not np.isfinite(x_obs_max) or x_obs_max <= x_obs_min:
+            # fallback to a sane range if degenerate
+            x_obs_min = eps
+            x_obs_max = 1.0
+    
+        # Create evenly spaced points in log2 space for derivative root finding
+        log2_min = np.log2(x_obs_min)
+        log2_max = np.log2(x_obs_max)
+        
+        # widen slightly so bracketing doesn’t fail right at the edges
+        pad = 0.25  # in log2 units (~19% each side); tweak if you want
+        x_range = 2.0 ** np.linspace(log2_min - pad, log2_max + pad, 6000)
+        return x_range, x_obs_min, x_obs_max
+
+    def _single_hill_derivative_roots(
+        self,
+        alpha: float,
+        Vmax: float,
+        K: float,
+        n: float,
+        x_range: np.ndarray,
+        compute_third: bool = True
+    ) -> Tuple[List[float], List[float], List[float]]:
+        """
+        Find derivative roots for single Hill function: y(x) = A + alpha * Vmax * x^n / (K^n + x^n)
+
+        Since dy/dx = alpha * dHill/dx, roots of dy/dx are roots of dHill/dx (when alpha != 0).
+
+        Parameters
+        ----------
+        alpha : float
+            Weight/scale factor
+        Vmax : float
+            Hill amplitude
+        K : float
+            Half-max concentration
+        n : float
+            Hill coefficient
+        x_range : np.ndarray
+            Grid of x values to search for roots
+        compute_third : bool
+            Whether to compute third derivative roots
+
+        Returns
+        -------
+        roots_d1 : List[float]
+            First derivative roots (where dy/dx = 0)
+        roots_d2 : List[float]
+            Second derivative roots (where d²y/dx² = 0, inflection points)
+        roots_d3 : List[float]
+            Third derivative roots (where d³y/dx³ = 0)
+        """
+        # if alpha is (numerically) zero, y is flat -> all derivatives are ~0; roots are ill-defined.
+        if not np.isfinite(alpha) or abs(alpha) < 1e-12:
+            return [], [], []
+    
+        def d1(x):
+            return alpha * self._hill_first_derivative(x, Vmax, K, n)
+    
+        def d2(x):
+            return alpha * self._hill_second_derivative(x, Vmax, K, n)
+    
+        roots1 = self._find_roots_empirical(d1, x_range)
+        roots2 = self._find_roots_empirical(d2, x_range)
+    
+        roots3 = []
+        if compute_third:
+            def d3(x):
+                return alpha * self._hill_third_derivative(x, Vmax, K, n)
+            roots3 = self._find_roots_empirical(d3, x_range)
+    
+        return roots1, roots2, roots3
+
+    # ========================================================================
+    # Polynomial Derivative Helpers
+    # ========================================================================
+
+    def _poly_derivative_coefs(self, coefs_asc: np.ndarray, order: int) -> np.ndarray:
+        """
+        Given polynomial coefficients in ascending order:
+            p(x) = sum_{i=0}^d c[i] x^i
+        Return coefficients of the 'order'-th derivative, also ascending.
+        """
+        c = np.asarray(coefs_asc, dtype=float).copy()
+        for _ in range(order):
+            if c.size <= 1:
+                return np.array([0.0], dtype=float)
+            # derivative: new_c[i-1] = i * c[i] for i>=1
+            c = np.array([i * c[i] for i in range(1, c.size)], dtype=float)
+        return c
+    
+    
+    def _poly_eval(self, x: np.ndarray, coefs_asc: np.ndarray) -> np.ndarray:
+        """
+        Evaluate polynomial with ascending coefs at x (vectorized).
+        """
+        x = np.asarray(x, dtype=float)
+        c = np.asarray(coefs_asc, dtype=float)
+        # Horner's method (ascending -> reverse for Horner)
+        y = np.zeros_like(x, dtype=float)
+        for a in c[::-1]:
+            y = y * x + a
+        return y
+    
+    
+    def _poly_derivative_roots(
+        self,
+        coefs_asc: np.ndarray,
+        x_range: np.ndarray,
+        compute_third: bool = True
+    ) -> Tuple[List[float], List[float], List[float]]:
+        """
+        Find derivative roots for polynomial: p(x) = sum_{i=0}^d coef_i * x^i
+
+        Uses analytic derivative coefficients and empirical root finding.
+
+        Parameters
+        ----------
+        coefs_asc : np.ndarray
+            Coefficients in ascending order [c0, c1, ..., cd]
+        x_range : np.ndarray
+            Grid of x values to search for roots
+        compute_third : bool
+            Whether to compute third derivative roots
+
+        Returns
+        -------
+        roots_d1 : List[float]
+            First derivative roots (where p'(x) = 0, extrema)
+        roots_d2 : List[float]
+            Second derivative roots (where p''(x) = 0, inflection points)
+        roots_d3 : List[float]
+            Third derivative roots (where p'''(x) = 0)
+        """
+        c1 = self._poly_derivative_coefs(coefs_asc, 1)
+        c2 = self._poly_derivative_coefs(coefs_asc, 2)
+        c3 = self._poly_derivative_coefs(coefs_asc, 3) if compute_third else None
+    
+        def d1(x):
+            return self._poly_eval(x, c1)
+    
+        def d2(x):
+            return self._poly_eval(x, c2)
+    
+        roots1 = self._find_roots_empirical(d1, x_range)
+        roots2 = self._find_roots_empirical(d2, x_range)
+    
+        roots3 = []
+        if compute_third:
+            def d3(x):
+                return self._poly_eval(x, c3)
+            roots3 = self._find_roots_empirical(d3, x_range)
+    
+        return roots1, roots2, roots3
+
+    def _n_effective_from_ci(self, n_mean, n_lo, n_hi):
+        """
+        Feature-wise rule: if 0 is inside the 95% CI, treat n as exactly 0
+        for *all* downstream calculations.
+        """
+        n_mean = np.asarray(n_mean, dtype=float)
+        n_lo = np.asarray(n_lo, dtype=float)
+        n_hi = np.asarray(n_hi, dtype=float)
+        zero_in_ci = (n_lo <= 0.0) & (0.0 <= n_hi)
+        n_eff = n_mean.copy()
+        n_eff[zero_in_ci] = 0.0
+        return n_eff, zero_in_ci
+    
+    def _maybe_zero_scalar(self, x, do_zero: bool):
+        """Convenience for per-sample scalars."""
+        return 0.0 if do_zero else float(x)
+
+    def _full_log2fc_from_extrema_and_boundaries(
+        self,
+        A, alpha, Vmax_a, K_a, n_a,
+        beta, Vmax_b, K_b, n_b,
+        x_range,
+        eps=1e-10
+    ):
+        """
+        full_log2fc = log2(y_max / y_min) over x in [0, inf] using:
+          - boundary limits at x->0 and x->inf
+          - interior extrema from y'(x)=0
+    
+        Fixes:
+          - uses *per-feature widened* x grid that covers observed range AND EC50s
+          - uses permissive root finder for y'
+          - DOES NOT clamp negative y to eps (invalid for log2); ignores nonpositive candidates
+        """
+        # --- Hill boundary limits (handle n==0 -> constant 0.5*V) ---
+        def hill_limit_at_0(V, n):
+            if abs(n) < 1e-15:
+                return 0.5 * V
+            return V if n < 0 else 0.0
+    
+        def hill_limit_at_inf(V, n):
+            if abs(n) < 1e-15:
+                return 0.5 * V
+            return 0.0 if n < 0 else V
+    
+        y0 = A + alpha * hill_limit_at_0(Vmax_a, n_a) + beta * hill_limit_at_0(Vmax_b, n_b)
+        yinf = A + alpha * hill_limit_at_inf(Vmax_a, n_a) + beta * hill_limit_at_inf(Vmax_b, n_b)
+    
+        # --- Build a widened x grid for finding y' roots ---
+        xr = np.asarray(x_range, dtype=float)
+        xr = xr[np.isfinite(xr) & (xr > 0)]
+        if xr.size < 2:
+            # fallback wide grid
+            xr = np.logspace(-8, 8, 6000)
+    
+        log2_min = np.log2(np.min(xr))
+        log2_max = np.log2(np.max(xr))
+    
+        # include EC50s in the span
+        if np.isfinite(K_a) and K_a > 0:
+            log2_min = min(log2_min, np.log2(K_a))
+            log2_max = max(log2_max, np.log2(K_a))
+        if np.isfinite(K_b) and K_b > 0:
+            log2_min = min(log2_min, np.log2(K_b))
+            log2_max = max(log2_max, np.log2(K_b))
+    
+        # extra padding for safety (2^2 = 4x each side)
+        pad = 2.0
+        xgrid = 2.0 ** np.linspace(log2_min - pad, log2_max + pad, max(6000, xr.size))
+    
+        # --- y'(x) and roots ---
+        def yprime(x):
+            return self._additive_hill_first_derivative(
+                x, alpha, Vmax_a, K_a, n_a,
+                beta, Vmax_b, K_b, n_b
+            )
+    
+        # IMPORTANT: use the permissive root finder
+        roots = self._find_roots_empirical_loose(yprime, xgrid)
+    
+        # --- evaluate candidates ---
+        ys = [y0, yinf]
+    
+        # always include EC50s as candidates (cheap + helps if root finding misses one)
+        for xx in (K_a, K_b):
+            if np.isfinite(xx) and (xx is not None) and (xx > 0):
+                Ha = self._hill_value(xx, Vmax_a, K_a, n_a)
+                Hb = self._hill_value(xx, Vmax_b, K_b, n_b)
+                ys.append(A + alpha * Ha + beta * Hb)
+    
+        # extrema candidates
+        for r in (roots or []):
+            if not (np.isfinite(r) and r > 0):
+                continue
+            Ha = self._hill_value(r, Vmax_a, K_a, n_a)
+            Hb = self._hill_value(r, Vmax_b, K_b, n_b)
+            ys.append(A + alpha * Ha + beta * Hb)
+    
+        ys = np.asarray(ys, dtype=float)
+    
+        # DO NOT clamp negative/zero values for log2; those are invalid for log2(y)
+        ys = ys[np.isfinite(ys) & (ys > eps)]
+        if ys.size < 2:
+            return np.nan
+    
+        return float(np.log2(np.max(ys) / np.min(ys)))
+    
+    def _full_log2fc_candidates_no_roots(
+        self,
+        A, alpha, Vmax_a, K_a, n_a,
+        beta, Vmax_b, K_b, n_b,
+        x_candidates,
+        eps=1e-10
+    ):
+        """
+        full_log2fc using only boundary limits + supplied interior candidate points.
+        Fixes:
+          - includes EC50s as candidates
+          - ignores nonpositive y instead of clamping to eps
+        """
+        def hill_limit_at_0(V, n):
+            if abs(n) < 1e-15:
+                return 0.5 * V
+            return V if n < 0 else 0.0
+    
+        def hill_limit_at_inf(V, n):
+            if abs(n) < 1e-15:
+                return 0.5 * V
+            return 0.0 if n < 0 else V
+    
+        y0 = A + alpha * hill_limit_at_0(Vmax_a, n_a) + beta * hill_limit_at_0(Vmax_b, n_b)
+        yinf = A + alpha * hill_limit_at_inf(Vmax_a, n_a) + beta * hill_limit_at_inf(Vmax_b, n_b)
+    
+        xs = []
+        if x_candidates is not None:
+            for x in x_candidates:
+                if x is None:
+                    continue
+                x = float(x)
+                if np.isfinite(x) and (x > 0):
+                    xs.append(x)
+    
+        # add EC50s as cheap robust candidates
+        for xx in (K_a, K_b):
+            if np.isfinite(xx) and (xx is not None) and (xx > 0):
+                xs.append(float(xx))
+    
+        ys = [y0, yinf]
+        for x in xs:
+            Ha = self._hill_value(x, Vmax_a, K_a, n_a)
+            Hb = self._hill_value(x, Vmax_b, K_b, n_b)
+            ys.append(A + alpha * Ha + beta * Hb)
+    
+        ys = np.asarray(ys, dtype=float)
+        ys = ys[np.isfinite(ys) & (ys > eps)]
+        if ys.size < 2:
+            return np.nan
+    
+        return float(np.log2(np.max(ys) / np.min(ys)))
+
+    def _observed_log2fc_candidates_no_roots(
+        self,
+        A, alpha, Vmax_a, K_a, n_a,
+        beta, Vmax_b, K_b, n_b,
+        x_obs_min, x_obs_max,
+        x_candidates=None,
+        eps=1e-10
+    ):
+        """
+        observed_log2fc over [x_obs_min, x_obs_max] using endpoints + interior candidates.
+        Fix: ignores nonpositive y instead of clamping.
+        """
+        x0 = float(max(x_obs_min, eps))
+        x1 = float(max(x_obs_max, eps))
+    
+        def y_at(x):
+            Ha = self._hill_value(x, Vmax_a, K_a, n_a)
+            Hb = self._hill_value(x, Vmax_b, K_b, n_b)
+            return A + alpha * Ha + beta * Hb
+    
+        xs = [x0, x1]
+    
+        if x_candidates is not None:
+            for x in x_candidates:
+                if x is None:
+                    continue
+                x = float(x)
+                if np.isfinite(x) and (x0 <= x <= x1) and (x > 0):
+                    xs.append(x)
+    
+        # also include EC50s if they fall in-window
+        for xx in (K_a, K_b):
+            if np.isfinite(xx) and (xx is not None) and (x0 <= xx <= x1):
+                xs.append(float(xx))
+    
+        ys = np.asarray([y_at(x) for x in xs], dtype=float)
+        ys = ys[np.isfinite(ys) & (ys > eps)]
+        if ys.size < 2:
+            return np.nan
+    
+        return float(np.log2(np.max(ys) / np.min(ys)))
+
+    def _is_flat_feature(self,
+                         alpha_lower, alpha_upper,
+                         beta_lower, beta_upper,
+                         n_a_lower, n_a_upper,
+                         n_b_lower, n_b_upper):
+        """
+        A feature is flat if neither Hill component is active.
+        """
+        dep_a = not (alpha_lower <= 0 <= alpha_upper) and not (n_a_lower <= 0 <= n_a_upper)
+        dep_b = not (beta_lower  <= 0 <= beta_upper) and not (n_b_lower <= 0 <= n_b_upper)
+        return not (dep_a or dep_b)
+
+    def _build_u_range_from_observed_x(
+        self,
+        x_obs_min: float,
+        x_obs_max: float,
+        x_ntc: float,
+        n_grid: int = 2000,
+        pad_u: float = 0.25,     # same idea as your pad in log2 units
+        eps: float = 1e-10
+    ) -> np.ndarray:
+        x0 = max(float(x_obs_min), eps)
+        x1 = max(float(x_obs_max), eps)
+        xntc = max(float(x_ntc), eps)
+    
+        u_min = np.log2(x0) - np.log2(xntc)
+        u_max = np.log2(x1) - np.log2(xntc)
+    
+        # widen slightly
+        u = np.linspace(u_min - pad_u, u_max + pad_u, int(n_grid))
+        return u
+    
+    def _g_derivs_at_u(
+        self,
+        u: np.ndarray,
+        A, alpha, Vmax_a, K_a, n_a,
+        beta, Vmax_b, K_b, n_b,
+        x_ntc: float,
+        eps: float = 1e-10
+    ):
+        """
+        Vectorized g'(u), g''(u), g'''(u) for:
+          g(u) = log2(y(x)) - log2(y_ntc),  x = x_ntc * 2^u
+          y(x) = A + alpha*Ha(x) + beta*Hb(x)
+        Uses S=y, S',S'',S''' w.r.t x and chain-rule to u.
+    
+        Returns: g1, g2, g3 arrays (same shape as u).
+        """
+        u = np.asarray(u, dtype=float)
+        x = max(float(x_ntc), eps) * (2.0 ** u)
+        ln2 = np.log(2.0)
+    
+        # S(x)
+        # (use your stable hill_value; vectorize via np.vectorize or do explicit log-space like you did elsewhere)
+        # We'll do explicit log-space for speed/consistency:
+        x_safe = np.maximum(x, eps)
+    
+        def hill_vec(Vmax, K, n):
+            K_safe = max(float(K), eps)
+            n = float(n)
+            if abs(n) < 1e-15:
+                return np.full_like(x_safe, 0.5 * float(Vmax), dtype=float)
+            x_n = self._exp_clip(n * np.log(x_safe))
+            K_n = self._exp_clip(n * np.log(K_safe))
+            return float(Vmax) * x_n / (K_n + x_n)
+    
+        Ha = hill_vec(Vmax_a, K_a, n_a)
+        Hb = hill_vec(Vmax_b, K_b, n_b)
+        S = float(A) + float(alpha) * Ha + float(beta) * Hb
+        S = np.where(np.isfinite(S), S, np.nan)
+    
+        # S', S'', S''' (w.r.t x)
+        Sp  = self._additive_hill_first_derivative(x_safe,  alpha, Vmax_a, K_a, n_a, beta, Vmax_b, K_b, n_b)
+        Spp = self._additive_hill_second_derivative(x_safe, alpha, Vmax_a, K_a, n_a, beta, Vmax_b, K_b, n_b)
+        Sppp= self._additive_hill_third_derivative(x_safe,  alpha, Vmax_a, K_a, n_a, beta, Vmax_b, K_b, n_b)
+    
+        # Guard bad S
+        bad = ~np.isfinite(S) | (S <= eps)
+        if np.all(bad):
+            nan = np.full_like(u, np.nan, dtype=float)
+            return nan, nan, nan
+    
+        # ratios
+        r1 = Sp / S
+        r2 = Spp / S
+        r3 = Sppp / S
+    
+        # g'(u) = x * S'/S
+        g1 = x_safe * r1
+    
+        # g''(u) = ln2 * [ x*S'/S + x^2*S''/S - x^2*(S'/S)^2 ]
+        x2 = x_safe * x_safe
+        g2 = ln2 * (x_safe * r1 + x2 * r2 - x2 * (r1 ** 2))
+    
+        # g'''(u) = (ln2)^2 * [ x*r1 + 3x^2*r2 - 3x^2*r1^2 + x^3*r3 - 3x^3*r1*r2 + 2x^3*r1^3 ]
+        x3 = x2 * x_safe
+        ln2_sq = ln2 * ln2
+        g3 = ln2_sq * (x_safe * r1 + 3.0 * x2 * r2 - 3.0 * x2 * (r1 ** 2)
+                       + x3 * r3 - 3.0 * x3 * r1 * r2 + 2.0 * x3 * (r1 ** 3))
+    
+        # Apply bad-mask
+        g1 = np.where(bad, np.nan, g1)
+        g2 = np.where(bad, np.nan, g2)
+        g3 = np.where(bad, np.nan, g3)
+        return g1, g2, g3
+
+    def _S_derivs_at_u(
+        self,
+        u: np.ndarray,
+        A, alpha, Vmax_a, K_a, n_a,
+        beta, Vmax_b, K_b, n_b,
+        x_ntc: float,
+        eps: float = 1e-12
+    ):
+        u = np.asarray(u, dtype=float)
+        x = max(float(x_ntc), eps) * (2.0 ** u)
+        x = np.maximum(x, eps)
+    
+        # S(x)
+        Ha = np.vectorize(self._hill_value)(x, Vmax_a, K_a, n_a)
+        Hb = np.vectorize(self._hill_value)(x, Vmax_b, K_b, n_b)
+        S  = float(A) + float(alpha) * Ha + float(beta) * Hb
+    
+        # derivatives wrt x
+        Sp   = self._additive_hill_first_derivative (x, alpha, Vmax_a, K_a, n_a, beta, Vmax_b, K_b, n_b, epsilon=1e-12)
+        Spp  = self._additive_hill_second_derivative(x, alpha, Vmax_a, K_a, n_a, beta, Vmax_b, K_b, n_b, epsilon=1e-12)
+        Sppp = self._additive_hill_third_derivative (x, alpha, Vmax_a, K_a, n_a, beta, Vmax_b, K_b, n_b, epsilon=1e-12)
+    
+        # log2FC is undefined if S<=0; mask these out so they don't create bracketing artifacts
+        bad = ~np.isfinite(S) | (S <= eps)
+        S    = np.where(bad, np.nan, S)
+        Sp   = np.where(bad, np.nan, Sp)
+        Spp  = np.where(bad, np.nan, Spp)
+        Sppp = np.where(bad, np.nan, Sppp)
+    
+        return x, S, Sp, Spp, Sppp
+    
+    def _find_roots_on_grid(
+        self,
+        func_u,
+        u_grid,
+        *,
+        tol_u_dedup=1e-3,
+        flat_atol=1e-10,
+        flat_q=0.95,
+        include_tangent=True,
+        tangent_atol=None,
+        tangent_neighbor_mult=25.0,
+        maxiter=200,
+    ):
+        """
+        Robust 1D root finder on a fixed grid:
+          - sign-change bracketing on adjacent grid points
+          - optional tangent roots (touching 0)
+          - flat-curve bailout to avoid spurious/infinite roots
+    
+        Parameters
+        ----------
+        func_u : callable
+            Vectorized: takes u array -> y array (same length).
+        u_grid : array-like
+            Monotone grid in u.
+        tol_u_dedup : float
+            Deduplicate roots closer than this in u.
+        flat_atol : float
+            If the function is essentially zero everywhere (robustly), return [].
+        flat_q : float
+            Quantile of |y| used to estimate amplitude for flatness.
+        include_tangent : bool
+            Also detect "touching" roots without sign change.
+        tangent_atol : float or None
+            Absolute tolerance for tangent detection. If None, set from robust amplitude.
+        tangent_neighbor_mult : float
+            Neighbors must be this many times larger than tangent_atol to accept tangent.
+        """
+        u = np.asarray(u_grid, dtype=float).ravel()
+        if u.size < 3:
+            return []
+    
+        y = np.asarray(func_u(u), dtype=float).ravel()
+        if y.size != u.size:
+            raise ValueError(f"func_u(u_grid) returned shape {y.shape}, expected {(u.size,)}")
+    
+        finite = np.isfinite(u) & np.isfinite(y)
+        if finite.sum() < 3:
+            return []
+    
+        # ---- flat-curve bailout (prevents "infinite roots" in near-zero curves)
+        amp = np.nanquantile(np.abs(y[finite]), flat_q)
+        if (not np.isfinite(amp)) or (amp < flat_atol):
+            return []
+    
+        # choose tangent threshold
+        if tangent_atol is None:
+            tangent_atol = max(1e-12, 1e-6 * amp)
+    
+        def f_scalar(z):
+            return float(np.asarray(func_u(np.array([z], dtype=float))).ravel()[0])
+    
+        roots = []
+    
+        # ---- sign-change bracketing on ADJACENT points (no deadband / no snapping)
+        for i in range(u.size - 1):
+            if not (np.isfinite(y[i]) and np.isfinite(y[i + 1])):
+                continue
+    
+            ui, uj = u[i], u[i + 1]
+            yi, yj = y[i], y[i + 1]
+    
+            # exact zeros on grid
+            if yi == 0.0:
+                roots.append(ui)
+                continue
+            if yj == 0.0:
+                roots.append(uj)
+                continue
+    
+            # strict sign change
+            if yi * yj < 0.0:
+                try:
+                    r = brentq(f_scalar, ui, uj, maxiter=maxiter)
+                    if np.isfinite(r):
+                        roots.append(r)
+                except Exception:
+                    pass
+    
+        # ---- tangent roots (touching 0 without sign change)
+        if include_tangent:
+            ay = np.abs(y)
+            for i in range(1, u.size - 1):
+                if not (np.isfinite(y[i - 1]) and np.isfinite(y[i]) and np.isfinite(y[i + 1])):
+                    continue
+    
+                if ay[i] > tangent_atol:
+                    continue
+    
+                # local minimum of |y|
+                if not (ay[i] <= ay[i - 1] and ay[i] <= ay[i + 1]):
+                    continue
+    
+                # neighbors must be clearly away from zero
+                if (ay[i - 1] < tangent_neighbor_mult * tangent_atol) or (ay[i + 1] < tangent_neighbor_mult * tangent_atol):
+                    continue
+    
+                # same sign on both sides = touching
+                if np.sign(y[i - 1]) == np.sign(y[i + 1]):
+                    roots.append(u[i])
+    
+        # ---- dedup & sort
+        roots = sorted([float(r) for r in roots if np.isfinite(r)])
+        if not roots:
+            return []
+    
+        deduped = [roots[0]]
+        for r in roots[1:]:
+            if abs(r - deduped[-1]) > tol_u_dedup:
+                deduped.append(r)
+    
+        return deduped
+
+    def _find_roots_empirical_ugrid(
+        self,
+        func_u,
+        u_range: np.ndarray,
+        tol_u_dedup: float = 1e-3,
+        zero_atol: float = 1e-12,
+        zero_rtol: float = 1e-9,
+        noise_mult: float = 8.0,
+        hysteresis: float = 3.0,
+        include_near_zero_minima: bool = True,
+        brentq_maxiter: int = 100,
+    ) -> List[float]:
+        """
+        Robust root finder on a u-grid that:
+          - returns [] for truly flat curves (prevents 'infinite roots')
+          - avoids spurious roots in long near-zero plateaus / jittery regions
+          - still finds real roots (including sign-change roots) reliably
+    
+        Strategy:
+          1) Compute a deadband threshold thr using scale + noise floor (MAD of diffs).
+          2) Snap |y|<=thr to 0 for sign bookkeeping.
+          3) Bracket roots only between successive NONZERO sign points (skips plateaus).
+          4) Optionally add tangent roots via isolated minima of |y| near 0.
+        """
+        u = np.asarray(u_range, dtype=float)
+        if u.size < 2:
+            return []
+    
+        y = np.asarray(func_u(u), dtype=float)
+    
+        finite = np.isfinite(u) & np.isfinite(y)
+        if finite.sum() < 3:
+            return []
+    
+        uu = u[finite]
+        yy = y[finite]
+    
+        # scale
+        scale = np.nanmax(np.abs(yy))
+        if not np.isfinite(scale) or scale == 0.0:
+            return []
+    
+        # noise floor from finite first differences
+        dy = np.diff(yy)
+        dy = dy[np.isfinite(dy)]
+        if dy.size > 0:
+            mad = np.median(np.abs(dy - np.median(dy)))
+            noise = 1.4826 * mad
+        else:
+            noise = 0.0
+    
+        thr = max(zero_atol, zero_rtol * scale, noise_mult * noise)
+        thr_hi = hysteresis * thr
+    
+        # --- flat curve guard: if everything is inside deadband, treat as "no roots"
+        if np.all(np.abs(yy) <= thr):
+            return []
+    
+        # snap for sign bookkeeping
+        y_snap = yy.copy()
+        y_snap[np.abs(y_snap) <= thr] = 0.0
+        s = np.sign(y_snap)
+    
+        roots: List[float] = []
+    
+        # --- 1) sign-change roots, bracketing ONLY between nonzero sign points
+        nz = np.where(s != 0)[0]
+        if nz.size >= 2:
+            for a, b in zip(nz[:-1], nz[1:]):
+                if s[a] == s[b]:
+                    continue
+    
+                uL, uR = float(uu[a]), float(uu[b])
+    
+                # hysteresis: at least one endpoint must be meaningfully away from 0
+                if (abs(yy[a]) < thr_hi) and (abs(yy[b]) < thr_hi):
+                    continue
+    
+                try:
+                    root = brentq(
+                        lambda z: float(np.asarray(func_u(np.array([z]))).ravel()[0]),
+                        uL, uR,
+                        maxiter=brentq_maxiter
+                    )
+                except Exception:
+                    # fallback: linear interpolation in u
+                    yL = float(yy[a]); yR = float(yy[b])
+                    t = abs(yL) / (abs(yL) + abs(yR))
+                    root = uL + t * (uR - uL)
+    
+                if np.isfinite(root):
+                    roots.append(float(root))
+    
+        # --- 2) tangent roots: isolated minima of |y| near 0
+        if include_near_zero_minima and yy.size >= 3:
+            ay = np.abs(yy)
+            mins = np.where((ay[1:-1] <= ay[:-2]) & (ay[1:-1] <= ay[2:]))[0] + 1
+            for i in mins:
+                if ay[i] > thr:
+                    continue
+    
+                # "isolated": neighbors should be clearly away from zero
+                if (ay[i - 1] < thr_hi) and (ay[i + 1] < thr_hi):
+                    continue
+    
+                # and it's a touch (no sign change across neighbors)
+                if np.sign(yy[i - 1]) == 0 or np.sign(yy[i + 1]) == 0:
+                    continue
+                if np.sign(yy[i - 1]) != np.sign(yy[i + 1]):
+                    continue
+    
+                roots.append(float(uu[i]))
+    
+        if not roots:
+            return []
+    
+        # de-duplicate in u
+        roots = np.array([r for r in roots if np.isfinite(r)], dtype=float)
+        if roots.size == 0:
+            return []
+    
+        roots.sort()
+        out = [float(roots[0])]
+        last = float(roots[0])
+        for r in roots[1:]:
+            r = float(r)
+            if abs(r - last) > tol_u_dedup:
+                out.append(r)
+                last = r
+    
+        return out
+
+    def _roots_x_to_u_str(self, roots_x: List[float], x_ntc: float, eps: float = 1e-10) -> str:
+        if (roots_x is None) or (len(roots_x) == 0) or (x_ntc is None) or (not np.isfinite(x_ntc)) or (x_ntc <= 0):
+            return np.nan
+        log2_xntc = np.log2(max(float(x_ntc), eps))
+        u = []
+        for r in roots_x:
+            if r is None:
+                continue
+            r = float(r)
+            if np.isfinite(r) and (r > 0):
+                u.append(np.log2(max(r, eps)) - log2_xntc)
+        if len(u) == 0:
+            return np.nan
+        return ";".join([f"{val:.4f}" for val in u])
+
 
     # ========================================================================
     # Technical Fit Summary
@@ -286,7 +1068,6 @@ class ModelSummarizer:
         compute_inflection: bool = True,
         compute_full_log2fc: bool = True,
         compute_derivative_roots: bool = True,
-        use_posterior_samples: bool = False,
         compute_log2fc_params: bool = True
     ):
         """
@@ -342,7 +1123,7 @@ class ModelSummarizer:
         - d3g_du3_at_u0, d3g_du3_at_u0_lower, d3g_du3_at_u0_upper: Third derivative at u=0 with 95% CI
         - EC50_a_log2fc, EC50_b_log2fc: EC50 in log2FC x-space (log2(K) - log2(x_ntc))
         - inflection_a_log2fc, inflection_b_log2fc: Inflection points in log2FC x-space
-        - first_deriv_roots_log2fc, second_deriv_roots_log2fc, third_deriv_roots_log2fc: Roots in log2FC x-space
+        - first_deriv_roots_log2fc, second_deriv_roots_log2fc, third_deriv_roots_log2fc: Roots in log2FC x-space and y-space
         - A_log2fc: Baseline in log2FC y-space (log2(A) - log2(y_ntc))
 
         For single_hill:
@@ -369,9 +1150,6 @@ class ModelSummarizer:
         compute_derivative_roots : bool
             Whether to compute roots of first and second derivatives (default: True).
             Roots are found empirically over the observed x_range.
-        use_posterior_samples : bool
-            If True, compute derivative roots for each posterior sample and report
-            summary statistics. If False (default), compute only for mean parameters.
         compute_log2fc_params : bool
             If True (default), compute parameters in log2FC space relative to NTC:
             - x-axis: log2(x) - log2(x_ntc) where x_ntc is cis gene NTC mean
@@ -423,12 +1201,15 @@ class ModelSummarizer:
         n_features = len(feature_names)
 
         # Determine function type from posterior keys
-        if 'Vmax_a' in posterior and 'Vmax_b' in posterior:
-            function_type = 'additive_hill'
-        elif 'params' in posterior:
-            function_type = 'single_hill'
-        elif 'poly_coefs' in posterior:
+        keys = set(posterior.keys())
+        if {'poly_coefs'} <= keys:
             function_type = 'polynomial'
+        elif {'Vmax_a','K_a','n_a','Vmax_b','K_b','n_b'} <= keys:
+            # Could be additive or nested; decide by presence of an indicator you store,
+            # OR fall back to model setting if available.
+            function_type = getattr(self.model, 'function_type', 'additive_hill')
+        elif {'Vmax_a','K_a','n_a'} <= keys:
+            function_type = 'single_hill'
         else:
             raise ValueError(
                 f"Cannot determine function_type from posterior_samples_trans keys. "
@@ -460,10 +1241,10 @@ class ModelSummarizer:
             # Create evenly spaced points in log2 space for derivative root finding
             log2_min = np.log2(x_obs_min)
             log2_max = np.log2(x_obs_max)
-            x_range = 2 ** np.linspace(log2_min, log2_max, 2000)
-            # Store in data dict
+            x_range, x_obs_min, x_obs_max = self._build_x_range_from_x_true(x_true, n_grid=6000, eps=1e-6)
             data['x_obs_min'] = x_obs_min
             data['x_obs_max'] = x_obs_max
+
 
         # Get x_ntc and y_ntc for log2FC parameter computation
         x_ntc = None
@@ -504,20 +1285,31 @@ class ModelSummarizer:
             data = self._add_additive_hill_params(
                 data, posterior, n_features,
                 compute_inflection, compute_full_log2fc,
-                compute_derivative_roots, use_posterior_samples, x_range,
+                compute_derivative_roots, x_range,
                 compute_log2fc_params, x_ntc, y_ntc,
                 x_obs_min, x_obs_max
             )
         elif function_type == 'single_hill':
             data = self._add_single_hill_params(
                 data, posterior, n_features,
-                compute_inflection, compute_full_log2fc,
-                compute_log2fc_params, x_ntc, y_ntc
+                compute_inflection=compute_inflection,
+                compute_full_log2fc=compute_full_log2fc,
+                compute_derivative_roots=compute_derivative_roots,
+                x_range=x_range,
+                x_obs_min=x_obs_min,
+                x_obs_max=x_obs_max,
+                compute_log2fc_params=compute_log2fc_params,
+                x_ntc=x_ntc,
+                y_ntc=y_ntc
             )
         elif function_type == 'polynomial':
             data = self._add_polynomial_params(
                 data, posterior, n_features,
-                compute_full_log2fc
+                compute_full_log2fc=compute_full_log2fc,
+                compute_derivative_roots=compute_derivative_roots,
+                x_range=x_range,
+                x_obs_min=x_obs_min,
+                x_obs_max=x_obs_max
             )
 
         df = pd.DataFrame(data)
@@ -598,7 +1390,7 @@ class ModelSummarizer:
         return log2fc, log2fc_se
 
     def _add_additive_hill_params(self, data, posterior, n_features, compute_inflection, compute_full_log2fc,
-                                    compute_derivative_roots=True, use_posterior_samples=False, x_range=None,
+                                    compute_derivative_roots=True, x_range=None,
                                     compute_log2fc_params=False, x_ntc=None, y_ntc=None,
                                     x_obs_min=None, x_obs_max=None):
         """
@@ -624,12 +1416,30 @@ class ModelSummarizer:
 
         return self._add_additive_hill_params_individual(
             data, posterior, n_features, compute_inflection, compute_full_log2fc,
-            compute_derivative_roots, use_posterior_samples, x_range,
+            compute_derivative_roots, x_range,
             compute_log2fc_params, x_ntc, y_ntc, x_obs_min, x_obs_max
         )
 
+    # Helper function to compute y(x) given parameters
+    def _hill_value(self, x, Vmax, K, n, epsilon=1e-12):
+        x_safe = max(float(x), epsilon)
+        K_safe = max(float(K), epsilon)
+        Vmax = float(Vmax); n = float(n)
+    
+        logx = np.log(x_safe)
+        logK = np.log(K_safe)
+    
+        x_n = self._exp_clip(n * logx)
+        K_n = self._exp_clip(n * logK)
+    
+        denom = K_n + x_n
+        with np.errstate(over='ignore', under='ignore', invalid='ignore', divide='ignore'):
+            out = Vmax * x_n / denom
+    
+        return out if np.isfinite(out) else np.nan
+
     def _add_additive_hill_params_individual(self, data, posterior, n_features, compute_inflection, compute_full_log2fc,
-                                              compute_derivative_roots=True, use_posterior_samples=False, x_range=None,
+                                              compute_derivative_roots=True, x_range=None,
                                               compute_log2fc_params=False, x_ntc=None, y_ntc=None,
                                               x_obs_min=None, x_obs_max=None):
         """
@@ -699,6 +1509,35 @@ class ModelSummarizer:
                     param = param.mean(axis=tuple(range(2, param.ndim)))
             return param  # [n_samples, n_features] or [n_features]
 
+        def extract_param_abs(name):
+            """
+            Posterior summaries for abs(parameter). This is needed for inflection because it depends on |n|.
+            Returns mean, lower(2.5%), upper(97.5%) of |param|.
+            """
+            param = posterior[name]
+            if isinstance(param, torch.Tensor):
+                param = param.cpu().numpy()
+        
+            # Match extract_param logic:
+            if param.ndim == 3 and param.shape[1] == 1:
+                param = param.squeeze(1)
+            elif param.ndim > 2:
+                if param.shape[1] == 1:
+                    param = param.squeeze(1)
+                if param.ndim > 2:
+                    param = param.mean(axis=tuple(range(2, param.ndim)))
+        
+            param_abs = np.abs(param)
+        
+            if param_abs.ndim >= 2:
+                mean_val = param_abs.mean(axis=0)
+                lower_val = np.quantile(param_abs, 0.025, axis=0)
+                upper_val = np.quantile(param_abs, 0.975, axis=0)
+            else:
+                mean_val = lower_val = upper_val = param_abs
+        
+            return mean_val, lower_val, upper_val
+        
         # Component A (first Hill function)
         Vmax_a_mean, Vmax_a_lower, Vmax_a_upper = extract_param('Vmax_a')
         K_a_mean, K_a_lower, K_a_upper = extract_param('K_a')  # EC50
@@ -729,6 +1568,14 @@ class ModelSummarizer:
         data['n_b_lower'] = n_b_lower
         data['n_b_upper'] = n_b_upper
 
+        # APPLY YOUR RULE: if 0 in 95% CI, set n=0 for all downstream computations
+        n_a_eff_mean, n_a_zeroed = self._n_effective_from_ci(n_a_mean, n_a_lower, n_a_upper)
+        n_b_eff_mean, n_b_zeroed = self._n_effective_from_ci(n_b_mean, n_b_lower, n_b_upper)
+        
+        # overwrite the n used for computations (but keep original summaries as exported)
+        n_a_used = n_a_eff_mean
+        n_b_used = n_b_eff_mean
+        
         # Pi_y (sparsity weight) - optional
         if 'pi_y' in posterior:
             pi_y_mean, pi_y_lower, pi_y_upper = extract_param('pi_y')
@@ -814,15 +1661,32 @@ class ModelSummarizer:
 
         # Compute inflection points for individual Hill components
         if compute_inflection:
-            # Inflection point for Hill function: x_inflection = EC50 * ((n - 1) / (n + 1)) ^ (1/n)
-            inflection_a_mean = self._compute_hill_inflection(n_a_mean, K_a_mean)
-            inflection_a_lower = self._compute_hill_inflection(n_a_lower, K_a_lower)
-            inflection_a_upper = self._compute_hill_inflection(n_a_upper, K_a_upper)
-
-            inflection_b_mean = self._compute_hill_inflection(n_b_mean, K_b_mean)
-            inflection_b_lower = self._compute_hill_inflection(n_b_lower, K_b_lower)
-            inflection_b_upper = self._compute_hill_inflection(n_b_upper, K_b_upper)
-
+            # Use the n USED for computations (already zeroed if CI includes 0)
+            nA = np.asarray(n_a_used, dtype=float)
+            nB = np.asarray(n_b_used, dtype=float)
+        
+            # For CI, we should use |n| bounds. A conservative choice:
+            #   nabs_lower = min(|n_lo|, |n_hi|)  (lower bound on magnitude, but can be too small if CI spans 0)
+            #   nabs_upper = max(|n_lo|, |n_hi|)
+            nAabs_lo = np.minimum(np.abs(n_a_lower), np.abs(n_a_upper))
+            nAabs_hi = np.maximum(np.abs(n_a_lower), np.abs(n_a_upper))
+            nBabs_lo = np.minimum(np.abs(n_b_lower), np.abs(n_b_upper))
+            nBabs_hi = np.maximum(np.abs(n_b_lower), np.abs(n_b_upper))
+        
+            # If you zeroed n because CI contains 0, enforce magnitude bounds = 0 too
+            nAabs_lo[n_a_zeroed] = 0.0
+            nAabs_hi[n_a_zeroed] = 0.0
+            nBabs_lo[n_b_zeroed] = 0.0
+            nBabs_hi[n_b_zeroed] = 0.0
+        
+            inflection_a_mean = self._compute_hill_inflection(nA,      K_a_mean)
+            inflection_a_lower = self._compute_hill_inflection(nAabs_lo, K_a_lower)  # magnitude-lower
+            inflection_a_upper = self._compute_hill_inflection(nAabs_hi, K_a_upper)  # magnitude-upper
+        
+            inflection_b_mean = self._compute_hill_inflection(nB,      K_b_mean)
+            inflection_b_lower = self._compute_hill_inflection(nBabs_lo, K_b_lower)
+            inflection_b_upper = self._compute_hill_inflection(nBabs_hi, K_b_upper)
+        
             data['inflection_a_mean'] = inflection_a_mean
             data['inflection_a_lower'] = inflection_a_lower
             data['inflection_a_upper'] = inflection_a_upper
@@ -843,6 +1707,9 @@ class ModelSummarizer:
         first_deriv_roots_mean_list = []
         second_deriv_roots_mean_list = []
         third_deriv_roots_mean_list = []
+        first_deriv_roots_log2fc_mean_list = []
+        second_deriv_roots_log2fc_mean_list = []
+        third_deriv_roots_log2fc_mean_list = []
         n_first_deriv_roots = []
         n_second_deriv_roots = []
         n_third_deriv_roots = []
@@ -850,12 +1717,8 @@ class ModelSummarizer:
         full_log2fc_lower_list = []
         full_log2fc_upper_list = []
         observed_log2fc_list = []  # log2(y_max / y_min) over observed x range
-
-        # Per-sample results (if requested)
-        if use_posterior_samples:
-            first_deriv_roots_samples_list = []
-            second_deriv_roots_samples_list = []
-            third_deriv_roots_samples_list = []
+        observed_log2fc_lower_list = []
+        observed_log2fc_upper_list = []
 
         # Process each feature
         for i in range(n_features):
@@ -866,8 +1729,8 @@ class ModelSummarizer:
             Vmax_b_i = Vmax_b_mean[i]
             K_a_i = K_a_mean[i]
             K_b_i = K_b_mean[i]
-            n_a_i = n_a_mean[i]
-            n_b_i = n_b_mean[i]
+            n_a_i = float(n_a_used[i])
+            n_b_i = float(n_b_used[i])
             A_i = A_mean[i]
 
             # Find derivative roots for mean parameters
@@ -882,7 +1745,7 @@ class ModelSummarizer:
                         x, alpha_i, Vmax_a_i, K_a_i, n_a_i,
                         beta_i, Vmax_b_i, K_b_i, n_b_i
                     )
-                first_roots_mean = self._find_roots_empirical(first_deriv_func, x_range)
+                first_roots_mean = self._find_roots_empirical_loose(first_deriv_func, x_range)
 
                 # Second derivative roots (inflection points of combined function)
                 def second_deriv_func(x):
@@ -890,7 +1753,7 @@ class ModelSummarizer:
                         x, alpha_i, Vmax_a_i, K_a_i, n_a_i,
                         beta_i, Vmax_b_i, K_b_i, n_b_i
                     )
-                second_roots_mean = self._find_roots_empirical(second_deriv_func, x_range)
+                second_roots_mean = self._find_roots_empirical_loose(second_deriv_func, x_range)
 
                 # Third derivative roots (where d³y/dx³ = 0)
                 def third_deriv_func(x):
@@ -898,7 +1761,95 @@ class ModelSummarizer:
                         x, alpha_i, Vmax_a_i, K_a_i, n_a_i,
                         beta_i, Vmax_b_i, K_b_i, n_b_i
                     )
-                third_roots_mean = self._find_roots_empirical(third_deriv_func, x_range)
+                third_roots_mean = self._find_roots_empirical_loose(third_deriv_func, x_range)
+                
+            # --- roots in log2FC x-space (u-space): dg/du=0, d2g/du2=0, d3g/du3=0 ---
+            u_roots_g1 = []
+            u_roots_g2 = []
+            u_roots_g3 = []
+            
+            if compute_log2fc_params and (x_ntc is not None) and np.isfinite(x_ntc) and (x_ntc > 0) \
+               and (x_obs_min is not None) and (x_obs_max is not None):
+            
+                # Base u-range from observed x-window
+                u_range = self._build_u_range_from_observed_x(
+                    x_obs_min=x_obs_min,
+                    x_obs_max=x_obs_max,
+                    x_ntc=x_ntc,
+                    n_grid=6000,
+                    pad_u=0.25
+                )
+                
+                # WIDEN using EC50s so we don't miss dg/du roots outside observed x-range
+                eps = 1e-10
+                log2_xntc = np.log2(max(float(x_ntc), eps))
+                u_ec50 = []
+                if np.isfinite(K_a_i) and K_a_i > 0:
+                    u_ec50.append(np.log2(max(float(K_a_i), eps)) - log2_xntc)
+                if np.isfinite(K_b_i) and K_b_i > 0:
+                    u_ec50.append(np.log2(max(float(K_b_i), eps)) - log2_xntc)
+                
+                if len(u_ec50) > 0:
+                    umin = min(float(np.nanmin(u_range)), float(np.min(u_ec50))) - 1.0   # 1.0 in u = 2x padding
+                    umax = max(float(np.nanmax(u_range)), float(np.max(u_ec50))) + 1.0
+                    u_range = np.linspace(umin, umax, 6000)
+            
+                def g1_num_u(u):
+                    # root of g'(u) is root of Sp (since x>0 and ln2>0)
+                    x, S, Sp, Spp, Sppp = self._S_derivs_at_u(
+                        u,
+                        A=A_i, alpha=alpha_i, Vmax_a=Vmax_a_i, K_a=K_a_i, n_a=n_a_i,
+                        beta=beta_i, Vmax_b=Vmax_b_i, K_b=K_b_i, n_b=n_b_i,
+                        x_ntc=x_ntc
+                    )
+                    return Sp
+                
+                def g2_num_u(u):
+                    # numerator of g''(u):  N2 = S*(Sp + x*Spp) - x*Sp^2
+                    x, S, Sp, Spp, Sppp = self._S_derivs_at_u(
+                        u,
+                        A=A_i, alpha=alpha_i, Vmax_a=Vmax_a_i, K_a=K_a_i, n_a=n_a_i,
+                        beta=beta_i, Vmax_b=Vmax_b_i, K_b=K_b_i, n_b=n_b_i,
+                        x_ntc=x_ntc
+                    )
+                    return S * (Sp + x * Spp) - x * (Sp ** 2)
+                
+                def g3_num_u(u):
+                    # numerator of g'''(u):
+                    # N3 = S^2*(Sp + 3x*Spp + x^2*Sppp) - 3S*(x*Sp*(Sp + x*Spp)) + 2*x^2*Sp^3
+                    x, S, Sp, Spp, Sppp = self._S_derivs_at_u(
+                        u,
+                        A=A_i, alpha=alpha_i, Vmax_a=Vmax_a_i, K_a=K_a_i, n_a=n_a_i,
+                        beta=beta_i, Vmax_b=Vmax_b_i, K_b=K_b_i, n_b=n_b_i,
+                        x_ntc=x_ntc
+                    )
+                    t1 = (Sp + 3.0 * x * Spp + (x ** 2) * Sppp)
+                    t2 = (x * Sp * (Sp + x * Spp))
+                    t3 = ((x ** 2) * (Sp ** 3))
+                    return (S ** 2) * t1 - 3.0 * S * t2 + 2.0 * t3
+
+
+            
+                u_roots_g1 = self._find_roots_on_grid(g1_num_u, u_range, include_tangent=True)
+                u_roots_g2 = self._find_roots_on_grid(g2_num_u, u_range, include_tangent=True)
+                u_roots_g3 = self._find_roots_on_grid(g3_num_u, u_range, include_tangent=True)
+
+            else:
+                u_roots_g1 = []
+                u_roots_g2 = []
+                u_roots_g3 = []
+            
+            # store alongside x-roots (recommended)
+            # These are genuinely dg/du roots in u-units:
+            # (use NaN when empty to match your other columns)
+            u1_str = ";".join([f"{v:.4f}" for v in u_roots_g1]) if u_roots_g1 else np.nan
+            u2_str = ";".join([f"{v:.4f}" for v in u_roots_g2]) if u_roots_g2 else np.nan
+            u3_str = ";".join([f"{v:.4f}" for v in u_roots_g3]) if u_roots_g3 else np.nan
+            
+            # append per-feature strings (make lists outside the loop like you do for x-roots)
+            first_deriv_roots_log2fc_mean_list.append(u1_str)
+            second_deriv_roots_log2fc_mean_list.append(u2_str)
+            third_deriv_roots_log2fc_mean_list.append(u3_str)
 
             first_deriv_roots_mean_list.append(first_roots_mean)
             second_deriv_roots_mean_list.append(second_roots_mean)
@@ -923,104 +1874,137 @@ class ModelSummarizer:
             # Compute full_log2fc with CORRECTED formula based on classification
             # Accounts for sign of n (positive n = activator, negative n = inhibitor)
             # Always use the comprehensive function which handles all cases
-            full_log2fc_i = self._compute_full_log2fc_additive(
-                A_i, alpha_i, Vmax_a_i, beta_i, Vmax_b_i,
-                x_range if x_range is not None else np.linspace(0.1, 100, 100),
-                K_a_i, n_a_i, K_b_i, n_b_i, classification,
-                first_deriv_roots=first_roots_mean
-            )
+            is_flat_i = bool(n_a_zeroed[i]) and bool(n_b_zeroed[i])
+            if is_flat_i:
+                full_log2fc_i = 0.0
+            else:
+                full_log2fc_i = self._full_log2fc_from_extrema_and_boundaries(
+                    A_i, alpha_i, Vmax_a_i, K_a_i, n_a_i,
+                    beta_i, Vmax_b_i, K_b_i, n_b_i,
+                    x_range if x_range is not None else np.linspace(1e-3, 1e3, 6000)
+                )
 
             full_log2fc_mean_list.append(full_log2fc_i)
 
             # Compute observed_log2fc over observed x range (min to max x_eff_g)
             if x_obs_min is not None and x_obs_max is not None:
-                obs_log2fc_i = self._compute_observed_log2fc_fitted(
+                obs_log2fc_i, (x_minloc, x_maxloc) = self._compute_observed_log2fc_fitted(
                     A_i, alpha_i, Vmax_a_i, beta_i, Vmax_b_i,
                     K_a_i, n_a_i, K_b_i, n_b_i,
-                    x_obs_min, x_obs_max
+                    x_obs_min, x_obs_max,
+                    return_argextrema=True
                 )
                 observed_log2fc_list.append(obs_log2fc_i)
             else:
                 observed_log2fc_list.append(np.nan)
-
-            # Compute CI for full_log2fc from posterior samples (in log2 space)
-            if Vmax_a_full.ndim > 1:
-                # Have posterior samples
-                n_samples = Vmax_a_full.shape[0]
-                sample_log2fcs = []
-                epsilon = 1e-10
-                for s in range(n_samples):
-                    alpha_s = alpha_full[s, i] if alpha_full.ndim > 1 else alpha_full[i]
-                    beta_s = beta_full[s, i] if beta_full.ndim > 1 else beta_full[i]
-                    A_s = A_full[s, i] if A_full.ndim > 1 else A_full[i]
-                    Vmax_a_s = Vmax_a_full[s, i]
-                    Vmax_b_s = Vmax_b_full[s, i]
-                    n_a_s = n_a_full[s, i]
-                    n_b_s = n_b_full[s, i]
-
-                    # Compute boundary values based on signs of n
-                    hill_a_at_0 = Vmax_a_s if n_a_s < 0 else 0
-                    hill_a_at_inf = 0 if n_a_s < 0 else Vmax_a_s
-                    hill_b_at_0 = Vmax_b_s if n_b_s < 0 else 0
-                    hill_b_at_inf = 0 if n_b_s < 0 else Vmax_b_s
-
-                    y_at_0 = A_s + alpha_s * hill_a_at_0 + beta_s * hill_b_at_0
-                    y_at_inf = A_s + alpha_s * hill_a_at_inf + beta_s * hill_b_at_inf
-
-                    # Compute in log2 space: log2(y_max / y_min)
-                    y_max = max(y_at_0, y_at_inf, epsilon)
-                    y_min = max(min(y_at_0, y_at_inf), epsilon)
-                    sample_log2fcs.append(np.log2(y_max / y_min))
-
-                full_log2fc_lower_list.append(np.quantile(sample_log2fcs, 0.025))
-                full_log2fc_upper_list.append(np.quantile(sample_log2fcs, 0.975))
+            
+            # Compute CI for observed_log2fc from posterior samples (FAST: no per-sample root finding)
+            if (x_obs_min is not None) and (x_obs_max is not None) and (Vmax_a_full.ndim > 1):
+                S = Vmax_a_full.shape[0]
+                n_samples = min(S, 500)
+            
+                # candidates = mean first-derivative roots inside observed range
+                x0 = float(max(x_obs_min, 1e-10))
+                x1 = float(max(x_obs_max, 1e-10))
+                x_candidates_obs = [r for r in first_roots_mean if (x0 <= r <= x1)]
+                # add grid extrema locations as candidates (if finite and inside window)
+                for xx in (x_minloc, x_maxloc):
+                    if np.isfinite(xx) and (x0 <= xx <= x1):
+                        x_candidates_obs.append(float(xx))
+                
+                # optional: dedup candidates in log2 space
+                x_candidates_obs = self._dedup_roots_log2(x_candidates_obs, tol_log2=1e-3)
+            
+                is_flat_i = bool(n_a_zeroed[i]) and bool(n_b_zeroed[i])
+                if is_flat_i:
+                    observed_log2fc_lower_list.append(0.0)
+                    observed_log2fc_upper_list.append(0.0)
+                else:
+                    vals = []
+                    for s in range(n_samples):
+                        alpha_s = float(alpha_full[s, i]) if alpha_full.ndim > 1 else float(alpha_full[i])
+                        beta_s  = float(beta_full[s, i])  if beta_full.ndim > 1 else float(beta_full[i])
+                        A_s     = float(A_full[s, i])     if A_full.ndim > 1 else float(A_full[i])
+            
+                        Vmax_a_s = float(Vmax_a_full[s, i])
+                        Vmax_b_s = float(Vmax_b_full[s, i])
+                        K_a_s    = float(K_a_full[s, i])
+                        K_b_s    = float(K_b_full[s, i])
+            
+                        n_a_s = self._maybe_zero_scalar(n_a_full[s, i], bool(n_a_zeroed[i]))
+                        n_b_s = self._maybe_zero_scalar(n_b_full[s, i], bool(n_b_zeroed[i]))
+            
+                        v = self._observed_log2fc_candidates_no_roots(
+                            A_s, alpha_s, Vmax_a_s, K_a_s, n_a_s,
+                            beta_s, Vmax_b_s, K_b_s, n_b_s,
+                            x_obs_min=x0, x_obs_max=x1,
+                            x_candidates=x_candidates_obs
+                        )
+                        if np.isfinite(v):
+                            vals.append(v)
+            
+                    if vals:
+                        observed_log2fc_lower_list.append(np.quantile(vals, 0.025))
+                        observed_log2fc_upper_list.append(np.quantile(vals, 0.975))
+                    else:
+                        observed_log2fc_lower_list.append(np.nan)
+                        observed_log2fc_upper_list.append(np.nan)
+            
             else:
-                # Point estimate only
+                # no posterior samples or no x-range -> fall back to mean
+                observed_log2fc_lower_list.append(obs_log2fc_i)
+                observed_log2fc_upper_list.append(obs_log2fc_i)
+
+            # Compute CI for full_log2fc from posterior samples (FAST: no per-sample root finding)
+            if Vmax_a_full.ndim > 1:
+                S = Vmax_a_full.shape[0]
+                n_samples = min(S, 500)  # tune as you like
+            
+                # reuse mean-root locations as interior candidates for ALL samples
+                # (this is the key speedup)
+                x_candidates = first_roots_mean  # already computed above per feature
+            
+                sample_log2fcs = []
+            
+                # Optional: short-circuit truly flat (both n zeroed by your rule)
+                # This matches what you do later for log2fc-derivatives.
+                is_flat_i = bool(n_a_zeroed[i]) and bool(n_b_zeroed[i])
+                if is_flat_i:
+                    full_log2fc_lower_list.append(0.0)
+                    full_log2fc_upper_list.append(0.0)
+                else:
+                    for s in range(n_samples):
+                        alpha_s = float(alpha_full[s, i]) if alpha_full.ndim > 1 else float(alpha_full[i])
+                        beta_s  = float(beta_full[s, i])  if beta_full.ndim > 1 else float(beta_full[i])
+                        A_s     = float(A_full[s, i])     if A_full.ndim > 1 else float(A_full[i])
+            
+                        Vmax_a_s = float(Vmax_a_full[s, i])
+                        Vmax_b_s = float(Vmax_b_full[s, i])
+                        K_a_s    = float(K_a_full[s, i])
+                        K_b_s    = float(K_b_full[s, i])
+            
+                        # FEATURE-WISE ZEROING RULE (keep exactly your semantics)
+                        n_a_s = self._maybe_zero_scalar(n_a_full[s, i], bool(n_a_zeroed[i]))
+                        n_b_s = self._maybe_zero_scalar(n_b_full[s, i], bool(n_b_zeroed[i]))
+            
+                        val = self._full_log2fc_candidates_no_roots(
+                            A_s, alpha_s, Vmax_a_s, K_a_s, n_a_s,
+                            beta_s, Vmax_b_s, K_b_s, n_b_s,
+                            x_candidates=x_candidates
+                        )
+                        if np.isfinite(val):
+                            sample_log2fcs.append(val)
+            
+                    if sample_log2fcs:
+                        full_log2fc_lower_list.append(np.quantile(sample_log2fcs, 0.025))
+                        full_log2fc_upper_list.append(np.quantile(sample_log2fcs, 0.975))
+                    else:
+                        full_log2fc_lower_list.append(np.nan)
+                        full_log2fc_upper_list.append(np.nan)
+            else:
                 full_log2fc_lower_list.append(full_log2fc_i)
                 full_log2fc_upper_list.append(full_log2fc_i)
 
-            # Per-sample derivative root computation (only if BOTH use_posterior_samples AND compute_derivative_roots)
-            if use_posterior_samples and compute_derivative_roots and x_range is not None and Vmax_a_full.ndim > 1:
-                n_samples = min(Vmax_a_full.shape[0], 1000)  # Limit to 1000 samples
-                sample_first_roots = []
-                sample_second_roots = []
-                sample_third_roots = []
-
-                for s in range(n_samples):
-                    alpha_s = alpha_full[s, i] if alpha_full.ndim > 1 else alpha_full[i]
-                    beta_s = beta_full[s, i] if beta_full.ndim > 1 else beta_full[i]
-                    Vmax_a_s = Vmax_a_full[s, i]
-                    Vmax_b_s = Vmax_b_full[s, i]
-                    K_a_s = K_a_full[s, i]
-                    K_b_s = K_b_full[s, i]
-                    n_a_s = n_a_full[s, i]
-                    n_b_s = n_b_full[s, i]
-
-                    def first_deriv_s(x):
-                        return self._additive_hill_first_derivative(
-                            x, alpha_s, Vmax_a_s, K_a_s, n_a_s,
-                            beta_s, Vmax_b_s, K_b_s, n_b_s
-                        )
-
-                    def second_deriv_s(x):
-                        return self._additive_hill_second_derivative(
-                            x, alpha_s, Vmax_a_s, K_a_s, n_a_s,
-                            beta_s, Vmax_b_s, K_b_s, n_b_s
-                        )
-
-                    def third_deriv_s(x):
-                        return self._additive_hill_third_derivative(
-                            x, alpha_s, Vmax_a_s, K_a_s, n_a_s,
-                            beta_s, Vmax_b_s, K_b_s, n_b_s
-                        )
-
-                    sample_first_roots.append(self._find_roots_empirical(first_deriv_s, x_range))
-                    sample_second_roots.append(self._find_roots_empirical(second_deriv_s, x_range))
-                    sample_third_roots.append(self._find_roots_empirical(third_deriv_s, x_range))
-
-                first_deriv_roots_samples_list.append(sample_first_roots)
-                second_deriv_roots_samples_list.append(sample_second_roots)
-                third_deriv_roots_samples_list.append(sample_third_roots)
 
         # Add computed values to data dict
         data['classification'] = classifications
@@ -1031,91 +2015,24 @@ class ModelSummarizer:
         # Store derivative roots as strings (list of x values)
         # For mean parameters
         data['first_deriv_roots_mean'] = [
-            ';'.join([f'{r:.4f}' for r in roots]) if roots else ''
+            ';'.join(f'{r:.4f}' for r in roots) if roots else np.nan
             for roots in first_deriv_roots_mean_list
         ]
+        
         data['second_deriv_roots_mean'] = [
-            ';'.join([f'{r:.4f}' for r in roots]) if roots else ''
+            ';'.join(f'{r:.4f}' for r in roots) if roots else np.nan
             for roots in second_deriv_roots_mean_list
         ]
+        
         data['third_deriv_roots_mean'] = [
-            ';'.join([f'{r:.4f}' for r in roots]) if roots else ''
+            ';'.join(f'{r:.4f}' for r in roots) if roots else np.nan
             for roots in third_deriv_roots_mean_list
         ]
 
-        # Compute summary of derivative roots across posterior samples
-        if use_posterior_samples and compute_derivative_roots and x_range is not None:
-            # For first derivative roots: report median and CI of first root (if any)
-            first_root_medians = []
-            first_root_lowers = []
-            first_root_uppers = []
-            second_root_medians = []
-            second_root_lowers = []
-            second_root_uppers = []
-            third_root_medians = []
-            third_root_lowers = []
-            third_root_uppers = []
-
-            for i in range(n_features):
-                if i < len(first_deriv_roots_samples_list):
-                    # Collect first root from each sample (if exists)
-                    first_roots_flat = [roots[0] for roots in first_deriv_roots_samples_list[i] if len(roots) > 0]
-                    if first_roots_flat:
-                        first_root_medians.append(np.median(first_roots_flat))
-                        first_root_lowers.append(np.quantile(first_roots_flat, 0.025))
-                        first_root_uppers.append(np.quantile(first_roots_flat, 0.975))
-                    else:
-                        first_root_medians.append(np.nan)
-                        first_root_lowers.append(np.nan)
-                        first_root_uppers.append(np.nan)
-
-                    # Same for second derivative
-                    second_roots_flat = [roots[0] for roots in second_deriv_roots_samples_list[i] if len(roots) > 0]
-                    if second_roots_flat:
-                        second_root_medians.append(np.median(second_roots_flat))
-                        second_root_lowers.append(np.quantile(second_roots_flat, 0.025))
-                        second_root_uppers.append(np.quantile(second_roots_flat, 0.975))
-                    else:
-                        second_root_medians.append(np.nan)
-                        second_root_lowers.append(np.nan)
-                        second_root_uppers.append(np.nan)
-
-                    # Same for third derivative
-                    if i < len(third_deriv_roots_samples_list):
-                        third_roots_flat = [roots[0] for roots in third_deriv_roots_samples_list[i] if len(roots) > 0]
-                        if third_roots_flat:
-                            third_root_medians.append(np.median(third_roots_flat))
-                            third_root_lowers.append(np.quantile(third_roots_flat, 0.025))
-                            third_root_uppers.append(np.quantile(third_roots_flat, 0.975))
-                        else:
-                            third_root_medians.append(np.nan)
-                            third_root_lowers.append(np.nan)
-                            third_root_uppers.append(np.nan)
-                    else:
-                        third_root_medians.append(np.nan)
-                        third_root_lowers.append(np.nan)
-                        third_root_uppers.append(np.nan)
-                else:
-                    first_root_medians.append(np.nan)
-                    first_root_lowers.append(np.nan)
-                    first_root_uppers.append(np.nan)
-                    second_root_medians.append(np.nan)
-                    second_root_lowers.append(np.nan)
-                    second_root_uppers.append(np.nan)
-                    third_root_medians.append(np.nan)
-                    third_root_lowers.append(np.nan)
-                    third_root_uppers.append(np.nan)
-
-            data['first_deriv_root1_median'] = first_root_medians
-            data['first_deriv_root1_lower'] = first_root_lowers
-            data['first_deriv_root1_upper'] = first_root_uppers
-            data['second_deriv_root1_median'] = second_root_medians
-            data['second_deriv_root1_lower'] = second_root_lowers
-            data['second_deriv_root1_upper'] = second_root_uppers
-            data['third_deriv_root1_median'] = third_root_medians
-            data['third_deriv_root1_lower'] = third_root_lowers
-            data['third_deriv_root1_upper'] = third_root_uppers
-
+        data['first_deriv_roots_log2fc_mean']  = first_deriv_roots_log2fc_mean_list
+        data['second_deriv_roots_log2fc_mean'] = second_deriv_roots_log2fc_mean_list
+        data['third_deriv_roots_log2fc_mean']  = third_deriv_roots_log2fc_mean_list
+        
         # Compute full log2FC (theoretical range) and observed log2FC (observed x range)
         # Both are in log2 space: log2(y_max / y_min)
         if compute_full_log2fc:
@@ -1125,10 +2042,12 @@ class ModelSummarizer:
 
         # Observed log2FC over the observed x range (min to max x_eff_g)
         data['observed_log2fc'] = observed_log2fc_list
+        data['observed_log2fc_lower'] = observed_log2fc_lower_list
+        data['observed_log2fc_upper'] = observed_log2fc_upper_list
 
         # Compute log2FC versions of parameters relative to NTC
         if compute_log2fc_params and x_ntc is not None and y_ntc is not None:
-            epsilon = 1e-10  # Avoid log(0)
+            epsilon = 1e-12  # Avoid log(0)
             ln2 = np.log(2)
 
             # Log2FC x-transformation: u = log2(x) - log2(x_ntc)
@@ -1167,18 +2086,10 @@ class ModelSummarizer:
             d3g_du3_at_0_lower = np.full(n_features, np.nan)
             d3g_du3_at_0_upper = np.full(n_features, np.nan)
 
-            # Helper function to compute y(x) given parameters
-            def _hill_value(x, Vmax, K, n):
-                x_safe = max(x, epsilon)
-                K_safe = max(K, epsilon)
-                x_n = x_safe ** n
-                K_n = K_safe ** n
-                return Vmax * x_n / (K_n + x_n + epsilon)
-
             # Helper to compute all three derivatives at u=0 for given parameters
             def _compute_derivs_at_u0(alpha_i, beta_i, Vmax_a_i, Vmax_b_i, K_a_i, K_b_i, n_a_i, n_b_i, A_i, y_ntc_i):
-                H_a_at_ntc = _hill_value(x_ntc, Vmax_a_i, K_a_i, n_a_i)
-                H_b_at_ntc = _hill_value(x_ntc, Vmax_b_i, K_b_i, n_b_i)
+                H_a_at_ntc = self._hill_value(x_ntc, Vmax_a_i, K_a_i, n_a_i)
+                H_b_at_ntc = self._hill_value(x_ntc, Vmax_b_i, K_b_i, n_b_i)
                 y_at_ntc = A_i + alpha_i * H_a_at_ntc + beta_i * H_b_at_ntc
 
                 if y_at_ntc <= epsilon or y_ntc_i <= epsilon:
@@ -1226,6 +2137,30 @@ class ModelSummarizer:
                 return dg_du, d2g_du2, d3g_du3
 
             for i in range(n_features):
+                is_flat_i = bool(n_a_zeroed[i]) and bool(n_b_zeroed[i])
+                # (or stricter: both components inactive by your dep_mask definition)
+                
+                if is_flat_i:
+                    y_ntc_i = y_ntc[i] if y_ntc is not None else np.nan
+                    # if n==0 for both, Hill(x_ntc)=0.5*Vmax
+                    H_a = 0.5 * Vmax_a_mean[i]
+                    H_b = 0.5 * Vmax_b_mean[i]
+                    y_at_ntc = A_mean[i] + alpha_mean[i] * H_a + beta_mean[i] * H_b
+                    if (y_at_ntc > epsilon) and (y_ntc_i > epsilon):
+                        log2fc_at_0[i] = np.log2(y_at_ntc) - np.log2(y_ntc_i)
+                    else:
+                        log2fc_at_0[i] = np.nan
+                    dg_du_at_0[i] = 0.0
+                    d2g_du2_at_0[i] = 0.0
+                    d3g_du3_at_0[i] = 0.0
+                    dg_du_at_0_lower[i] = 0.0
+                    dg_du_at_0_upper[i] = 0.0
+                    d2g_du2_at_0_lower[i] = 0.0
+                    d2g_du2_at_0_upper[i] = 0.0
+                    d3g_du3_at_0_lower[i] = 0.0
+                    d3g_du3_at_0_upper[i] = 0.0
+                    continue
+
                 # Get mean parameters for this feature
                 alpha_i = alpha_mean[i]
                 beta_i = beta_mean[i]
@@ -1233,14 +2168,14 @@ class ModelSummarizer:
                 Vmax_b_i = Vmax_b_mean[i]
                 K_a_i = K_a_mean[i]
                 K_b_i = K_b_mean[i]
-                n_a_i = n_a_mean[i]
-                n_b_i = n_b_mean[i]
+                n_a_i = float(n_a_used[i])
+                n_b_i = float(n_b_used[i])
                 A_i = A_mean[i]
                 y_ntc_i = y_ntc[i] if y_ntc is not None else 1.0
 
                 # Compute y(x_ntc) using Hill function
-                H_a_at_ntc = _hill_value(x_ntc, Vmax_a_i, K_a_i, n_a_i)
-                H_b_at_ntc = _hill_value(x_ntc, Vmax_b_i, K_b_i, n_b_i)
+                H_a_at_ntc = self._hill_value(x_ntc, Vmax_a_i, K_a_i, n_a_i)
+                H_b_at_ntc = self._hill_value(x_ntc, Vmax_b_i, K_b_i, n_b_i)
                 y_at_ntc = A_i + alpha_i * H_a_at_ntc + beta_i * H_b_at_ntc
 
                 # log2FC at u=0: g(0) = log2(y(x_ntc)) - log2(y_ntc)
@@ -1256,7 +2191,7 @@ class ModelSummarizer:
                     d3g_du3_at_0[i] = d3g_du3
 
                     # Compute CI from posterior samples
-                    if use_posterior_samples and Vmax_a_full.ndim > 1:
+                    if Vmax_a_full.ndim > 1:
                         n_samples = min(Vmax_a_full.shape[0], 1000)
                         sample_dg_du = []
                         sample_d2g_du2 = []
@@ -1269,8 +2204,8 @@ class ModelSummarizer:
                             Vmax_b_s = Vmax_b_full[s, i]
                             K_a_s = K_a_full[s, i]
                             K_b_s = K_b_full[s, i]
-                            n_a_s = n_a_full[s, i]
-                            n_b_s = n_b_full[s, i]
+                            n_a_s = self._maybe_zero_scalar(n_a_full[s, i], bool(n_a_zeroed[i]))
+                            n_b_s = self._maybe_zero_scalar(n_b_full[s, i], bool(n_b_zeroed[i]))
                             A_s = A_full[s, i] if A_full.ndim > 1 else A_full[i]
 
                             dg, d2g, d3g = _compute_derivs_at_u0(
@@ -1332,44 +2267,29 @@ class ModelSummarizer:
                 if np.any(valid_b):
                     inflection_b_log2fc[valid_b] = np.log2(inflection_b_mean[valid_b]) - log2_x_ntc
 
-                data['inflection_a_log2fc'] = inflection_a_log2fc
-                data['inflection_b_log2fc'] = inflection_b_log2fc
-
-            # Derivative roots in log2FC space
-            if compute_derivative_roots:
-                first_deriv_roots_log2fc = []
-                second_deriv_roots_log2fc = []
-                third_deriv_roots_log2fc = []
-
-                for i in range(n_features):
-                    # First derivative roots
-                    roots_1 = first_deriv_roots_mean_list[i]
-                    if roots_1:
-                        roots_1_log2fc = [np.log2(max(r, epsilon)) - log2_x_ntc for r in roots_1]
-                        first_deriv_roots_log2fc.append(';'.join([f'{r:.4f}' for r in roots_1_log2fc]))
-                    else:
-                        first_deriv_roots_log2fc.append('')
-
-                    # Second derivative roots
-                    roots_2 = second_deriv_roots_mean_list[i]
-                    if roots_2:
-                        roots_2_log2fc = [np.log2(max(r, epsilon)) - log2_x_ntc for r in roots_2]
-                        second_deriv_roots_log2fc.append(';'.join([f'{r:.4f}' for r in roots_2_log2fc]))
-                    else:
-                        second_deriv_roots_log2fc.append('')
-
-                    # Third derivative roots
-                    roots_3 = third_deriv_roots_mean_list[i]
-                    if roots_3:
-                        roots_3_log2fc = [np.log2(max(r, epsilon)) - log2_x_ntc for r in roots_3]
-                        third_deriv_roots_log2fc.append(';'.join([f'{r:.4f}' for r in roots_3_log2fc]))
-                    else:
-                        third_deriv_roots_log2fc.append('')
-
-                data['first_deriv_roots_log2fc'] = first_deriv_roots_log2fc
-                data['second_deriv_roots_log2fc'] = second_deriv_roots_log2fc
-                data['third_deriv_roots_log2fc'] = third_deriv_roots_log2fc
-
+                # Inflection points in log2FC space: log2(inflection) - log2(x_ntc)
+                def _log2fc_transform(arr):
+                    out = np.full(n_features, np.nan)
+                    ok = np.isfinite(arr) & (arr > epsilon)
+                    out[ok] = np.log2(arr[ok]) - log2_x_ntc
+                    return out
+                
+                inf_a_mean = data.get('inflection_a_mean', np.full(n_features, np.nan))
+                inf_a_lo   = data.get('inflection_a_lower', np.full(n_features, np.nan))
+                inf_a_hi   = data.get('inflection_a_upper', np.full(n_features, np.nan))
+                
+                inf_b_mean = data.get('inflection_b_mean', np.full(n_features, np.nan))
+                inf_b_lo   = data.get('inflection_b_lower', np.full(n_features, np.nan))
+                inf_b_hi   = data.get('inflection_b_upper', np.full(n_features, np.nan))
+                
+                data['inflection_a_log2fc_mean']  = _log2fc_transform(inf_a_mean)
+                data['inflection_a_log2fc_lower'] = _log2fc_transform(inf_a_lo)
+                data['inflection_a_log2fc_upper'] = _log2fc_transform(inf_a_hi)
+                
+                data['inflection_b_log2fc_mean']  = _log2fc_transform(inf_b_mean)
+                data['inflection_b_log2fc_lower'] = _log2fc_transform(inf_b_lo)
+                data['inflection_b_log2fc_upper'] = _log2fc_transform(inf_b_hi)
+                            
             # A (baseline) in log2FC y-space: log2(A) - log2(y_ntc)
             # y_ntc is per-feature, A_mean is per-feature
             A_log2fc = np.full(n_features, np.nan)
@@ -1380,244 +2300,647 @@ class ModelSummarizer:
 
         return data
 
-    def _add_single_hill_params(self, data, posterior, n_features, compute_inflection, compute_full_log2fc,
-                                  compute_log2fc_params=False, x_ntc=None, y_ntc=None):
-        """Add single Hill parameters to data dict."""
-        params = posterior['params']  # [n_samples, n_features, 4] or [n_features, 4]
-        if isinstance(params, torch.Tensor):
-            params = params.cpu().numpy()
+    def _add_single_hill_params(
+        self, data, posterior, n_features,
+        compute_inflection: bool = True,
+        compute_full_log2fc: bool = True,
+        compute_derivative_roots: bool = True,
+        x_range: Optional[np.ndarray] = None,
+        x_obs_min: Optional[float] = None,
+        x_obs_max: Optional[float] = None,
+        compute_log2fc_params: bool = False,
+        x_ntc=None,
+        y_ntc=None,
+    ):
+        """
+        Add single Hill parameters to data dict.
 
-        if params.ndim == 3:
-            B_mean = params[:, :, 0].mean(axis=0)
-            B_lower = np.quantile(params[:, :, 0], 0.025, axis=0)
-            B_upper = np.quantile(params[:, :, 0], 0.975, axis=0)
+        Single Hill model: y = A + alpha * Vmax * x^n / (K^n + x^n)
 
-            K_mean = params[:, :, 1].mean(axis=0)
-            K_lower = np.quantile(params[:, :, 1], 0.025, axis=0)
-            K_upper = np.quantile(params[:, :, 1], 0.975, axis=0)
+        Parameters stored (with _mean, _lower, _upper suffixes):
+        - Vmax_a: Hill amplitude (maximum effect)
+        - K_a: Half-max concentration (EC50/IC50)
+        - n_a: Hill coefficient (cooperativity, sign determines direction)
+        - alpha: Weight/scale factor
+        - A: Baseline offset
 
-            xc_mean = params[:, :, 2].mean(axis=0)
-            xc_lower = np.quantile(params[:, :, 2], 0.025, axis=0)
-            xc_upper = np.quantile(params[:, :, 2], 0.975, axis=0)
+        Also computes:
+        - inflection_a: Inflection point (exists when |n| > 1)
+        - full_log2fc: log2(y_max / y_min) over theoretical range
+        - observed_log2fc: log2(y_max / y_min) over observed x range
+        - Derivative roots (first, second, third) where dy/dx=0, d²y/dx²=0, d³y/dx³=0
+        - Log2FC transforms if x_ntc and y_ntc are provided
+        """
+        # --- shared extraction helpers ---
+        def extract_param(name):
+            param = posterior[name]
+            if isinstance(param, torch.Tensor):
+                param = param.cpu().numpy()
+            # squeeze [S,1,T] -> [S,T]
+            if param.ndim == 3 and param.shape[1] == 1:
+                param = param.squeeze(1)
+            # average over extra dims if needed (e.g. multinomial categories)
+            if param.ndim > 2:
+                param = param.mean(axis=tuple(range(2, param.ndim)))
+    
+            if param.ndim == 2:  # [S, T]
+                mean = param.mean(axis=0)
+                lo = np.quantile(param, 0.025, axis=0)
+                hi = np.quantile(param, 0.975, axis=0)
+            else:                # [T] point
+                mean = lo = hi = param
+            return mean, lo, hi
+    
+        def extract_param_full(name):
+            param = posterior[name]
+            if isinstance(param, torch.Tensor):
+                param = param.cpu().numpy()
+            if param.ndim == 3 and param.shape[1] == 1:
+                param = param.squeeze(1)
+            if param.ndim > 2:
+                param = param.mean(axis=tuple(range(2, param.ndim)))
+            return param  # [S,T] or [T]
 
-            # Get n for inflection calculation (if available)
-            n_mean = params[:, :, 3].mean(axis=0) if params.shape[-1] > 3 else np.ones(n_features)
+        def extract_param_abs(name):
+            param = posterior[name]
+            if isinstance(param, torch.Tensor):
+                param = param.cpu().numpy()
+            if param.ndim == 3 and param.shape[1] == 1:
+                param = param.squeeze(1)
+            if param.ndim > 2:
+                param = param.mean(axis=tuple(range(2, param.ndim)))
+        
+            param_abs = np.abs(param)
+            if param_abs.ndim == 2:
+                mean = param_abs.mean(axis=0)
+                lo = np.quantile(param_abs, 0.025, axis=0)
+                hi = np.quantile(param_abs, 0.975, axis=0)
+            else:
+                mean = lo = hi = param_abs
+            return mean, lo, hi
+    
+        def _broadcast(arr):
+            arr = np.atleast_1d(arr)
+            if arr.size == 1:
+                return np.full(n_features, arr.item())
+            return arr
+    
+        # --- core params ---
+        Vmax_mean, Vmax_lo, Vmax_hi = extract_param('Vmax_a')
+        K_mean,    K_lo,    K_hi    = extract_param('K_a')
+        n_mean,    n_lo,    n_hi    = extract_param('n_a')
+
+        # APPLY SAME RULE AS ADDITIVE:
+        n_used, n_zeroed = self._n_effective_from_ci(n_mean, n_lo, n_hi)
+        # use n_used for all downstream computations
+    
+        Vmax_full = extract_param_full('Vmax_a')
+        K_full    = extract_param_full('K_a')
+        n_full    = extract_param_full('n_a')
+    
+        if 'alpha' in posterior:
+            alpha_mean, alpha_lo, alpha_hi = extract_param('alpha')
+            alpha_full = extract_param_full('alpha')
+            alpha_mean = _broadcast(alpha_mean); alpha_lo = _broadcast(alpha_lo); alpha_hi = _broadcast(alpha_hi)
+            if alpha_full.ndim == 1:
+                alpha_full = alpha_full.reshape(-1, 1)
+            if alpha_full.shape[-1] == 1:
+                alpha_full = np.broadcast_to(alpha_full, (alpha_full.shape[0], n_features)).copy()
         else:
-            B_mean = params[:, 0]
-            B_lower = B_mean
-            B_upper = B_mean
+            alpha_mean = np.ones(n_features); alpha_lo = np.ones(n_features); alpha_hi = np.ones(n_features)
+            alpha_full = np.ones((1, n_features))
+    
+        if 'A' in posterior:
+            A_mean, A_lo, A_hi = extract_param('A')
+            A_full = extract_param_full('A')
+            A_mean = _broadcast(A_mean); A_lo = _broadcast(A_lo); A_hi = _broadcast(A_hi)
+            if A_full.ndim == 1:
+                A_full = A_full.reshape(-1, 1)
+            if A_full.shape[-1] == 1:
+                A_full = np.broadcast_to(A_full, (A_full.shape[0], n_features)).copy()
+        else:
+            A_mean = np.zeros(n_features); A_lo = np.zeros(n_features); A_hi = np.zeros(n_features)
+            A_full = np.zeros((1, n_features))
 
-            K_mean = params[:, 1]
-            K_lower = K_mean
-            K_upper = K_mean
-
-            xc_mean = params[:, 2]
-            xc_lower = xc_mean
-            xc_upper = xc_mean
-
-            n_mean = params[:, 3] if params.shape[-1] > 3 else np.ones(n_features)
-
-        data['B_mean'] = B_mean
-        data['B_lower'] = B_lower
-        data['B_upper'] = B_upper
-        data['K_mean'] = K_mean
-        data['K_lower'] = K_lower
-        data['K_upper'] = K_upper
-        data['xc_mean'] = xc_mean
-        data['xc_lower'] = xc_lower
-        data['xc_upper'] = xc_upper
-
+        
+        data['Vmax_a_mean'] = Vmax_mean
+        data['Vmax_a_lower'] = Vmax_lo
+        data['Vmax_a_upper'] = Vmax_hi
+        data['K_a_mean'] = K_mean
+        data['K_a_lower'] = K_lo
+        data['K_a_upper'] = K_hi
+        data['n_a_mean'] = n_mean
+        data['n_a_lower'] = n_lo
+        data['n_a_upper'] = n_hi
+        data['alpha_mean'] = alpha_mean
+        data['alpha_lower'] = alpha_lo
+        data['alpha_upper'] = alpha_hi
+        data['A_mean'] = A_mean
+        data['A_lower'] = A_lo
+        data['A_upper'] = A_hi
+    
+        # --- inflection of the Hill component ---
         if compute_inflection:
-            inflection_mean = self._compute_hill_inflection(K_mean, xc_mean)
-            inflection_lower = self._compute_hill_inflection(K_lower, xc_lower)
-            inflection_upper = self._compute_hill_inflection(K_upper, xc_upper)
-
-            data['inflection_mean'] = inflection_mean
-            data['inflection_lower'] = inflection_lower
-            data['inflection_upper'] = inflection_upper
-
+            n_abs_mean, n_abs_lo, n_abs_hi = extract_param_abs('n_a')
+            
+            infl_mean = self._compute_hill_inflection(n_abs_mean, K_mean)
+            infl_lo   = self._compute_hill_inflection(n_abs_lo,   K_lo)
+            infl_hi   = self._compute_hill_inflection(n_abs_hi,   K_hi)
+            
+            # (optional) store |n| summaries too
+            data['n_a_abs_mean'] = n_abs_mean
+            data['n_a_abs_lower'] = n_abs_lo
+            data['n_a_abs_upper'] = n_abs_hi
+            data['inflection_a_mean'] = infl_mean
+            data['inflection_a_lower'] = infl_lo
+            data['inflection_a_upper'] = infl_hi
+    
+        # --- full log2FC range for y = A + alpha*Hill ---
         if compute_full_log2fc:
-            data['full_log2fc_mean'] = np.abs(B_mean)
-            data['full_log2fc_lower'] = np.abs(B_lower)
-            data['full_log2fc_upper'] = np.abs(B_upper)
+            eps = 1e-10
+        
+            # mean version using n_used, with correct n==0 limits (Hill == 0.5*V everywhere)
+            n_u = np.asarray(n_used, dtype=float)
 
-        # Compute log2FC versions of parameters relative to NTC
-        if compute_log2fc_params and x_ntc is not None and y_ntc is not None:
-            epsilon = 1e-10  # Avoid log(0)
+            hill0 = np.where(
+                np.abs(n_u) < 1e-15,
+                0.5 * Vmax_mean,
+                np.where(n_u < 0, Vmax_mean, 0.0)
+            )
+            hillinf = np.where(
+                np.abs(n_u) < 1e-15,
+                0.5 * Vmax_mean,
+                np.where(n_u < 0, 0.0, Vmax_mean)
+            )
 
-            # Log2FC x-transformation: u = log2(x) - log2(x_ntc)
-            log2_x_ntc = np.log2(max(x_ntc, epsilon))
+            y0 = np.maximum(A_mean + alpha_mean * hill0, eps)
+            yinf = np.maximum(A_mean + alpha_mean * hillinf, eps)
 
-            # EC50 (xc) in log2FC space: log2(xc) - log2(x_ntc)
-            data['EC50_log2fc'] = np.log2(np.maximum(xc_mean, epsilon)) - log2_x_ntc
+            data['full_log2fc_mean'] = np.log2(np.maximum(y0, yinf) / np.minimum(y0, yinf))
+        
+            # CI from posterior samples (coherent)
+            if Vmax_full.ndim == 2:
+                S = Vmax_full.shape[0]
+                nS = min(S, 500)
+                lo = np.full(n_features, np.nan)
+                hi = np.full(n_features, np.nan)
+        
+                for i in range(n_features):
+                    vals = []
+                    for s in range(nS):
+                        V_s = float(Vmax_full[s, i])
+                        K_s = float(K_full[s, i])
+                        a_s = float(alpha_full[s, i]) if alpha_full.ndim == 2 else float(alpha_full[i])
+                        # A isn't extracted full in your current function; easiest is to add A_full extraction.
+                        # For now, if A was point/broadcast: use A_mean[i]
+                        A_s = float(A_full[s, i]) if A_full.ndim == 2 else float(A_full[i])
+        
+                        n_s = self._maybe_zero_scalar(n_full[s, i], bool(n_zeroed[i]))
+        
+                        # boundaries for single hill
+                        if abs(n_s) < 1e-15:
+                            # constant hill = 0.5*V everywhere -> no boundary range
+                            y0_s = max(A_s + a_s * 0.5 * V_s, eps)
+                            yinf_s = y0_s
+                        else:
+                            h0 = V_s if n_s < 0 else 0.0
+                            hinf = 0.0 if n_s < 0 else V_s
+                            y0_s = max(A_s + a_s * h0, eps)
+                            yinf_s = max(A_s + a_s * hinf, eps)
+        
+                        vals.append(np.log2(max(y0_s, yinf_s) / min(y0_s, yinf_s)))
+        
+                    if vals:
+                        lo[i] = np.quantile(vals, 0.025)
+                        hi[i] = np.quantile(vals, 0.975)
+        
+                data['full_log2fc_lower'] = lo
+                data['full_log2fc_upper'] = hi
+            else:
+                data['full_log2fc_lower'] = data['full_log2fc_mean']
+                data['full_log2fc_upper'] = data['full_log2fc_mean']
 
-            # Inflection point in log2FC space
+    
+        # --- observed log2FC over observed x-range (optional; uses fitted function) ---
+        if (x_obs_min is not None) and (x_obs_max is not None) and np.isfinite(x_obs_min) and np.isfinite(x_obs_max):
+            obs = []
+            for i in range(n_features):
+                obs.append(
+                    self._compute_observed_log2fc_fitted(
+                        A_mean[i], alpha_mean[i], Vmax_mean[i], 0.0, 0.0,
+                        K_mean[i], n_used[i], 1.0, 1.0,
+                        float(x_obs_min), float(x_obs_max)
+                    )
+                )
+            data['observed_log2fc'] = obs
+
+        if (x_obs_min is not None) and (x_obs_max is not None) and (Vmax_full.ndim == 2):
+            eps = 1e-10
+            x0 = float(max(x_obs_min, eps))
+            x1 = float(max(x_obs_max, eps))
+        
+            lo = np.full(n_features, np.nan)
+            hi = np.full(n_features, np.nan)
+        
+            S = Vmax_full.shape[0]
+            nS = min(S, 500)
+        
+            for i in range(n_features):
+                if bool(n_zeroed[i]):
+                    lo[i] = 0.0
+                    hi[i] = 0.0
+                    continue
+        
+                vals = []
+                for s in range(nS):
+                    V_s = float(Vmax_full[s, i])
+                    K_s = float(K_full[s, i])
+                    a_s = float(alpha_full[s, i])
+                    A_s = float(A_full[s, i])
+        
+                    n_s = self._maybe_zero_scalar(n_full[s, i], bool(n_zeroed[i]))
+        
+                    def y_at(x):
+                        H = self._hill_value(x, V_s, K_s, n_s)
+                        return A_s + a_s * H
+        
+                    y0 = max(y_at(x0), eps)
+                    y1 = max(y_at(x1), eps)
+                    vals.append(np.log2(max(y0, y1) / min(y0, y1)))
+        
+                lo[i] = np.quantile(vals, 0.025)
+                hi[i] = np.quantile(vals, 0.975)
+        
+            data['observed_log2fc_lower'] = lo
+            data['observed_log2fc_upper'] = hi
+        else:
+            data['observed_log2fc_lower'] = data.get('observed_log2fc', np.full(n_features, np.nan))
+            data['observed_log2fc_upper'] = data.get('observed_log2fc', np.full(n_features, np.nan))
+    
+        # --- derivative roots over x_range ---
+        if compute_derivative_roots and (x_range is not None):
+            first_roots = []
+            second_roots = []
+            third_roots = []
+            n_first = []
+            n_second = []
+            n_third = []
+    
+            for i in range(n_features):
+                r1, r2, r3 = self._single_hill_derivative_roots(
+                    alpha=float(alpha_mean[i]),
+                    Vmax=float(Vmax_mean[i]),
+                    K=float(K_mean[i]),
+                    n=float(n_used[i]),
+                    x_range=x_range,
+                    compute_third=True
+                )
+                first_roots.append(r1); second_roots.append(r2); third_roots.append(r3)
+                n_first.append(len(r1)); n_second.append(len(r2)); n_third.append(len(r3))
+    
+            data['n_first_deriv_roots'] = n_first
+            data['n_second_deriv_roots'] = n_second
+            data['n_third_deriv_roots'] = n_third
+            data['first_deriv_roots_mean'] = [';'.join([f'{r:.4f}' for r in rr]) if rr else np.nan for rr in first_roots]
+            data['second_deriv_roots_mean'] = [';'.join([f'{r:.4f}' for r in rr]) if rr else np.nan for rr in second_roots]
+            data['third_deriv_roots_mean']  = [';'.join([f'{r:.4f}' for r in rr]) if rr else np.nan for rr in third_roots]
+    
+        # --- log2FC transforms (unchanged from your version) ---
+        if compute_log2fc_params and (x_ntc is not None) and (y_ntc is not None):
+            eps = 1e-10
+            log2_x_ntc = np.log2(max(float(x_ntc), eps))
+            data['K_a_log2fc'] = np.log2(np.maximum(K_mean, eps)) - log2_x_ntc
+    
             if compute_inflection:
-                inflection_log2fc = np.full(n_features, np.nan)
-                valid = ~np.isnan(inflection_mean) & (inflection_mean > epsilon)
-                if np.any(valid):
-                    inflection_log2fc[valid] = np.log2(inflection_mean[valid]) - log2_x_ntc
-                data['inflection_log2fc'] = inflection_log2fc
+                eps = 1e-10
+                infl_mean = data.get('inflection_a_mean', np.full(n_features, np.nan))
+                infl_lo   = data.get('inflection_a_lower', np.full(n_features, np.nan))
+                infl_hi   = data.get('inflection_a_upper', np.full(n_features, np.nan))
+            
+                def _log2fc(arr):
+                    out = np.full(n_features, np.nan)
+                    ok = np.isfinite(arr) & (arr > eps)
+                    out[ok] = np.log2(arr[ok]) - log2_x_ntc
+                    return out
+            
+                data['inflection_a_log2fc_mean']  = _log2fc(infl_mean)
+                data['inflection_a_log2fc_lower'] = _log2fc(infl_lo)
+                data['inflection_a_log2fc_upper'] = _log2fc(infl_hi)
+            
+                # Backwards compat
+                data['inflection_a_log2fc'] = data['inflection_a_log2fc_mean']
+    
+            y_ntc_arr = np.asarray(y_ntc, dtype=float)
+            outA = np.full(n_features, np.nan)
+            okA = (A_mean > eps) & (y_ntc_arr > eps)
+            outA[okA] = np.log2(A_mean[okA]) - np.log2(y_ntc_arr[okA])
+            data['A_log2fc'] = outA
+    
+            # Also roots in log2FC x-space, if present:
+            if compute_derivative_roots and (x_range is not None) and ('first_deriv_roots_mean' in data):
+                first_log = []
+                second_log = []
+                third_log = []
+                for i in range(n_features):
+                    # Parse from stored strings to avoid recomputing
+                    def _parse(s):
+                        """Parse root string, handling np.nan and empty strings."""
+                        if s is None or (isinstance(s, float) and np.isnan(s)):
+                            return []
+                        if isinstance(s, str) and s.strip() == '':
+                            return []
+                        return [float(x) for x in str(s).split(';') if x != '']
 
-            # For single Hill, baseline is often implicit (A=0)
-            # But the function value at x=0 depends on sign of n
-            # For n>0: y(0) = 0, for n<0: y(0) = B
-            # We can compute this as the offset relative to y_ntc
-            # This is more complex - for now, just provide the basic transforms
+                    r1 = _parse(data['first_deriv_roots_mean'][i])
+                    r2 = _parse(data['second_deriv_roots_mean'][i])
+                    r3 = _parse(data['third_deriv_roots_mean'][i])
 
+                    # Use np.nan for empty roots (consistent with additive_hill)
+                    first_log.append(';'.join([f'{(np.log2(max(r, eps)) - log2_x_ntc):.4f}' for r in r1]) if r1 else np.nan)
+                    second_log.append(';'.join([f'{(np.log2(max(r, eps)) - log2_x_ntc):.4f}' for r in r2]) if r2 else np.nan)
+                    third_log.append(';'.join([f'{(np.log2(max(r, eps)) - log2_x_ntc):.4f}' for r in r3]) if r3 else np.nan)
+                data['first_deriv_roots_log2fc_mean'] = first_log
+                data['second_deriv_roots_log2fc_mean'] = second_log
+                data['third_deriv_roots_log2fc_mean'] = third_log
+    
         return data
 
-    def _add_polynomial_params(self, data, posterior, n_features, compute_full_log2fc):
-        """Add polynomial parameters to data dict."""
-        coefs = posterior['poly_coefs']  # [n_samples, n_features, degree+1] or [n_features, degree+1]
+    def _add_polynomial_params(
+        self,
+        data,
+        posterior,
+        n_features,
+        compute_full_log2fc: bool = True,
+        compute_derivative_roots: bool = True,
+        x_range: Optional[np.ndarray] = None,
+        x_obs_min: Optional[float] = None,
+        x_obs_max: Optional[float] = None
+    ):
+        """
+        Add polynomial parameters to data dict.
+
+        IMPORTANT: The polynomial operates in different spaces depending on distribution:
+        - negbinom: log2(y) = log2(A) + alpha * poly(log2(x))  [log2 space for x]
+        - normal/studentt: y = A + alpha * poly(x)  [linear space]
+        - binomial: logit(p) = logit(A) + alpha * poly(x)  [linear x, logit y]
+
+        For negbinom, the polynomial coefficients multiply powers of log2(x), so:
+        - x_range should be in LINEAR x-space (this method converts internally)
+        - Derivative roots are found in log2(x) space, then converted back
+        - full_log2fc represents the range of log2(y) values
+
+        For normal/studentt/binomial, coefficients multiply powers of linear x.
+
+        Parameters stored (with _mean, _lower, _upper suffixes):
+        - coef_{i}: Coefficient for the i-th power term
+        - For negbinom: coef_i multiplies log2(x)^i
+        - For others: coef_i multiplies x^i
+
+        Also computes:
+        - full_log2fc: Dynamic range in appropriate space
+        - observed_log2fc: Same as full_log2fc for polynomial
+        - Derivative roots in the native polynomial space
+        - Log2FC transforms of roots if x_ntc is available
+        """
+        coefs = posterior['poly_coefs']  # [S, T, d+1] or [T, d+1]
         if isinstance(coefs, torch.Tensor):
             coefs = coefs.cpu().numpy()
-
+    
         degree = coefs.shape[-1] - 1
-
+    
         if coefs.ndim == 3:
+            # summary per coefficient
             for i in range(degree + 1):
-                coef_mean = coefs[:, :, i].mean(axis=0)
-                coef_lower = np.quantile(coefs[:, :, i], 0.025, axis=0)
-                coef_upper = np.quantile(coefs[:, :, i], 0.975, axis=0)
-
-                data[f'coef_{i}_mean'] = coef_mean
-                data[f'coef_{i}_lower'] = coef_lower
-                data[f'coef_{i}_upper'] = coef_upper
+                data[f'coef_{i}_mean']  = coefs[:, :, i].mean(axis=0)
+                data[f'coef_{i}_lower'] = np.quantile(coefs[:, :, i], 0.025, axis=0)
+                data[f'coef_{i}_upper'] = np.quantile(coefs[:, :, i], 0.975, axis=0)
+            coefs_mean = coefs.mean(axis=0)  # [T, d+1]
         else:
             for i in range(degree + 1):
-                data[f'coef_{i}_mean'] = coefs[:, i]
+                data[f'coef_{i}_mean']  = coefs[:, i]
                 data[f'coef_{i}_lower'] = coefs[:, i]
                 data[f'coef_{i}_upper'] = coefs[:, i]
+            coefs_mean = coefs  # [T, d+1]
+    
+        # Determine if polynomial is in log2 space (negbinom) or linear space (others)
+        distribution = data.get('distribution', 'negbinom')
+        is_log2_space = (distribution == 'negbinom')
 
+        # full_log2fc and observed_log2fc: evaluate over observed x-range
+        # For negbinom: poly(log2(x)), evaluate on log2 grid
+        # For others: poly(x), evaluate on linear grid
         if compute_full_log2fc:
-            # Estimate full log2FC by evaluating polynomial at x_true range
-            if hasattr(self.model, 'x_true'):
-                x_true = self.model.x_true
-                if isinstance(x_true, torch.Tensor):
-                    x_true = x_true.cpu().numpy()
+            if (x_obs_min is not None) and (x_obs_max is not None) and np.isfinite(x_obs_min) and np.isfinite(x_obs_max):
+                x_min = float(x_obs_min)
+                x_max = float(x_obs_max)
+            else:
+                # fallback: if no x info, pick a generic range
+                x_min, x_max = 1.0, 2.0
 
-                x_min = x_true.min()
-                x_max = x_true.max()
+            eps = 1e-10
+            n_eval = 1000
 
-                # Evaluate polynomial at endpoints
-                if coefs.ndim == 3:
-                    # [n_samples, n_features, degree+1]
-                    y_min = np.sum([coefs[:, :, i] * (x_min ** i) for i in range(degree + 1)], axis=0)
-                    y_max = np.sum([coefs[:, :, i] * (x_max ** i) for i in range(degree + 1)], axis=0)
+            if is_log2_space:
+                # For negbinom: polynomial is poly(log2(x))
+                # Create grid in log2 space, evaluate polynomial there
+                log2_min = np.log2(max(x_min, eps))
+                log2_max = np.log2(max(x_max, eps))
+                u_eval = np.linspace(log2_min, log2_max, n_eval)  # u = log2(x)
+            else:
+                # For normal/studentt/binomial: polynomial is poly(x)
+                x_eval = np.linspace(x_min, x_max, n_eval)
 
-                    full_log2fc = np.abs(y_max - y_min)
-                    full_log2fc_mean = full_log2fc.mean(axis=0)
-                    full_log2fc_lower = np.quantile(full_log2fc, 0.025, axis=0)
-                    full_log2fc_upper = np.quantile(full_log2fc, 0.975, axis=0)
+            full_mean = []
+            observed_log2fc = []
+            for t in range(n_features):
+                if is_log2_space:
+                    # poly(log2(x)) gives log2(y) - log2(A) (scaled by alpha)
+                    # The polynomial output IS the log2FC contribution
+                    poly_vals = self._poly_eval(u_eval, coefs_mean[t, :])
+                    # Dynamic range is max - min of poly values (already in log2 space)
+                    poly_range = np.nanmax(poly_vals) - np.nanmin(poly_vals)
+                    full_mean.append(abs(poly_range) if np.isfinite(poly_range) else np.nan)
+                    observed_log2fc.append(abs(poly_range) if np.isfinite(poly_range) else np.nan)
                 else:
-                    y_min = np.sum([coefs[:, i] * (x_min ** i) for i in range(degree + 1)], axis=0)
-                    y_max = np.sum([coefs[:, i] * (x_max ** i) for i in range(degree + 1)], axis=0)
+                    # poly(x) gives y directly (for normal/studentt) or logit contribution (binomial)
+                    y_eval = self._poly_eval(x_eval, coefs_mean[t, :])
+                    y_min_val = np.nanmin(y_eval)
+                    y_max_val = np.nanmax(y_eval)
 
-                    full_log2fc_mean = np.abs(y_max - y_min)
-                    full_log2fc_lower = full_log2fc_mean
-                    full_log2fc_upper = full_log2fc_mean
+                    # Log2 ratio only valid if both values are positive
+                    if y_min_val > eps and y_max_val > eps:
+                        full_mean.append(np.log2(y_max_val / y_min_val))
+                        observed_log2fc.append(np.log2(y_max_val / y_min_val))
+                    else:
+                        # Fall back to NaN if y values are non-positive
+                        full_mean.append(np.nan)
+                        observed_log2fc.append(np.nan)
 
-                data['full_log2fc_mean'] = full_log2fc_mean
-                data['full_log2fc_lower'] = full_log2fc_lower
-                data['full_log2fc_upper'] = full_log2fc_upper
+            data['full_log2fc_mean'] = full_mean
+            data['full_log2fc_lower'] = full_mean
+            data['full_log2fc_upper'] = full_mean
+            data['observed_log2fc'] = observed_log2fc
+            data['observed_log2fc_lower'] = observed_log2fc
+            data['observed_log2fc_upper'] = observed_log2fc
 
+        # derivative roots over x_range
+        # For negbinom: find roots in log2(x) space, convert back to linear x
+        # For others: find roots in linear x space directly
+        if compute_derivative_roots and (x_range is not None):
+            first_roots = []
+            second_roots = []
+            third_roots = []
+            n_first = []
+            n_second = []
+            n_third = []
+
+            eps = 1e-10
+
+            if is_log2_space:
+                # Convert x_range to log2 space for root finding
+                x_range_positive = x_range[x_range > eps]
+                if len(x_range_positive) > 0:
+                    u_range = np.log2(x_range_positive)
+                else:
+                    u_range = np.linspace(-5, 5, 1000)  # fallback
+
+            for t in range(n_features):
+                if is_log2_space:
+                    # Find roots in u = log2(x) space
+                    r1_u, r2_u, r3_u = self._poly_derivative_roots(coefs_mean[t, :], u_range, compute_third=True)
+                    # Convert roots back to linear x space: x = 2^u
+                    r1 = [2**u for u in r1_u] if r1_u else []
+                    r2 = [2**u for u in r2_u] if r2_u else []
+                    r3 = [2**u for u in r3_u] if r3_u else []
+                else:
+                    # Find roots directly in linear x space
+                    r1, r2, r3 = self._poly_derivative_roots(coefs_mean[t, :], x_range, compute_third=True)
+
+                first_roots.append(r1)
+                second_roots.append(r2)
+                third_roots.append(r3)
+                n_first.append(len(r1))
+                n_second.append(len(r2))
+                n_third.append(len(r3))
+
+            data['n_first_deriv_roots'] = n_first
+            data['n_second_deriv_roots'] = n_second
+            data['n_third_deriv_roots'] = n_third
+            # Roots are now in linear x space for all distributions
+            data['first_deriv_roots_mean'] = [';'.join([f'{r:.4f}' for r in rr]) if rr else np.nan for rr in first_roots]
+            data['second_deriv_roots_mean'] = [';'.join([f'{r:.4f}' for r in rr]) if rr else np.nan for rr in second_roots]
+            data['third_deriv_roots_mean'] = [';'.join([f'{r:.4f}' for r in rr]) if rr else np.nan for rr in third_roots]
+
+            if 'x_ntc' in data and data['x_ntc'] is not None and np.isfinite(data['x_ntc']):
+                log2_x_ntc = np.log2(max(float(data['x_ntc']), eps))
+
+                def _to_log2fc_str(root_str):
+                    """Convert x-space root string to log2FC space (u = log2(x) - log2(x_ntc))."""
+                    if root_str is None or (isinstance(root_str, float) and np.isnan(root_str)):
+                        return np.nan
+                    if isinstance(root_str, str) and root_str.strip() == '':
+                        return np.nan
+                    roots = [float(r) for r in str(root_str).split(';')]
+                    u = [np.log2(max(r, eps)) - log2_x_ntc for r in roots]
+                    return ';'.join([f'{val:.4f}' for val in u]) if u else np.nan
+
+                data['first_deriv_roots_log2fc_mean'] = [_to_log2fc_str(s) for s in data['first_deriv_roots_mean']]
+                data['second_deriv_roots_log2fc_mean'] = [_to_log2fc_str(s) for s in data['second_deriv_roots_mean']]
+                data['third_deriv_roots_log2fc_mean'] = [_to_log2fc_str(s) for s in data['third_deriv_roots_mean']]
+
+    
         return data
 
-    def _compute_hill_inflection(self, K, xc):
+
+    def _compute_hill_inflection(self, n, K, epsilon=1e-12):
         """
-        Compute inflection point of Hill function.
-
-        For Hill equation y = B * x^K / (xc^K + x^K), the inflection point is at:
-        x_inflection = xc * ((K - 1) / (K + 1)) ^ (1/K)
-
-        Only defined for K > 1.
+        Inflection point of Hill: Vmax * x^n / (K^n + x^n) (+ A)
+    
+        Exists iff |n| > 1.
+    
+        x_inflection = K * ((|n| - 1)/(|n| + 1))^(1/|n|)
         """
-        K = np.asarray(K)
-        xc = np.asarray(xc)
-
-        # Only compute for K > 1
-        inflection = np.full_like(K, np.nan, dtype=float)
-        valid = K > 1
-
+        n = np.asarray(n, dtype=float)
+        K = np.asarray(K, dtype=float)
+    
+        nabs = np.abs(n)
+        out = np.full(np.broadcast(n, K).shape, np.nan, dtype=float)
+    
+        valid = (nabs > 1) & np.isfinite(nabs) & np.isfinite(K) & (K > epsilon)
         if np.any(valid):
-            ratio = (K[valid] - 1) / (K[valid] + 1)
-            inflection[valid] = xc[valid] * (ratio ** (1.0 / K[valid]))
-
-        return inflection
+            ratio = (nabs[valid] - 1.0) / (nabs[valid] + 1.0)   # in (0,1)
+            out[valid] = K[valid] * (ratio ** (1.0 / nabs[valid]))
+        return out
 
     # ========================================================================
     # Derivative and Root Finding Methods (for Additive Hill)
     # ========================================================================
 
-    def _hill_first_derivative(self, x, Vmax, K, n, epsilon=1e-6):
+    def _exp_clip(self, z):
+        # double precision exp overflow ~ 709; underflow ~ -745 is safe to clip
+        return np.exp(np.clip(z, -745.0, 709.0))
+    
+    def _hill_first_derivative(self, x, Vmax, K, n, epsilon=1e-12):
         """
-        First derivative of Hill function: d/dx [V * x^n / (K^n + x^n)]
-
-        Formula: (K^n * V * n * x^(n-1)) / (K^n + x^n)^2
-
-        Note: n can be negative (for inhibitor Hill functions).
+        d/dx [V * x^n / (K^n + x^n)] = (K^n * V * n * x^(n-1)) / (K^n + x^n)^2
+        Stable for tiny x and/or negative n.
         """
-        x = np.maximum(x, epsilon)
-        K = np.maximum(K, epsilon)
-        # Do NOT constrain n - it can be negative for inhibitor functions
+        n = float(n)
+        if abs(n) < 1e-15:
+            return np.zeros_like(np.asarray(x, dtype=float))
 
-        # Use safe computation to avoid overflow
-        try:
-            K_n = K ** n
-            x_n = x ** n
-            x_nm1 = x ** (n - 1)
-            denom = (K_n + x_n) ** 2
-
-            result = (K_n * Vmax * n * x_nm1) / (denom + epsilon)
-            # Handle both scalar and array results
-            if np.isscalar(result):
-                if np.isnan(result) or np.isinf(result):
-                    return 0.0
-            else:
-                result = np.where(np.isnan(result) | np.isinf(result), 0.0, result)
-            return result
-        except (OverflowError, FloatingPointError):
-            if np.isscalar(x):
-                return 0.0
-            return np.zeros_like(x)
-
-    def _hill_second_derivative(self, x, Vmax, K, n, epsilon=1e-6):
+        x = np.asarray(x, dtype=float)
+        K = float(K); Vmax = float(Vmax); n = float(n)
+    
+        x_safe = np.maximum(x, epsilon)
+        K_safe = max(K, epsilon)
+    
+        logx = np.log(x_safe)
+        logK = np.log(K_safe)
+    
+        K_n   = self._exp_clip(n * logK)
+        x_n   = self._exp_clip(n * logx)
+        x_nm1 = self._exp_clip((n - 1.0) * logx)
+    
+        denom = (K_n + x_n) ** 2
+        with np.errstate(over='ignore', under='ignore', invalid='ignore', divide='ignore'):
+            out = (K_n * Vmax * n * x_nm1) / denom
+    
+        return np.where(np.isfinite(out), out, np.nan)
+    
+    def _hill_second_derivative(self, x, Vmax, K, n, epsilon=1e-12):
         """
-        Second derivative of Hill function: d²/dx² [V * x^n / (K^n + x^n)]
-
-        Formula: -(K^n * V * n * x^(n-2) * ((n+1)*x^n - K^n*(n-1))) / (K^n + x^n)^3
-
-        Note: n can be negative (for inhibitor Hill functions).
+        d²/dx² [V * x^n / (K^n + x^n)]
+        = -(K^n * V * n * x^(n-2) * ((n+1)*x^n - K^n*(n-1))) / (K^n + x^n)^3
+        Stable for tiny x and/or negative n.
         """
-        x = np.maximum(x, epsilon)
-        K = np.maximum(K, epsilon)
-        # Do NOT constrain n - it can be negative for inhibitor functions
+        n = float(n)
+        if abs(n) < 1e-15:
+            return np.zeros_like(np.asarray(x, dtype=float))
 
-        # Use safe computation to avoid overflow
-        try:
-            K_n = K ** n
-            x_n = x ** n
-            x_nm2 = x ** (n - 2)
-            denom = (K_n + x_n) ** 3
-
-            inner = (n + 1) * x_n - K_n * (n - 1)
-
-            result = -(K_n * Vmax * n * x_nm2 * inner) / (denom + epsilon)
-            # Handle both scalar and array results
-            if np.isscalar(result):
-                if np.isnan(result) or np.isinf(result):
-                    return 0.0
-            else:
-                result = np.where(np.isnan(result) | np.isinf(result), 0.0, result)
-            return result
-        except (OverflowError, FloatingPointError):
-            if np.isscalar(x):
-                return 0.0
-            return np.zeros_like(x)
+        x = np.asarray(x, dtype=float)
+        K = float(K); Vmax = float(Vmax); n = float(n)
+    
+        x_safe = np.maximum(x, epsilon)
+        K_safe = max(K, epsilon)
+    
+        logx = np.log(x_safe)
+        logK = np.log(K_safe)
+    
+        K_n   = self._exp_clip(n * logK)
+        x_n   = self._exp_clip(n * logx)
+        x_nm2 = self._exp_clip((n - 2.0) * logx)
+    
+        denom = (K_n + x_n) ** 3
+        inner = (n + 1.0) * x_n - K_n * (n - 1.0)
+    
+        with np.errstate(over='ignore', under='ignore', invalid='ignore', divide='ignore'):
+            out = -(K_n * Vmax * n * x_nm2 * inner) / denom
+    
+        return np.where(np.isfinite(out), out, np.nan)
 
     def _additive_hill_first_derivative(self, x, alpha, Vmax_a, K_a, n_a,
-                                         beta, Vmax_b, K_b, n_b, epsilon=1e-6):
+                                         beta, Vmax_b, K_b, n_b, epsilon=1e-12):
         """
         First derivative of additive Hill: dy/dx = alpha * dHill_a/dx + beta * dHill_b/dx
         """
@@ -1634,53 +2957,60 @@ class ModelSummarizer:
         d2_b = self._hill_second_derivative(x, Vmax_b, K_b, n_b, epsilon)
         return alpha * d2_a + beta * d2_b
 
-    def _hill_third_derivative(self, x, Vmax, K, n, epsilon=1e-6):
+    def _hill_third_derivative(self, x, Vmax, K, n, epsilon=1e-12):
         """
-        Third derivative of Hill function: d³/dx³ [V * x^n / (K^n + x^n)]
-
-        Formula: (K^n * V * n * x^(n-3) * ((n²+3n+2)*x^(2n) + (4K^n - 4K^n*n²)*x^n
-                 + K^(2n)*n² - 3K^(2n)*n + 2K^(2n))) / (K^n + x^n)^4
-
-        Note: n can be negative (for inhibitor Hill functions).
+        Numerically-stable third derivative of:
+            f(x) = V * x^n / (K^n + x^n)
+    
+        Uses log-space exponentiation to avoid overflow/underflow.
+        Returns NaN where the expression is numerically non-finite.
         """
-        x = np.maximum(x, epsilon)
-        K = np.maximum(K, epsilon)
-        # Do NOT constrain n - it can be negative for inhibitor functions
+        n = float(n)
+        if abs(n) < 1e-15:
+            return np.zeros_like(np.asarray(x, dtype=float))
 
-        # Use safe computation to avoid overflow
-        try:
-            x_n = x ** n
-            x_2n = x ** (2 * n)
-            K_n = K ** n
-            K_2n = K ** (2 * n)
-            x_nm3 = x ** (n - 3)
-            denom = (K_n + x_n) ** 4
-
-            # Numerator terms
-            # (n² + 3n + 2) * x^(2n)
-            term1 = (n**2 + 3*n + 2) * x_2n
-            # (4K^n - 4K^n*n²) * x^n = 4K^n * (1 - n²) * x^n
-            term2 = 4 * K_n * (1 - n**2) * x_n
-            # K^(2n) * n² - 3K^(2n) * n + 2K^(2n) = K^(2n) * (n² - 3n + 2)
-            term3 = K_2n * (n**2 - 3*n + 2)
-
-            numer = K_n * Vmax * n * x_nm3 * (term1 + term2 + term3)
-
-            result = numer / (denom + epsilon)
-            # Handle both scalar and array results
-            if np.isscalar(result):
-                if np.isnan(result) or np.isinf(result):
-                    return 0.0
-            else:
-                result = np.where(np.isnan(result) | np.isinf(result), 0.0, result)
-            return result
-        except (OverflowError, FloatingPointError):
-            if np.isscalar(x):
-                return 0.0
-            return np.zeros_like(x)
+        x = np.asarray(x, dtype=float)
+        K = float(K)
+        Vmax = float(Vmax)
+        n = float(n)
+    
+        # Keep positivity, but use a *much smaller* epsilon so you don't flatten a wide region near 0.
+        x_safe = np.maximum(x, epsilon)
+        K_safe = max(K, epsilon)
+    
+        logx = np.log(x_safe)
+        logK = np.log(K_safe)
+    
+        # helper: exp with clipping to avoid overflow
+        # double precision exp overflows around ~709
+        def exp_clip(z):
+            return np.exp(np.clip(z, -745.0, 709.0))
+    
+        # powers in log-space
+        x_n   = exp_clip(n * logx)
+        x_2n  = exp_clip((2.0 * n) * logx)
+        x_nm3 = exp_clip((n - 3.0) * logx)
+    
+        K_n   = exp_clip(n * logK)
+        K_2n  = exp_clip((2.0 * n) * logK)
+    
+        denom = (K_n + x_n) ** 4
+    
+        term1 = (n**2 + 3.0*n + 2.0) * x_2n
+        term2 = 4.0 * K_n * (1.0 - n**2) * x_n
+        term3 = K_2n * (n**2 - 3.0*n + 2.0)
+    
+        numer = K_n * Vmax * n * x_nm3 * (term1 + term2 + term3)
+    
+        with np.errstate(over='ignore', under='ignore', invalid='ignore', divide='ignore'):
+            out = numer / denom
+    
+        # Do NOT turn inf into 0; that creates fake roots.
+        out = np.where(np.isfinite(out), out, np.nan)
+        return out
 
     def _additive_hill_third_derivative(self, x, alpha, Vmax_a, K_a, n_a,
-                                         beta, Vmax_b, K_b, n_b, epsilon=1e-6):
+                                         beta, Vmax_b, K_b, n_b, epsilon=1e-12):
         """
         Third derivative of additive Hill: d³y/dx³ = alpha * d³Hill_a/dx³ + beta * d³Hill_b/dx³
         """
@@ -1688,42 +3018,212 @@ class ModelSummarizer:
         d3_b = self._hill_third_derivative(x, Vmax_b, K_b, n_b, epsilon)
         return alpha * d3_a + beta * d3_b
 
-    def _find_roots_empirical(self, func, x_range: np.ndarray) -> List[float]:
+    def _dedup_roots_log2(self, roots, tol_log2=1e-3):
         """
-        Find roots of a function empirically by detecting sign changes.
-
-        Parameters
-        ----------
-        func : callable
-            Function to find roots of (takes x, returns y)
-        x_range : np.ndarray
-            X values to search over
-
-        Returns
-        -------
-        List[float]
-            List of approximate root locations (interpolated between sign changes)
+        Deduplicate roots by proximity in log2(x).
+        tol_log2=1e-3 means ~0.1% multiplicative tolerance.
         """
-        y_vals = func(x_range)
+        if not roots:
+            return []
+        roots = np.array([r for r in roots if np.isfinite(r) and r > 0], dtype=float)
+        if roots.size == 0:
+            return []
+        roots.sort()
+        out = [roots[0]]
+        last = roots[0]
+        for r in roots[1:]:
+            if abs(np.log2(r) - np.log2(last)) > tol_log2:
+                out.append(r)
+                last = r
+        return out
+        
+    def _find_roots_empirical( 
+        self, 
+        func, 
+        x_range: np.ndarray, 
+        tol_log2_dedup: float = 1e-3, 
+        # baseline “zero” settings 
+        zero_atol: float = 1e-12, 
+        zero_rtol: float = 1e-9, 
+        # new: noise floor multiplier (helps for flat curves) 
+        noise_mult: float = 5.0, 
+        # new: require endpoints to exceed thr_hi (hysteresis) 
+        hysteresis: float = 2.0, 
+        # new: validate found root by probing around it in log2 space 
+        validate: bool = True, 
+        validate_dlog2: float = 2e-3, # ~0.14% multiplicative 
+    ): 
+        y_vals = np.asarray(func(x_range), dtype=float) 
+        x_vals = np.asarray(x_range, dtype=float) 
+        
+        finite = np.isfinite(y_vals) & np.isfinite(x_vals) 
+        if finite.sum() < 2: 
+            return [] 
+        
+        y = y_vals[finite] 
+        x = x_vals[finite] 
+        
+        # global scale 
+        scale = np.nanmax(np.abs(y)) 
+        if not np.isfinite(scale) or scale == 0.0: 
+            return [] 
+        
+        # estimate a numerical noise floor from local variation 
+        # (MAD of first differences is a decent proxy for “flat + jitter”) 
+        dy = np.diff(y) 
+        dy = dy[np.isfinite(dy)] 
+        if dy.size > 0:
+            mad = np.median(np.abs(dy - np.median(dy))) 
+            noise = 1.4826 * mad 
+        else: 
+            noise = 0.0 
+        
+        thr = max(zero_atol, zero_rtol * scale, noise_mult * noise)
+        thr_hi = hysteresis * thr 
+        
+        # If everything is within the deadband, treat as “no roots” 
+        if np.all(np.abs(y) <= thr): 
+            return [] 
+        
+        # deadband snap
+        y0 = y.copy() 
+        y0[np.abs(y0) <= thr] = 0.0 
+        s = np.sign(y0) 
+        
+        roots = [] 
+        
+        # helper for validation 
+        def _ok_root(r): 
+            if not validate: 
+                return True 
+            if (not np.isfinite(r)) or (r <= 0): 
+                return False 
+            
+            # probe multiplicatively around r: r * 2^(±dlog2) 
+            rL = r * (2.0 ** (-validate_dlog2)) 
+            rR = r * (2.0 ** ( validate_dlog2)) 
+            
+            try: 
+                f0 = float(np.asarray(func(np.array([r]))).ravel()[0]) 
+                fL = float(np.asarray(func(np.array([rL]))).ravel()[0]) 
+                fR = float(np.asarray(func(np.array([rR]))).ravel()[0]) 
+            except Exception: 
+                return False 
+            
+            if not (np.isfinite(f0) and np.isfinite(fL) and np.isfinite(fR)): 
+                return False 
+            
+            # require a *real* crossing: opposite signs on the two sides, 
+            # and at least one side has magnitude above the stronger threshold 
+            if fL == 0.0 or fR == 0.0: 
+                return False 
+            if (fL * fR) >= 0.0: 
+                return False 
+            if (abs(fL) < thr_hi) and (abs(fR) < thr_hi): 
+                return False 
+            
+            # avoid “flat root” where everything is ~0
+            if abs(f0) < thr and (abs(fL) < thr_hi) and (abs(fR) < thr_hi):
+                return False 
+            
+            return True
+
+        for i in range(len(s) - 1): 
+            # skip if either endpoint is inside the deadband (prevents “zero-touch” roots) 
+            if s[i] == 0 or s[i + 1] == 0: 
+                continue 
+            
+            # hysteresis: insist endpoints are not just barely outside thr 
+            if (abs(y[i]) < thr_hi) or (abs(y[i + 1]) < thr_hi): 
+                continue 
+            
+            if s[i] != s[i + 1]: 
+                xL = float(x[i]) 
+                xR = float(x[i + 1]) 
+                
+                try: 
+                    root = brentq(lambda z: float(np.asarray(func(np.array([z]))).ravel()[0]), xL, xR) 
+                except Exception: 
+                    # fallback linear interpolation 
+                    yL = float(y[i]) 
+                    yR = float(y[i + 1]) 
+                    t = abs(yL) / (abs(yL) + abs(yR)) 
+                    root = float(xL + t * (xR - xL)) 
+                    
+                if _ok_root(root): 
+                    roots.append(float(root)) 
+                
+        return self._dedup_roots_log2(roots, tol_log2=tol_log2_dedup)
+
+    def _find_roots_empirical_loose(
+        self,
+        func,
+        x_range: np.ndarray,
+        tol_log2_dedup: float = 1e-3,
+        zero_atol: float = 1e-12,
+        zero_rtol: float = 1e-9,
+        include_near_zero_minima: bool = True,   # capture “touching” roots
+    ):
+        """
+        Permissive empirical root finder:
+          - finds sign-change roots (brentq)
+          - optionally also returns local minima of |f| that are very close to zero
+            (captures tangent roots where sign doesn't flip)
+        """
+        x = np.asarray(x_range, dtype=float)
+        y = np.asarray(func(x), dtype=float)
+    
+        finite = np.isfinite(x) & np.isfinite(y)
+        if finite.sum() < 3:
+            return []
+    
+        x = x[finite]
+        y = y[finite]
+    
+        scale = np.nanmax(np.abs(y))
+        if not np.isfinite(scale) or scale == 0.0:
+            return []
+    
+        thr = max(zero_atol, zero_rtol * scale)
+    
+        # ---------- 1) sign-change roots (DO NOT skip near-zero endpoints) ----------
+        # snap tiny values to 0 only for sign bookkeeping
+        y_snap = y.copy()
+        y_snap[np.abs(y_snap) <= thr] = 0.0
+        s = np.sign(y_snap)
+    
         roots = []
-
-        for i in range(len(y_vals) - 1):
-            if np.isnan(y_vals[i]) or np.isnan(y_vals[i+1]):
-                continue
-            # Check for sign change
-            if y_vals[i] * y_vals[i+1] < 0:
-                # Interpolate to find approximate root
+    
+        # to avoid missing crossings through long near-zero stretches, hop between
+        # the nearest non-zero sign points.
+        nz = np.where(s != 0)[0]
+        if nz.size >= 2:
+            for a, b in zip(nz[:-1], nz[1:]):
+                if s[a] == s[b]:
+                    continue
+                xL, xR = float(x[a]), float(x[b])
                 try:
-                    root = brentq(func, x_range[i], x_range[i+1])
-                    roots.append(root)
-                except (ValueError, RuntimeError):
-                    # If brentq fails, use linear interpolation
-                    t = abs(y_vals[i]) / (abs(y_vals[i]) + abs(y_vals[i+1]))
-                    root = x_range[i] + t * (x_range[i+1] - x_range[i])
-                    roots.append(root)
+                    root = brentq(lambda z: float(np.asarray(func(np.array([z]))).ravel()[0]), xL, xR)
+                except Exception:
+                    # fallback: linear interpolation
+                    yL = float(y[a]); yR = float(y[b])
+                    t = abs(yL) / (abs(yL) + abs(yR))
+                    root = xL + t * (xR - xL)
+                if np.isfinite(root) and root > 0:
+                    roots.append(float(root))
+    
+        # ---------- 2) tangent “touching” roots (local minima of |y| near 0) ----------
+        if include_near_zero_minima and y.size >= 3:
+            ay = np.abs(y)
+            # local minima indices of |y|
+            mins = np.where((ay[1:-1] <= ay[:-2]) & (ay[1:-1] <= ay[2:]))[0] + 1
+            for i in mins:
+                if ay[i] <= thr:
+                    roots.append(float(x[i]))
+    
+        return self._dedup_roots_log2(roots, tol_log2=tol_log2_dedup)
 
-        return roots
-
+    
     def _classify_additive_hill(self, alpha, alpha_lower, alpha_upper,
                                  beta, beta_lower, beta_upper,
                                  n_a, n_a_lower, n_a_upper,
@@ -1844,7 +3344,7 @@ class ModelSummarizer:
         - n > 0: Hill(0) = 0, Hill(∞) = Vmax
         - n < 0: Hill(0) = Vmax, Hill(∞) = 0
         """
-        epsilon = 1e-10
+        epsilon = 1e-12
 
         # Compute boundary values based on signs of n
         # At x→0: Hill = Vmax if n<0, else 0
@@ -1916,49 +3416,51 @@ class ModelSummarizer:
         y_min = min(all_y)
         return np.log2(max(y_max, epsilon) / max(y_min, epsilon))
 
-    def _compute_observed_log2fc_fitted(self, A, alpha, Vmax_a, beta, Vmax_b,
-                                         K_a, n_a, K_b, n_b,
-                                         x_obs_min: float, x_obs_max: float) -> float:
-        """
-        Compute observed log2FC over the observed x range using the fitted Hill function.
-
-        Returns log2(y_max / y_min) where y_max and y_min are evaluated over
-        the observed x range [x_obs_min, x_obs_max].
-
-        Parameters
-        ----------
-        x_obs_min : float
-            Minimum observed x value (min of guide-level x_true)
-        x_obs_max : float
-            Maximum observed x value (max of guide-level x_true)
-        """
-        epsilon = 1e-10
-
-        # Evaluate at dense grid points (vectorized for speed)
-        n_points = 200
-        x_eval = np.linspace(max(x_obs_min, epsilon), x_obs_max, n_points)
-
-        # Vectorized Hill function evaluation
-        K_a_safe = max(K_a, epsilon)
-        K_b_safe = max(K_b, epsilon)
-
-        # Compute Hill A
-        x_n_a = x_eval ** n_a
-        K_n_a = K_a_safe ** n_a
-        H_a = Vmax_a * x_n_a / (K_n_a + x_n_a + epsilon)
-
-        # Compute Hill B
-        x_n_b = x_eval ** n_b
-        K_n_b = K_b_safe ** n_b
-        H_b = Vmax_b * x_n_b / (K_n_b + x_n_b + epsilon)
-
-        # Combined function
+    def _compute_observed_log2fc_fitted(
+        self, A, alpha, Vmax_a, beta, Vmax_b,
+        K_a, n_a, K_b, n_b,
+        x_obs_min: float, x_obs_max: float,
+        return_argextrema: bool = False
+    ):
+        eps = 1e-10
+    
+        n_points = 1000
+        log2_min = np.log2(max(x_obs_min, eps))
+        log2_max = np.log2(max(x_obs_max, eps))
+        x_eval = 2.0 ** np.linspace(log2_min, log2_max, n_points)
+    
+        K_a_safe = max(K_a, eps)
+        K_b_safe = max(K_b, eps)
+    
+        # Hill A/B in log-space
+        x_n_a = self._exp_clip(n_a * np.log(x_eval))
+        K_n_a = self._exp_clip(n_a * np.log(K_a_safe))
+        H_a = Vmax_a * x_n_a / (K_n_a + x_n_a)
+    
+        x_n_b = self._exp_clip(n_b * np.log(x_eval))
+        K_n_b = self._exp_clip(n_b * np.log(K_b_safe))
+        H_b = Vmax_b * x_n_b / (K_n_b + x_n_b)
+    
         y_vals = A + alpha * H_a + beta * H_b
-
-        # Handle any NaN/inf values
-        y_vals = np.nan_to_num(y_vals, nan=A, posinf=A, neginf=A)
-
-        # Compute log2FC as log2(y_max / y_min)
-        y_max = max(y_vals.max(), epsilon)
-        y_min = max(y_vals.min(), epsilon)
-        return np.log2(y_max / y_min)
+    
+        # IMPORTANT: don't overwrite invalids with A (that can create fake extrema)
+        y_vals = np.asarray(y_vals, dtype=float)
+        y_vals[~np.isfinite(y_vals)] = np.nan
+    
+        if np.all(np.isnan(y_vals)):
+            if return_argextrema:
+                return np.nan, (np.nan, np.nan)
+            return np.nan
+    
+        # positivity for log-ratio
+        y_clip = np.maximum(y_vals, eps)
+    
+        imax = int(np.nanargmax(y_clip))
+        imin = int(np.nanargmin(y_clip))
+        y_max = float(y_clip[imax])
+        y_min = float(y_clip[imin])
+    
+        out = float(np.log2(y_max / y_min))
+        if return_argextrema:
+            return out, (float(x_eval[imin]), float(x_eval[imax]))
+        return out
