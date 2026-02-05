@@ -1053,8 +1053,11 @@ class ModelSummarizer:
         if isinstance(alpha_y, torch.Tensor):
             alpha_y = alpha_y.cpu().numpy()
 
-        # Get feature names
-        feature_names = modality.feature_meta.index.tolist()
+        # Get feature names - prefer modality.feature_names (what users see)
+        if modality.feature_names is not None:
+            feature_names = modality.feature_names
+        else:
+            feature_names = modality.feature_meta.index.tolist()
         n_features = len(feature_names)
         n_groups = alpha_y.shape[1]
 
@@ -1377,9 +1380,13 @@ class ModelSummarizer:
                 raise ValueError(f"Trans fit not found for modality '{modality_name}'. Run fit_trans(modality_name='{modality_name}') first.")
             posterior = modality.posterior_samples_trans
 
-        # Get feature names - prefer named columns over index if index is integer
+        # Get feature names - prefer modality.feature_names (what users see and use)
         feature_meta = modality.feature_meta
-        if feature_meta is not None and len(feature_meta) > 0:
+        if modality.feature_names is not None:
+            # First priority: use modality.feature_names (this is what users see)
+            feature_names = modality.feature_names
+        elif feature_meta is not None and len(feature_meta) > 0:
+            # Fallback: try feature_meta columns or index
             # Check if index is integer-based (RangeIndex or integer dtype)
             index_is_integer = (
                 isinstance(feature_meta.index, pd.RangeIndex) or
@@ -1401,7 +1408,7 @@ class ModelSummarizer:
                 # Index is named, use it
                 feature_names = feature_meta.index.tolist()
         else:
-            # No feature_meta, use range
+            # No feature_names or feature_meta, use range
             feature_names = list(range(modality.counts.shape[0]))
 
         n_features = len(feature_names)
