@@ -1304,20 +1304,24 @@ class ModelSummarizer:
         - x_ntc: NTC mean for cis gene (same for all trans genes)
         - y_ntc: NTC mean for each trans gene
         - log2fc_at_u0: log2FC value at u=0 (x = x_ntc), i.e., g(0) = log2(y(x_ntc)) - log2(y_ntc)
-        - delta_p_at_u0: (binomial only) probability difference at u=0, i.e., p(x_ntc) - p_ntc
+        - EC50_a_log2fc, EC50_b_log2fc: EC50 in log2FC x-space (log2(K) - log2(x_ntc))
+        - inflection_a_log2fc, inflection_b_log2fc: Inflection points in log2FC x-space
+
+        For negbinom/normal/studentt (log2FC y-space):
         - dg_du_at_u0, dg_du_at_u0_lower, dg_du_at_u0_upper: First derivative of log2FC at u=0 with 95% CI
         - d2g_du2_at_u0, d2g_du2_at_u0_lower, d2g_du2_at_u0_upper: Second derivative at u=0 with 95% CI
         - d3g_du3_at_u0, d3g_du3_at_u0_lower, d3g_du3_at_u0_upper: Third derivative at u=0 with 95% CI
-        - EC50_a_log2fc, EC50_b_log2fc: EC50 in log2FC x-space (log2(K) - log2(x_ntc))
-        - inflection_a_log2fc, inflection_b_log2fc: Inflection points in log2FC x-space
-        For negbinom/normal/studentt:
         - first_deriv_roots_log2fc_mean: Roots of dg/du=0 in u-space (g = log2(y) - log2(y_ntc))
         - second_deriv_roots_log2fc_mean: Roots of d²g/du²=0
         - third_deriv_roots_log2fc_mean: Roots of d³g/du³=0
         - A_log2fc: Baseline in log2FC y-space (log2(A) - log2(y_ntc))
 
-        For binomial distributions:
-        - first_deriv_roots_delta_p_mean: Roots of dp/du=0 in u-space (same as dy/dx=0 in x-space, converted)
+        For binomial distributions (delta_p y-space):
+        - delta_p_at_u0: Probability difference at u=0, i.e., p(x_ntc) - p_ntc
+        - dp_du_at_u0, dp_du_at_u0_lower, dp_du_at_u0_upper: First derivative of delta_p at u=0 with 95% CI
+        - d2p_du2_at_u0, d2p_du2_at_u0_lower, d2p_du2_at_u0_upper: Second derivative at u=0 with 95% CI
+        - d3p_du3_at_u0, d3p_du3_at_u0_lower, d3p_du3_at_u0_upper: Third derivative at u=0 with 95% CI
+        - first_deriv_roots_delta_p_mean: Roots of dp/du=0 in u-space
         - second_deriv_roots_delta_p_mean: Roots of d²p/du²=0
         - third_deriv_roots_delta_p_mean: Roots of d³p/du³=0
         - A_delta_p: Baseline in delta_p space (A - y_ntc)
@@ -2407,12 +2411,16 @@ class ModelSummarizer:
             is_binomial = (distribution == 'binomial')
 
             # Helper to compute all three derivatives at u=0 for given parameters
+            # For negbinom: compute dg/du (log2FC derivatives)
+            # For binomial: compute dp/du (delta_p derivatives)
             def _compute_derivs_at_u0(alpha_i, beta_i, Vmax_a_i, Vmax_b_i, K_a_i, K_b_i, n_a_i, n_b_i, A_i, y_ntc_i):
                 H_a_at_ntc = self._hill_value(x_ntc, Vmax_a_i, K_a_i, n_a_i)
                 H_b_at_ntc = self._hill_value(x_ntc, Vmax_b_i, K_b_i, n_b_i)
                 y_at_ntc = A_i + alpha_i * H_a_at_ntc + beta_i * H_b_at_ntc
 
-                if y_at_ntc <= epsilon or y_ntc_i <= epsilon:
+                # For negbinom, we need y_at_ntc > 0 and y_ntc_i > 0
+                # For binomial, we only need y_at_ntc to be valid (y_ntc_i can be any probability)
+                if not is_binomial and (y_at_ntc <= epsilon or y_ntc_i <= epsilon):
                     return np.nan, np.nan, np.nan
 
                 S_prime = self._additive_hill_first_derivative(
@@ -2428,33 +2436,48 @@ class ModelSummarizer:
                     beta_i, Vmax_b_i, K_b_i, n_b_i
                 )
 
-                # dg/du = x * S'(x) / S(x)
-                dg_du = x_ntc * S_prime / y_at_ntc
-
-                # d²g/du² = ln(2) * [x*S'/S + x²*S''/S - x²*(S'/S)²]
-                term1 = x_ntc * S_prime / y_at_ntc
-                term2 = (x_ntc ** 2) * S_double_prime / y_at_ntc
-                term3 = (x_ntc ** 2) * (S_prime / y_at_ntc) ** 2
-                d2g_du2 = ln2 * (term1 + term2 - term3)
-
-                # d³g/du³ = (ln(2))² * [x*S'/S + 3x²*S''/S - 3x²*(S'/S)²
-                #                      + x³*S'''/S - 3x³*(S'/S)*(S''/S) + 2x³*(S'/S)³]
-                S_ratio = S_prime / y_at_ntc      # S'/S
-                S2_ratio = S_double_prime / y_at_ntc  # S''/S
-                S3_ratio = S_triple_prime / y_at_ntc  # S'''/S
                 x2 = x_ntc ** 2
                 x3 = x_ntc ** 3
                 ln2_sq = ln2 ** 2
 
-                t1 = x_ntc * S_ratio              # x*S'/S
-                t2 = 3 * x2 * S2_ratio            # 3x²*S''/S
-                t3 = -3 * x2 * S_ratio ** 2       # -3x²*(S'/S)²
-                t4 = x3 * S3_ratio                # x³*S'''/S
-                t5 = -3 * x3 * S_ratio * S2_ratio # -3x³*(S'/S)*(S''/S)
-                t6 = 2 * x3 * S_ratio ** 3        # 2x³*(S'/S)³
-                d3g_du3 = ln2_sq * (t1 + t2 + t3 + t4 + t5 + t6)
+                if is_binomial:
+                    # For binomial: compute dp/du (delta_p derivatives in u-space)
+                    # dp/du = x · ln(2) · S'(x)
+                    dp_du = x_ntc * ln2 * S_prime
 
-                return dg_du, d2g_du2, d3g_du3
+                    # d²p/du² = ln(2) · (x · S' + x² · ln(2) · S'')
+                    d2p_du2 = ln2 * (x_ntc * S_prime + x2 * ln2 * S_double_prime)
+
+                    # d³p/du³ = (ln(2))² · (x · S' + 3x² · ln(2) · S'' + x³ · (ln(2))² · S''')
+                    d3p_du3 = ln2_sq * (x_ntc * S_prime + 3 * x2 * ln2 * S_double_prime + x3 * ln2_sq * S_triple_prime)
+
+                    return dp_du, d2p_du2, d3p_du3
+                else:
+                    # For negbinom: compute dg/du (log2FC derivatives)
+                    # dg/du = x * S'(x) / S(x)
+                    dg_du = x_ntc * S_prime / y_at_ntc
+
+                    # d²g/du² = ln(2) * [x*S'/S + x²*S''/S - x²*(S'/S)²]
+                    term1 = x_ntc * S_prime / y_at_ntc
+                    term2 = x2 * S_double_prime / y_at_ntc
+                    term3 = x2 * (S_prime / y_at_ntc) ** 2
+                    d2g_du2 = ln2 * (term1 + term2 - term3)
+
+                    # d³g/du³ = (ln(2))² * [x*S'/S + 3x²*S''/S - 3x²*(S'/S)²
+                    #                      + x³*S'''/S - 3x³*(S'/S)*(S''/S) + 2x³*(S'/S)³]
+                    S_ratio = S_prime / y_at_ntc      # S'/S
+                    S2_ratio = S_double_prime / y_at_ntc  # S''/S
+                    S3_ratio = S_triple_prime / y_at_ntc  # S'''/S
+
+                    t1 = x_ntc * S_ratio              # x*S'/S
+                    t2 = 3 * x2 * S2_ratio            # 3x²*S''/S
+                    t3 = -3 * x2 * S_ratio ** 2       # -3x²*(S'/S)²
+                    t4 = x3 * S3_ratio                # x³*S'''/S
+                    t5 = -3 * x3 * S_ratio * S2_ratio # -3x³*(S'/S)*(S''/S)
+                    t6 = 2 * x3 * S_ratio ** 3        # 2x³*(S'/S)³
+                    d3g_du3 = ln2_sq * (t1 + t2 + t3 + t4 + t5 + t6)
+
+                    return dg_du, d2g_du2, d3g_du3
 
             for i in range(n_features):
                 is_flat_i = bool(n_a_zeroed[i]) and bool(n_b_zeroed[i])
@@ -2564,18 +2587,31 @@ class ModelSummarizer:
                         d3g_du3_at_0_upper[i] = d3g_du3
 
             data['log2fc_at_u0'] = log2fc_at_0
-            # For binomial distributions: add delta_p_at_u0 (probability difference from NTC)
+            # For binomial distributions: add delta_p_at_u0 and use dp_du column names
+            # For negbinom: use dg_du column names (log2FC derivatives)
             if is_binomial:
                 data['delta_p_at_u0'] = delta_p_at_0
-            data['dg_du_at_u0'] = dg_du_at_0
-            data['dg_du_at_u0_lower'] = dg_du_at_0_lower
-            data['dg_du_at_u0_upper'] = dg_du_at_0_upper
-            data['d2g_du2_at_u0'] = d2g_du2_at_0
-            data['d2g_du2_at_u0_lower'] = d2g_du2_at_0_lower
-            data['d2g_du2_at_u0_upper'] = d2g_du2_at_0_upper
-            data['d3g_du3_at_u0'] = d3g_du3_at_0
-            data['d3g_du3_at_u0_lower'] = d3g_du3_at_0_lower
-            data['d3g_du3_at_u0_upper'] = d3g_du3_at_0_upper
+                # dp/du derivatives (delta_p space)
+                data['dp_du_at_u0'] = dg_du_at_0
+                data['dp_du_at_u0_lower'] = dg_du_at_0_lower
+                data['dp_du_at_u0_upper'] = dg_du_at_0_upper
+                data['d2p_du2_at_u0'] = d2g_du2_at_0
+                data['d2p_du2_at_u0_lower'] = d2g_du2_at_0_lower
+                data['d2p_du2_at_u0_upper'] = d2g_du2_at_0_upper
+                data['d3p_du3_at_u0'] = d3g_du3_at_0
+                data['d3p_du3_at_u0_lower'] = d3g_du3_at_0_lower
+                data['d3p_du3_at_u0_upper'] = d3g_du3_at_0_upper
+            else:
+                # dg/du derivatives (log2FC space)
+                data['dg_du_at_u0'] = dg_du_at_0
+                data['dg_du_at_u0_lower'] = dg_du_at_0_lower
+                data['dg_du_at_u0_upper'] = dg_du_at_0_upper
+                data['d2g_du2_at_u0'] = d2g_du2_at_0
+                data['d2g_du2_at_u0_lower'] = d2g_du2_at_0_lower
+                data['d2g_du2_at_u0_upper'] = d2g_du2_at_0_upper
+                data['d3g_du3_at_u0'] = d3g_du3_at_0
+                data['d3g_du3_at_u0_lower'] = d3g_du3_at_0_lower
+                data['d3g_du3_at_u0_upper'] = d3g_du3_at_0_upper
 
             # EC50 in log2FC space: log2(K) - log2(x_ntc)
             data['EC50_a_log2fc'] = np.log2(np.maximum(K_a_mean, epsilon)) - log2_x_ntc
