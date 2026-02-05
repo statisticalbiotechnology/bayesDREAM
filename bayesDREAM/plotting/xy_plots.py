@@ -1068,7 +1068,10 @@ def predict_trans_derivatives(
         feature_list = model.trans_genes if hasattr(model, 'trans_genes') else []
     else:
         modality = model.get_modality(modality_name)
-        if modality.feature_meta is not None:
+        # First priority: use modality.feature_names (this is what users see and should use)
+        if modality.feature_names is not None:
+            feature_list = modality.feature_names
+        elif modality.feature_meta is not None:
             feature_list = None
             for col in ['feature_id', 'feature', 'coord.intron', 'junction_id', 'gene_name', 'gene']:
                 if col in modality.feature_meta.columns:
@@ -1298,14 +1301,21 @@ def predict_trans_log2fc(
         y_ntc_all = np.mean(trans_mu_ntc, axis=0).squeeze()
 
     # Find the feature index to get the right NTC
-    feature_list = trans_mod.feature_meta.index.tolist() if trans_mod.feature_meta is not None else []
-    if feature not in feature_list:
-        # Try other column names
-        for col in ['feature_id', 'feature', 'gene_name', 'gene']:
-            if trans_mod.feature_meta is not None and col in trans_mod.feature_meta.columns:
-                feature_list = trans_mod.feature_meta[col].tolist()
-                if feature in feature_list:
-                    break
+    # First priority: use modality.feature_names (this is what users see and should use)
+    feature_list = None
+    if trans_mod.feature_names is not None:
+        feature_list = trans_mod.feature_names
+
+    # Fallback: try feature_meta columns/index
+    if feature_list is None or feature not in feature_list:
+        feature_list = trans_mod.feature_meta.index.tolist() if trans_mod.feature_meta is not None else []
+        if feature not in feature_list:
+            # Try other column names
+            for col in ['feature_id', 'feature', 'gene_name', 'gene']:
+                if trans_mod.feature_meta is not None and col in trans_mod.feature_meta.columns:
+                    feature_list = trans_mod.feature_meta[col].tolist()
+                    if feature in feature_list:
+                        break
 
     if feature not in feature_list:
         return None, None, None, None, None
@@ -1410,13 +1420,20 @@ def predict_trans_log2fc_samples(
         y_ntc_all = np.mean(trans_mu_ntc, axis=0).squeeze()
 
     # Find feature index
-    feature_list = trans_mod.feature_meta.index.tolist() if trans_mod.feature_meta is not None else []
-    if feature not in feature_list:
-        for col in ['feature_id', 'feature', 'gene_name', 'gene']:
-            if trans_mod.feature_meta is not None and col in trans_mod.feature_meta.columns:
-                feature_list = trans_mod.feature_meta[col].tolist()
-                if feature in feature_list:
-                    break
+    # First priority: use modality.feature_names (this is what users see and should use)
+    feature_list = None
+    if trans_mod.feature_names is not None:
+        feature_list = trans_mod.feature_names
+
+    # Fallback: try feature_meta columns/index
+    if feature_list is None or feature not in feature_list:
+        feature_list = trans_mod.feature_meta.index.tolist() if trans_mod.feature_meta is not None else []
+        if feature not in feature_list:
+            for col in ['feature_id', 'feature', 'gene_name', 'gene']:
+                if trans_mod.feature_meta is not None and col in trans_mod.feature_meta.columns:
+                    feature_list = trans_mod.feature_meta[col].tolist()
+                    if feature in feature_list:
+                        break
 
     if feature not in feature_list:
         return None, None
@@ -1520,13 +1537,20 @@ def predict_trans_delta_p(
         y_ntc_all = np.mean(trans_mu_ntc, axis=0).squeeze()
 
     # Find the feature index to get the right NTC
-    feature_list = trans_mod.feature_meta.index.tolist() if trans_mod.feature_meta is not None else []
-    if feature not in feature_list:
-        for col in ['feature_id', 'feature', 'gene_name', 'gene']:
-            if trans_mod.feature_meta is not None and col in trans_mod.feature_meta.columns:
-                feature_list = trans_mod.feature_meta[col].tolist()
-                if feature in feature_list:
-                    break
+    # First priority: use modality.feature_names (this is what users see and should use)
+    feature_list = None
+    if trans_mod.feature_names is not None:
+        feature_list = trans_mod.feature_names
+
+    # Fallback: try feature_meta columns/index
+    if feature_list is None or feature not in feature_list:
+        feature_list = trans_mod.feature_meta.index.tolist() if trans_mod.feature_meta is not None else []
+        if feature not in feature_list:
+            for col in ['feature_id', 'feature', 'gene_name', 'gene']:
+                if trans_mod.feature_meta is not None and col in trans_mod.feature_meta.columns:
+                    feature_list = trans_mod.feature_meta[col].tolist()
+                    if feature in feature_list:
+                        break
 
     if feature not in feature_list:
         return None, None, None, None, None
@@ -1648,13 +1672,20 @@ def predict_trans_delta_p_samples(
         y_ntc_all = np.mean(trans_mu_ntc, axis=0).squeeze()
 
     # Find feature index
-    feature_list = trans_mod.feature_meta.index.tolist() if trans_mod.feature_meta is not None else []
-    if feature not in feature_list:
-        for col in ['feature_id', 'feature', 'gene_name', 'gene']:
-            if trans_mod.feature_meta is not None and col in trans_mod.feature_meta.columns:
-                feature_list = trans_mod.feature_meta[col].tolist()
-                if feature in feature_list:
-                    break
+    # First priority: use modality.feature_names (this is what users see and should use)
+    feature_list = None
+    if trans_mod.feature_names is not None:
+        feature_list = trans_mod.feature_names
+
+    # Fallback: try feature_meta columns/index
+    if feature_list is None or feature not in feature_list:
+        feature_list = trans_mod.feature_meta.index.tolist() if trans_mod.feature_meta is not None else []
+        if feature not in feature_list:
+            for col in ['feature_id', 'feature', 'gene_name', 'gene']:
+                if trans_mod.feature_meta is not None and col in trans_mod.feature_meta.columns:
+                    feature_list = trans_mod.feature_meta[col].tolist()
+                    if feature in feature_list:
+                        break
 
     if feature not in feature_list:
         return None, None
@@ -2251,8 +2282,12 @@ def predict_trans_function(
     else:
         # Non-primary modality: get feature names from modality
         modality = model.get_modality(modality_name)
-        if modality.feature_meta is not None:
-            # Try common identifier columns in order of preference
+
+        # First priority: use modality.feature_names (this is what users see and should use)
+        if modality.feature_names is not None:
+            feature_list = modality.feature_names
+        elif modality.feature_meta is not None:
+            # Fallback: Try common identifier columns in order of preference
             # For splicing: prioritize coordinate-based identifiers (coord.intron, junction_id)
             # For others: prioritize feature_id, feature, then fall back to gene names
             feature_list = None
@@ -2469,7 +2504,10 @@ def predict_trans_function_samples(
         feature_list = model.trans_genes if hasattr(model, 'trans_genes') else []
     else:
         modality = model.get_modality(modality_name)
-        if modality.feature_meta is not None:
+        # First priority: use modality.feature_names (this is what users see and should use)
+        if modality.feature_names is not None:
+            feature_list = modality.feature_names
+        elif modality.feature_meta is not None:
             feature_list = None
             for col in ['feature_id', 'feature', 'coord.intron', 'junction_id', 'gene_name', 'gene']:
                 if col in modality.feature_meta.columns:
@@ -2656,7 +2694,10 @@ def predict_trans_derivatives_samples(
         feature_list = model.trans_genes if hasattr(model, 'trans_genes') else []
     else:
         modality = model.get_modality(modality_name)
-        if modality.feature_meta is not None:
+        # First priority: use modality.feature_names (this is what users see and should use)
+        if modality.feature_names is not None:
+            feature_list = modality.feature_names
+        elif modality.feature_meta is not None:
             feature_list = None
             for col in ['feature_id', 'feature', 'coord.intron', 'junction_id', 'gene_name', 'gene']:
                 if col in modality.feature_meta.columns:
