@@ -1162,14 +1162,20 @@ class ModelSummarizer:
         if modality_name is None:
             modality_name = self.model.primary_modality
 
-        # Check if trans fit has been run
-        if not hasattr(self.model, 'posterior_samples_trans') or self.model.posterior_samples_trans is None:
-            raise ValueError("Trans fit not found. Run fit_trans() first.")
-
-        posterior = self.model.posterior_samples_trans
-
         # Get modality
         modality = self.model.get_modality(modality_name)
+
+        # Check if trans fit has been run for this modality
+        # Primary modality: check model-level posterior (backward compatibility)
+        # Non-primary modality: check modality-level posterior
+        if modality_name == self.model.primary_modality:
+            if not hasattr(self.model, 'posterior_samples_trans') or self.model.posterior_samples_trans is None:
+                raise ValueError(f"Trans fit not found for primary modality '{modality_name}'. Run fit_trans() first.")
+            posterior = self.model.posterior_samples_trans
+        else:
+            if not hasattr(modality, 'posterior_samples_trans') or modality.posterior_samples_trans is None:
+                raise ValueError(f"Trans fit not found for modality '{modality_name}'. Run fit_trans(modality_name='{modality_name}') first.")
+            posterior = modality.posterior_samples_trans
 
         # Get feature names - prefer named columns over index if index is integer
         feature_meta = modality.feature_meta
