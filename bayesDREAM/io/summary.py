@@ -1992,39 +1992,72 @@ class ModelSummarizer:
                 eps = 1e-10
                 log2_xntc = np.log2(max(float(x_ntc), eps))
 
-                if is_binomial:
-                    # For binomial: convert x-space roots to u-space
-                    # dp/du = 0 ⟺ dy/dx = 0, so just transform first_roots_mean, etc.
-                    def _x_to_u(x_val):
-                        if x_val > eps:
-                            return np.log2(x_val) - log2_xntc
-                        return np.nan
+                # Build u-range for root finding (used for both binomial and negbinom)
+                u_range_local = self._build_u_range_from_observed_x(
+                    x_obs_min=x_obs_min,
+                    x_obs_max=x_obs_max,
+                    x_ntc=x_ntc,
+                    n_grid=6000,
+                    pad_u=0.25
+                )
 
-                    u_roots_g1 = [_x_to_u(x) for x in first_roots_mean if np.isfinite(_x_to_u(x))]
-                    u_roots_g2 = [_x_to_u(x) for x in second_roots_mean if np.isfinite(_x_to_u(x))]
-                    u_roots_g3 = [_x_to_u(x) for x in third_roots_mean if np.isfinite(_x_to_u(x))]
+                # WIDEN using EC50s so we don't miss roots outside observed x-range
+                u_ec50 = []
+                if np.isfinite(K_a_i) and K_a_i > 0:
+                    u_ec50.append(np.log2(max(float(K_a_i), eps)) - log2_xntc)
+                if np.isfinite(K_b_i) and K_b_i > 0:
+                    u_ec50.append(np.log2(max(float(K_b_i), eps)) - log2_xntc)
+
+                if len(u_ec50) > 0:
+                    umin = min(float(np.nanmin(u_range_local)), float(np.min(u_ec50))) - 1.0
+                    umax = max(float(np.nanmax(u_range_local)), float(np.max(u_ec50))) + 1.0
+                    u_range_local = np.linspace(umin, umax, 6000)
+
+                if is_binomial:
+                    # For binomial (delta_p = S - S_ntc):
+                    # dp/du = S' * x * ln(2) → roots when S' = 0
+                    # d²p/du² ∝ S' + x*S'' → roots when S' + x*S'' = 0
+                    # d³p/du³ ∝ S' + 3x*S'' + x²*S''' → roots when S' + 3x*S'' + x²*S''' = 0
+
+                    def p1_num_u(u):
+                        # dp/du = 0 when S' = 0
+                        x, S, Sp, Spp, Sppp = self._S_derivs_at_u(
+                            u,
+                            A=A_i, alpha=alpha_i, Vmax_a=Vmax_a_i, K_a=K_a_i, n_a=n_a_i,
+                            beta=beta_i, Vmax_b=Vmax_b_i, K_b=K_b_i, n_b=n_b_i,
+                            x_ntc=x_ntc
+                        )
+                        return Sp
+
+                    def p2_num_u(u):
+                        # d²p/du² = 0 when S' + x*S'' = 0
+                        x, S, Sp, Spp, Sppp = self._S_derivs_at_u(
+                            u,
+                            A=A_i, alpha=alpha_i, Vmax_a=Vmax_a_i, K_a=K_a_i, n_a=n_a_i,
+                            beta=beta_i, Vmax_b=Vmax_b_i, K_b=K_b_i, n_b=n_b_i,
+                            x_ntc=x_ntc
+                        )
+                        return Sp + x * Spp
+
+                    def p3_num_u(u):
+                        # d³p/du³ = 0 when S' + 3x*S'' + x²*S''' = 0
+                        x, S, Sp, Spp, Sppp = self._S_derivs_at_u(
+                            u,
+                            A=A_i, alpha=alpha_i, Vmax_a=Vmax_a_i, K_a=K_a_i, n_a=n_a_i,
+                            beta=beta_i, Vmax_b=Vmax_b_i, K_b=K_b_i, n_b=n_b_i,
+                            x_ntc=x_ntc
+                        )
+                        return Sp + 3.0 * x * Spp + (x ** 2) * Sppp
+
+                    u_roots_g1 = self._find_roots_on_grid(p1_num_u, u_range_local, include_tangent=True)
+                    u_roots_g2 = self._find_roots_on_grid(p2_num_u, u_range_local, include_tangent=True)
+                    u_roots_g3 = self._find_roots_on_grid(p3_num_u, u_range_local, include_tangent=True)
                 else:
                     # For negbinom: find roots of dg/du = 0 directly (involves log2 transformation)
-                    # Base u-range from observed x-window
-                    u_range_local = self._build_u_range_from_observed_x(
-                        x_obs_min=x_obs_min,
-                        x_obs_max=x_obs_max,
-                        x_ntc=x_ntc,
-                        n_grid=6000,
-                        pad_u=0.25
-                    )
-
-                    # WIDEN using EC50s so we don't miss dg/du roots outside observed x-range
-                    u_ec50 = []
-                    if np.isfinite(K_a_i) and K_a_i > 0:
-                        u_ec50.append(np.log2(max(float(K_a_i), eps)) - log2_xntc)
-                    if np.isfinite(K_b_i) and K_b_i > 0:
-                        u_ec50.append(np.log2(max(float(K_b_i), eps)) - log2_xntc)
-
-                    if len(u_ec50) > 0:
-                        umin = min(float(np.nanmin(u_range_local)), float(np.min(u_ec50))) - 1.0
-                        umax = max(float(np.nanmax(u_range_local)), float(np.max(u_ec50))) + 1.0
-                        u_range_local = np.linspace(umin, umax, 6000)
+                    # g = log2(S) - log2(S_ntc)
+                    # dg/du = x * S' / S → roots when S' = 0
+                    # d²g/du² has numerator: S*(S' + x*S'') - x*S'^2
+                    # d³g/du³ has numerator: S²*(S' + 3x*S'' + x²*S''') - 3S*x*S'*(S' + x*S'') + 2x²*S'^3
 
                     def g1_num_u(u):
                         # root of g'(u) is root of Sp (since x>0 and ln2>0)
