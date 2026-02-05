@@ -315,7 +315,94 @@ class ModelSummarizer:
             return np.nan
     
         return float(np.log2(np.max(ys) / np.min(ys)))
-    
+
+    def _full_delta_p_from_extrema_and_boundaries(
+        self,
+        A, alpha, Vmax_a, K_a, n_a,
+        beta, Vmax_b, K_b, n_b,
+        x_range,
+        eps=1e-10
+    ):
+        """
+        full_delta_p = y_max - y_min over x in [0, inf] using:
+          - boundary limits at x->0 and x->inf
+          - interior extrema from y'(x)=0
+
+        For binomial distributions where delta_p = p - p_ntc.
+        """
+        # --- Hill boundary limits (handle n==0 -> constant 0.5*V) ---
+        def hill_limit_at_0(V, n):
+            if abs(n) < 1e-15:
+                return 0.5 * V
+            return V if n < 0 else 0.0
+
+        def hill_limit_at_inf(V, n):
+            if abs(n) < 1e-15:
+                return 0.5 * V
+            return 0.0 if n < 0 else V
+
+        y0 = A + alpha * hill_limit_at_0(Vmax_a, n_a) + beta * hill_limit_at_0(Vmax_b, n_b)
+        yinf = A + alpha * hill_limit_at_inf(Vmax_a, n_a) + beta * hill_limit_at_inf(Vmax_b, n_b)
+
+        # --- Build a widened x grid for finding y' roots ---
+        xr = np.asarray(x_range, dtype=float)
+        xr = xr[np.isfinite(xr) & (xr > 0)]
+        if xr.size < 2:
+            # fallback wide grid
+            xr = np.logspace(-8, 8, 6000)
+
+        log2_min = np.log2(np.min(xr))
+        log2_max = np.log2(np.max(xr))
+
+        # include EC50s in the span
+        if np.isfinite(K_a) and K_a > 0:
+            log2_min = min(log2_min, np.log2(K_a))
+            log2_max = max(log2_max, np.log2(K_a))
+        if np.isfinite(K_b) and K_b > 0:
+            log2_min = min(log2_min, np.log2(K_b))
+            log2_max = max(log2_max, np.log2(K_b))
+
+        # extra padding for safety (2^2 = 4x each side)
+        pad = 2.0
+        xgrid = 2.0 ** np.linspace(log2_min - pad, log2_max + pad, max(6000, xr.size))
+
+        # --- y'(x) and roots ---
+        def yprime(x):
+            return self._additive_hill_first_derivative(
+                x, alpha, Vmax_a, K_a, n_a,
+                beta, Vmax_b, K_b, n_b
+            )
+
+        # IMPORTANT: use the permissive root finder
+        roots = self._find_roots_empirical_loose(yprime, xgrid)
+
+        # --- evaluate candidates ---
+        ys = [y0, yinf]
+
+        # always include EC50s as candidates (cheap + helps if root finding misses one)
+        for xx in (K_a, K_b):
+            if np.isfinite(xx) and (xx is not None) and (xx > 0):
+                Ha = self._hill_value(xx, Vmax_a, K_a, n_a)
+                Hb = self._hill_value(xx, Vmax_b, K_b, n_b)
+                ys.append(A + alpha * Ha + beta * Hb)
+
+        # extrema candidates
+        for r in (roots or []):
+            if not (np.isfinite(r) and r > 0):
+                continue
+            Ha = self._hill_value(r, Vmax_a, K_a, n_a)
+            Hb = self._hill_value(r, Vmax_b, K_b, n_b)
+            ys.append(A + alpha * Ha + beta * Hb)
+
+        ys = np.asarray(ys, dtype=float)
+
+        # For delta_p, we don't require positive values (probabilities can be any value)
+        ys = ys[np.isfinite(ys)]
+        if ys.size < 2:
+            return np.nan
+
+        return float(np.max(ys) - np.min(ys))
+
     def _full_log2fc_candidates_no_roots(
         self,
         A, alpha, Vmax_a, K_a, n_a,
@@ -410,6 +497,99 @@ class ModelSummarizer:
             return np.nan
     
         return float(np.log2(np.max(ys) / np.min(ys)))
+
+    def _full_delta_p_candidates_no_roots(
+        self,
+        A, alpha, Vmax_a, K_a, n_a,
+        beta, Vmax_b, K_b, n_b,
+        x_candidates,
+        eps=1e-10
+    ):
+        """
+        full_delta_p using only boundary limits + supplied interior candidate points.
+        Returns y_max - y_min (for binomial distributions).
+        """
+        def hill_limit_at_0(V, n):
+            if abs(n) < 1e-15:
+                return 0.5 * V
+            return V if n < 0 else 0.0
+
+        def hill_limit_at_inf(V, n):
+            if abs(n) < 1e-15:
+                return 0.5 * V
+            return 0.0 if n < 0 else V
+
+        y0 = A + alpha * hill_limit_at_0(Vmax_a, n_a) + beta * hill_limit_at_0(Vmax_b, n_b)
+        yinf = A + alpha * hill_limit_at_inf(Vmax_a, n_a) + beta * hill_limit_at_inf(Vmax_b, n_b)
+
+        xs = []
+        if x_candidates is not None:
+            for x in x_candidates:
+                if x is None:
+                    continue
+                x = float(x)
+                if np.isfinite(x) and (x > 0):
+                    xs.append(x)
+
+        # add EC50s as cheap robust candidates
+        for xx in (K_a, K_b):
+            if np.isfinite(xx) and (xx is not None) and (xx > 0):
+                xs.append(float(xx))
+
+        ys = [y0, yinf]
+        for x in xs:
+            Ha = self._hill_value(x, Vmax_a, K_a, n_a)
+            Hb = self._hill_value(x, Vmax_b, K_b, n_b)
+            ys.append(A + alpha * Ha + beta * Hb)
+
+        ys = np.asarray(ys, dtype=float)
+        ys = ys[np.isfinite(ys)]
+        if ys.size < 2:
+            return np.nan
+
+        return float(np.max(ys) - np.min(ys))
+
+    def _observed_delta_p_candidates_no_roots(
+        self,
+        A, alpha, Vmax_a, K_a, n_a,
+        beta, Vmax_b, K_b, n_b,
+        x_obs_min, x_obs_max,
+        x_candidates=None,
+        eps=1e-10
+    ):
+        """
+        observed_delta_p over [x_obs_min, x_obs_max] using endpoints + interior candidates.
+        Returns y_max - y_min (for binomial distributions).
+        """
+        x0 = float(max(x_obs_min, eps))
+        x1 = float(max(x_obs_max, eps))
+
+        def y_at(x):
+            Ha = self._hill_value(x, Vmax_a, K_a, n_a)
+            Hb = self._hill_value(x, Vmax_b, K_b, n_b)
+            return A + alpha * Ha + beta * Hb
+
+        xs = [x0, x1]
+
+        if x_candidates is not None:
+            for x in x_candidates:
+                if x is None:
+                    continue
+                x = float(x)
+                if np.isfinite(x) and (x0 <= x <= x1) and (x > 0):
+                    xs.append(x)
+
+        # also include EC50s if they fall in-window
+        for xx in (K_a, K_b):
+            if np.isfinite(xx) and (xx is not None) and (x0 <= xx <= x1):
+                xs.append(float(xx))
+
+        ys = np.asarray([y_at(x) for x in xs], dtype=float)
+        ys = ys[np.isfinite(ys)]
+        if ys.size < 2:
+            return np.nan
+
+        return float(np.max(ys) - np.min(ys))
 
     def _is_flat_feature(self,
                          alpha_lower, alpha_upper,
@@ -1081,8 +1261,14 @@ class ModelSummarizer:
         - distribution: Distribution type
         - function_type: Function type (additive_hill, single_hill, polynomial)
         - x_obs_min, x_obs_max: Observed x range (min/max of guide-level x_true)
+
+        For negbinom/normal/studentt distributions:
         - observed_log2fc: log2(y_max / y_min) over observed x range from fitted function
         - full_log2fc_mean/lower/upper: log2(y_max / y_min) over theoretical x range (0 to ∞)
+
+        For binomial distributions (e.g., splicing_sj):
+        - observed_delta_p: y_max - y_min over observed x range (probability difference)
+        - full_delta_p_mean/lower/upper: y_max - y_min over theoretical x range
 
         For additive_hill (all parameters needed to recreate: y = A + alpha*Vmax_a*Hill(x;K_a,n_a) + beta*Vmax_b*Hill(x;K_b,n_b)):
         - A_mean, A_lower, A_upper: Baseline (intercept)
@@ -1124,8 +1310,17 @@ class ModelSummarizer:
         - d3g_du3_at_u0, d3g_du3_at_u0_lower, d3g_du3_at_u0_upper: Third derivative at u=0 with 95% CI
         - EC50_a_log2fc, EC50_b_log2fc: EC50 in log2FC x-space (log2(K) - log2(x_ntc))
         - inflection_a_log2fc, inflection_b_log2fc: Inflection points in log2FC x-space
-        - first_deriv_roots_log2fc, second_deriv_roots_log2fc, third_deriv_roots_log2fc: Roots in log2FC x-space and y-space
+        For negbinom/normal/studentt:
+        - first_deriv_roots_log2fc_mean: Roots of dg/du=0 in u-space (g = log2(y) - log2(y_ntc))
+        - second_deriv_roots_log2fc_mean: Roots of d²g/du²=0
+        - third_deriv_roots_log2fc_mean: Roots of d³g/du³=0
         - A_log2fc: Baseline in log2FC y-space (log2(A) - log2(y_ntc))
+
+        For binomial distributions:
+        - first_deriv_roots_delta_p_mean: Roots of dp/du=0 in u-space (same as dy/dx=0 in x-space, converted)
+        - second_deriv_roots_delta_p_mean: Roots of d²p/du²=0
+        - third_deriv_roots_delta_p_mean: Roots of d³p/du³=0
+        - A_delta_p: Baseline in delta_p space (A - y_ntc)
 
         For single_hill:
         - B_mean, B_lower, B_upper: Hill magnitude
@@ -1459,7 +1654,15 @@ class ModelSummarizer:
         - full_log2fc: log2(y_max / y_min) over theoretical range (in log2 space)
         - observed_log2fc: log2(y_max / y_min) over observed x range (in log2 space)
         - Log2FC versions of parameters relative to NTC (if compute_log2fc_params=True)
+
+        For binomial distributions:
+        - Uses delta_p (y_max - y_min) instead of log2fc (log2(y_max/y_min))
+        - Derivative roots are found in y-space (dy/dx=0), then converted to u-space
         """
+
+        # Check distribution type for delta_p vs log2fc handling
+        distribution = data.get('distribution', 'negbinom')
+        is_binomial = (distribution == 'binomial')
 
         def extract_param(name):
             """Helper to extract parameter with consistent handling of samples vs point estimates."""
@@ -1714,16 +1917,20 @@ class ModelSummarizer:
         first_deriv_roots_mean_list = []
         second_deriv_roots_mean_list = []
         third_deriv_roots_mean_list = []
+        # For negbinom: roots of dg/du=0 in u-space (g = log2(y) - log2(y_ntc))
+        # For binomial: roots of dp/du=0 in u-space (same as dy/dx=0 roots, converted to u)
         first_deriv_roots_log2fc_mean_list = []
         second_deriv_roots_log2fc_mean_list = []
         third_deriv_roots_log2fc_mean_list = []
         n_first_deriv_roots = []
         n_second_deriv_roots = []
         n_third_deriv_roots = []
+        # For negbinom: log2(y_max / y_min)
+        # For binomial: y_max - y_min (delta_p)
         full_log2fc_mean_list = []
         full_log2fc_lower_list = []
         full_log2fc_upper_list = []
-        observed_log2fc_list = []  # log2(y_max / y_min) over observed x range
+        observed_log2fc_list = []
         observed_log2fc_lower_list = []
         observed_log2fc_upper_list = []
 
@@ -1770,76 +1977,92 @@ class ModelSummarizer:
                     )
                 third_roots_mean = self._find_roots_empirical_loose(third_deriv_func, x_range)
                 
-            # --- roots in log2FC x-space (u-space): dg/du=0, d2g/du2=0, d3g/du3=0 ---
+            # --- roots in log2FC x-space (u-space) ---
+            # For negbinom: dg/du=0, d2g/du2=0, d3g/du3=0 where g = log2(y) - log2(y_ntc)
+            # For binomial: dp/du=0, etc. where delta_p = p - p_ntc
+            #   Since dp/du = dp/dx * x * ln(2), roots of dp/du=0 are same as dy/dx=0
+            #   So for binomial, just convert x-space roots to u-space
             u_roots_g1 = []
             u_roots_g2 = []
             u_roots_g3 = []
-            
+
             if compute_log2fc_params and (x_ntc is not None) and np.isfinite(x_ntc) and (x_ntc > 0) \
                and (x_obs_min is not None) and (x_obs_max is not None):
-            
-                # Base u-range from observed x-window
-                u_range = self._build_u_range_from_observed_x(
-                    x_obs_min=x_obs_min,
-                    x_obs_max=x_obs_max,
-                    x_ntc=x_ntc,
-                    n_grid=6000,
-                    pad_u=0.25
-                )
-                
-                # WIDEN using EC50s so we don't miss dg/du roots outside observed x-range
+
                 eps = 1e-10
                 log2_xntc = np.log2(max(float(x_ntc), eps))
-                u_ec50 = []
-                if np.isfinite(K_a_i) and K_a_i > 0:
-                    u_ec50.append(np.log2(max(float(K_a_i), eps)) - log2_xntc)
-                if np.isfinite(K_b_i) and K_b_i > 0:
-                    u_ec50.append(np.log2(max(float(K_b_i), eps)) - log2_xntc)
-                
-                if len(u_ec50) > 0:
-                    umin = min(float(np.nanmin(u_range)), float(np.min(u_ec50))) - 1.0   # 1.0 in u = 2x padding
-                    umax = max(float(np.nanmax(u_range)), float(np.max(u_ec50))) + 1.0
-                    u_range = np.linspace(umin, umax, 6000)
-            
-                def g1_num_u(u):
-                    # root of g'(u) is root of Sp (since x>0 and ln2>0)
-                    x, S, Sp, Spp, Sppp = self._S_derivs_at_u(
-                        u,
-                        A=A_i, alpha=alpha_i, Vmax_a=Vmax_a_i, K_a=K_a_i, n_a=n_a_i,
-                        beta=beta_i, Vmax_b=Vmax_b_i, K_b=K_b_i, n_b=n_b_i,
-                        x_ntc=x_ntc
-                    )
-                    return Sp
-                
-                def g2_num_u(u):
-                    # numerator of g''(u):  N2 = S*(Sp + x*Spp) - x*Sp^2
-                    x, S, Sp, Spp, Sppp = self._S_derivs_at_u(
-                        u,
-                        A=A_i, alpha=alpha_i, Vmax_a=Vmax_a_i, K_a=K_a_i, n_a=n_a_i,
-                        beta=beta_i, Vmax_b=Vmax_b_i, K_b=K_b_i, n_b=n_b_i,
-                        x_ntc=x_ntc
-                    )
-                    return S * (Sp + x * Spp) - x * (Sp ** 2)
-                
-                def g3_num_u(u):
-                    # numerator of g'''(u):
-                    # N3 = S^2*(Sp + 3x*Spp + x^2*Sppp) - 3S*(x*Sp*(Sp + x*Spp)) + 2*x^2*Sp^3
-                    x, S, Sp, Spp, Sppp = self._S_derivs_at_u(
-                        u,
-                        A=A_i, alpha=alpha_i, Vmax_a=Vmax_a_i, K_a=K_a_i, n_a=n_a_i,
-                        beta=beta_i, Vmax_b=Vmax_b_i, K_b=K_b_i, n_b=n_b_i,
-                        x_ntc=x_ntc
-                    )
-                    t1 = (Sp + 3.0 * x * Spp + (x ** 2) * Sppp)
-                    t2 = (x * Sp * (Sp + x * Spp))
-                    t3 = ((x ** 2) * (Sp ** 3))
-                    return (S ** 2) * t1 - 3.0 * S * t2 + 2.0 * t3
 
+                if is_binomial:
+                    # For binomial: convert x-space roots to u-space
+                    # dp/du = 0 ⟺ dy/dx = 0, so just transform first_roots_mean, etc.
+                    def _x_to_u(x_val):
+                        if x_val > eps:
+                            return np.log2(x_val) - log2_xntc
+                        return np.nan
 
-            
-                u_roots_g1 = self._find_roots_on_grid(g1_num_u, u_range, include_tangent=True)
-                u_roots_g2 = self._find_roots_on_grid(g2_num_u, u_range, include_tangent=True)
-                u_roots_g3 = self._find_roots_on_grid(g3_num_u, u_range, include_tangent=True)
+                    u_roots_g1 = [_x_to_u(x) for x in first_roots_mean if np.isfinite(_x_to_u(x))]
+                    u_roots_g2 = [_x_to_u(x) for x in second_roots_mean if np.isfinite(_x_to_u(x))]
+                    u_roots_g3 = [_x_to_u(x) for x in third_roots_mean if np.isfinite(_x_to_u(x))]
+                else:
+                    # For negbinom: find roots of dg/du = 0 directly (involves log2 transformation)
+                    # Base u-range from observed x-window
+                    u_range_local = self._build_u_range_from_observed_x(
+                        x_obs_min=x_obs_min,
+                        x_obs_max=x_obs_max,
+                        x_ntc=x_ntc,
+                        n_grid=6000,
+                        pad_u=0.25
+                    )
+
+                    # WIDEN using EC50s so we don't miss dg/du roots outside observed x-range
+                    u_ec50 = []
+                    if np.isfinite(K_a_i) and K_a_i > 0:
+                        u_ec50.append(np.log2(max(float(K_a_i), eps)) - log2_xntc)
+                    if np.isfinite(K_b_i) and K_b_i > 0:
+                        u_ec50.append(np.log2(max(float(K_b_i), eps)) - log2_xntc)
+
+                    if len(u_ec50) > 0:
+                        umin = min(float(np.nanmin(u_range_local)), float(np.min(u_ec50))) - 1.0
+                        umax = max(float(np.nanmax(u_range_local)), float(np.max(u_ec50))) + 1.0
+                        u_range_local = np.linspace(umin, umax, 6000)
+
+                    def g1_num_u(u):
+                        # root of g'(u) is root of Sp (since x>0 and ln2>0)
+                        x, S, Sp, Spp, Sppp = self._S_derivs_at_u(
+                            u,
+                            A=A_i, alpha=alpha_i, Vmax_a=Vmax_a_i, K_a=K_a_i, n_a=n_a_i,
+                            beta=beta_i, Vmax_b=Vmax_b_i, K_b=K_b_i, n_b=n_b_i,
+                            x_ntc=x_ntc
+                        )
+                        return Sp
+
+                    def g2_num_u(u):
+                        # numerator of g''(u):  N2 = S*(Sp + x*Spp) - x*Sp^2
+                        x, S, Sp, Spp, Sppp = self._S_derivs_at_u(
+                            u,
+                            A=A_i, alpha=alpha_i, Vmax_a=Vmax_a_i, K_a=K_a_i, n_a=n_a_i,
+                            beta=beta_i, Vmax_b=Vmax_b_i, K_b=K_b_i, n_b=n_b_i,
+                            x_ntc=x_ntc
+                        )
+                        return S * (Sp + x * Spp) - x * (Sp ** 2)
+
+                    def g3_num_u(u):
+                        # numerator of g'''(u):
+                        # N3 = S^2*(Sp + 3x*Spp + x^2*Sppp) - 3S*(x*Sp*(Sp + x*Spp)) + 2*x^2*Sp^3
+                        x, S, Sp, Spp, Sppp = self._S_derivs_at_u(
+                            u,
+                            A=A_i, alpha=alpha_i, Vmax_a=Vmax_a_i, K_a=K_a_i, n_a=n_a_i,
+                            beta=beta_i, Vmax_b=Vmax_b_i, K_b=K_b_i, n_b=n_b_i,
+                            x_ntc=x_ntc
+                        )
+                        t1 = (Sp + 3.0 * x * Spp + (x ** 2) * Sppp)
+                        t2 = (x * Sp * (Sp + x * Spp))
+                        t3 = ((x ** 2) * (Sp ** 3))
+                        return (S ** 2) * t1 - 3.0 * S * t2 + 2.0 * t3
+
+                    u_roots_g1 = self._find_roots_on_grid(g1_num_u, u_range_local, include_tangent=True)
+                    u_roots_g2 = self._find_roots_on_grid(g2_num_u, u_range_local, include_tangent=True)
+                    u_roots_g3 = self._find_roots_on_grid(g3_num_u, u_range_local, include_tangent=True)
 
             else:
                 u_roots_g1 = []
@@ -1878,13 +2101,21 @@ class ModelSummarizer:
             )
             classifications.append(classification)
 
-            # Compute full_log2fc with CORRECTED formula based on classification
-            # Accounts for sign of n (positive n = activator, negative n = inhibitor)
-            # Always use the comprehensive function which handles all cases
+            # Compute full dynamic range
+            # For negbinom: full_log2fc = log2(y_max / y_min)
+            # For binomial: full_delta_p = y_max - y_min
             is_flat_i = bool(n_a_zeroed[i]) and bool(n_b_zeroed[i])
             if is_flat_i:
                 full_log2fc_i = 0.0
+            elif is_binomial:
+                # For binomial: compute y_max - y_min
+                full_log2fc_i = self._full_delta_p_from_extrema_and_boundaries(
+                    A_i, alpha_i, Vmax_a_i, K_a_i, n_a_i,
+                    beta_i, Vmax_b_i, K_b_i, n_b_i,
+                    x_range if x_range is not None else np.linspace(1e-3, 1e3, 6000)
+                )
             else:
+                # For negbinom: compute log2(y_max / y_min)
                 full_log2fc_i = self._full_log2fc_from_extrema_and_boundaries(
                     A_i, alpha_i, Vmax_a_i, K_a_i, n_a_i,
                     beta_i, Vmax_b_i, K_b_i, n_b_i,
@@ -1893,23 +2124,33 @@ class ModelSummarizer:
 
             full_log2fc_mean_list.append(full_log2fc_i)
 
-            # Compute observed_log2fc over observed x range (min to max x_eff_g)
+            # Compute observed dynamic range over observed x range (min to max x_eff_g)
+            # For negbinom: observed_log2fc = log2(y_max / y_min)
+            # For binomial: observed_delta_p = y_max - y_min
             if x_obs_min is not None and x_obs_max is not None:
-                obs_log2fc_i, (x_minloc, x_maxloc) = self._compute_observed_log2fc_fitted(
-                    A_i, alpha_i, Vmax_a_i, beta_i, Vmax_b_i,
-                    K_a_i, n_a_i, K_b_i, n_b_i,
-                    x_obs_min, x_obs_max,
-                    return_argextrema=True
-                )
+                if is_binomial:
+                    obs_log2fc_i, (x_minloc, x_maxloc) = self._compute_observed_delta_p_fitted(
+                        A_i, alpha_i, Vmax_a_i, beta_i, Vmax_b_i,
+                        K_a_i, n_a_i, K_b_i, n_b_i,
+                        x_obs_min, x_obs_max,
+                        return_argextrema=True
+                    )
+                else:
+                    obs_log2fc_i, (x_minloc, x_maxloc) = self._compute_observed_log2fc_fitted(
+                        A_i, alpha_i, Vmax_a_i, beta_i, Vmax_b_i,
+                        K_a_i, n_a_i, K_b_i, n_b_i,
+                        x_obs_min, x_obs_max,
+                        return_argextrema=True
+                    )
                 observed_log2fc_list.append(obs_log2fc_i)
             else:
                 observed_log2fc_list.append(np.nan)
             
-            # Compute CI for observed_log2fc from posterior samples (FAST: no per-sample root finding)
+            # Compute CI for observed dynamic range from posterior samples (FAST: no per-sample root finding)
             if (x_obs_min is not None) and (x_obs_max is not None) and (Vmax_a_full.ndim > 1):
                 S = Vmax_a_full.shape[0]
                 n_samples = min(S, 500)
-            
+
                 # candidates = mean first-derivative roots inside observed range
                 x0 = float(max(x_obs_min, 1e-10))
                 x1 = float(max(x_obs_max, 1e-10))
@@ -1918,10 +2159,10 @@ class ModelSummarizer:
                 for xx in (x_minloc, x_maxloc):
                     if np.isfinite(xx) and (x0 <= xx <= x1):
                         x_candidates_obs.append(float(xx))
-                
+
                 # optional: dedup candidates in log2 space
                 x_candidates_obs = self._dedup_roots_log2(x_candidates_obs, tol_log2=1e-3)
-            
+
                 is_flat_i = bool(n_a_zeroed[i]) and bool(n_b_zeroed[i])
                 if is_flat_i:
                     observed_log2fc_lower_list.append(0.0)
@@ -1932,47 +2173,55 @@ class ModelSummarizer:
                         alpha_s = float(alpha_full[s, i]) if alpha_full.ndim > 1 else float(alpha_full[i])
                         beta_s  = float(beta_full[s, i])  if beta_full.ndim > 1 else float(beta_full[i])
                         A_s     = float(A_full[s, i])     if A_full.ndim > 1 else float(A_full[i])
-            
+
                         Vmax_a_s = float(Vmax_a_full[s, i])
                         Vmax_b_s = float(Vmax_b_full[s, i])
                         K_a_s    = float(K_a_full[s, i])
                         K_b_s    = float(K_b_full[s, i])
-            
+
                         n_a_s = self._maybe_zero_scalar(n_a_full[s, i], bool(n_a_zeroed[i]))
                         n_b_s = self._maybe_zero_scalar(n_b_full[s, i], bool(n_b_zeroed[i]))
-            
-                        v = self._observed_log2fc_candidates_no_roots(
-                            A_s, alpha_s, Vmax_a_s, K_a_s, n_a_s,
-                            beta_s, Vmax_b_s, K_b_s, n_b_s,
-                            x_obs_min=x0, x_obs_max=x1,
-                            x_candidates=x_candidates_obs
-                        )
+
+                        if is_binomial:
+                            v = self._observed_delta_p_candidates_no_roots(
+                                A_s, alpha_s, Vmax_a_s, K_a_s, n_a_s,
+                                beta_s, Vmax_b_s, K_b_s, n_b_s,
+                                x_obs_min=x0, x_obs_max=x1,
+                                x_candidates=x_candidates_obs
+                            )
+                        else:
+                            v = self._observed_log2fc_candidates_no_roots(
+                                A_s, alpha_s, Vmax_a_s, K_a_s, n_a_s,
+                                beta_s, Vmax_b_s, K_b_s, n_b_s,
+                                x_obs_min=x0, x_obs_max=x1,
+                                x_candidates=x_candidates_obs
+                            )
                         if np.isfinite(v):
                             vals.append(v)
-            
+
                     if vals:
                         observed_log2fc_lower_list.append(np.quantile(vals, 0.025))
                         observed_log2fc_upper_list.append(np.quantile(vals, 0.975))
                     else:
                         observed_log2fc_lower_list.append(np.nan)
                         observed_log2fc_upper_list.append(np.nan)
-            
+
             else:
                 # no posterior samples or no x-range -> fall back to mean
                 observed_log2fc_lower_list.append(obs_log2fc_i)
                 observed_log2fc_upper_list.append(obs_log2fc_i)
 
-            # Compute CI for full_log2fc from posterior samples (FAST: no per-sample root finding)
+            # Compute CI for full dynamic range from posterior samples (FAST: no per-sample root finding)
             if Vmax_a_full.ndim > 1:
                 S = Vmax_a_full.shape[0]
                 n_samples = min(S, 500)  # tune as you like
-            
+
                 # reuse mean-root locations as interior candidates for ALL samples
                 # (this is the key speedup)
                 x_candidates = first_roots_mean  # already computed above per feature
-            
+
                 sample_log2fcs = []
-            
+
                 # Optional: short-circuit truly flat (both n zeroed by your rule)
                 # This matches what you do later for log2fc-derivatives.
                 is_flat_i = bool(n_a_zeroed[i]) and bool(n_b_zeroed[i])
@@ -1984,24 +2233,31 @@ class ModelSummarizer:
                         alpha_s = float(alpha_full[s, i]) if alpha_full.ndim > 1 else float(alpha_full[i])
                         beta_s  = float(beta_full[s, i])  if beta_full.ndim > 1 else float(beta_full[i])
                         A_s     = float(A_full[s, i])     if A_full.ndim > 1 else float(A_full[i])
-            
+
                         Vmax_a_s = float(Vmax_a_full[s, i])
                         Vmax_b_s = float(Vmax_b_full[s, i])
                         K_a_s    = float(K_a_full[s, i])
                         K_b_s    = float(K_b_full[s, i])
-            
+
                         # FEATURE-WISE ZEROING RULE (keep exactly your semantics)
                         n_a_s = self._maybe_zero_scalar(n_a_full[s, i], bool(n_a_zeroed[i]))
                         n_b_s = self._maybe_zero_scalar(n_b_full[s, i], bool(n_b_zeroed[i]))
-            
-                        val = self._full_log2fc_candidates_no_roots(
-                            A_s, alpha_s, Vmax_a_s, K_a_s, n_a_s,
-                            beta_s, Vmax_b_s, K_b_s, n_b_s,
-                            x_candidates=x_candidates
-                        )
+
+                        if is_binomial:
+                            val = self._full_delta_p_candidates_no_roots(
+                                A_s, alpha_s, Vmax_a_s, K_a_s, n_a_s,
+                                beta_s, Vmax_b_s, K_b_s, n_b_s,
+                                x_candidates=x_candidates
+                            )
+                        else:
+                            val = self._full_log2fc_candidates_no_roots(
+                                A_s, alpha_s, Vmax_a_s, K_a_s, n_a_s,
+                                beta_s, Vmax_b_s, K_b_s, n_b_s,
+                                x_candidates=x_candidates
+                            )
                         if np.isfinite(val):
                             sample_log2fcs.append(val)
-            
+
                     if sample_log2fcs:
                         full_log2fc_lower_list.append(np.quantile(sample_log2fcs, 0.025))
                         full_log2fc_upper_list.append(np.quantile(sample_log2fcs, 0.975))
@@ -2036,21 +2292,40 @@ class ModelSummarizer:
             for roots in third_deriv_roots_mean_list
         ]
 
-        data['first_deriv_roots_log2fc_mean']  = first_deriv_roots_log2fc_mean_list
-        data['second_deriv_roots_log2fc_mean'] = second_deriv_roots_log2fc_mean_list
-        data['third_deriv_roots_log2fc_mean']  = third_deriv_roots_log2fc_mean_list
-        
-        # Compute full log2FC (theoretical range) and observed log2FC (observed x range)
-        # Both are in log2 space: log2(y_max / y_min)
-        if compute_full_log2fc:
-            data['full_log2fc_mean'] = full_log2fc_mean_list
-            data['full_log2fc_lower'] = full_log2fc_lower_list
-            data['full_log2fc_upper'] = full_log2fc_upper_list
+        # Derivative roots in u-space (log2FC x-space)
+        # For negbinom: roots of dg/du = 0 where g = log2(y) - log2(y_ntc)
+        # For binomial: roots of dp/du = 0 where delta_p = p - p_ntc (same as dy/dx = 0 roots in u-space)
+        if is_binomial:
+            data['first_deriv_roots_delta_p_mean']  = first_deriv_roots_log2fc_mean_list
+            data['second_deriv_roots_delta_p_mean'] = second_deriv_roots_log2fc_mean_list
+            data['third_deriv_roots_delta_p_mean']  = third_deriv_roots_log2fc_mean_list
+        else:
+            data['first_deriv_roots_log2fc_mean']  = first_deriv_roots_log2fc_mean_list
+            data['second_deriv_roots_log2fc_mean'] = second_deriv_roots_log2fc_mean_list
+            data['third_deriv_roots_log2fc_mean']  = third_deriv_roots_log2fc_mean_list
 
-        # Observed log2FC over the observed x range (min to max x_eff_g)
-        data['observed_log2fc'] = observed_log2fc_list
-        data['observed_log2fc_lower'] = observed_log2fc_lower_list
-        data['observed_log2fc_upper'] = observed_log2fc_upper_list
+        # Full dynamic range (theoretical range) and observed dynamic range (observed x range)
+        # For negbinom: log2(y_max / y_min)
+        # For binomial: y_max - y_min (delta_p)
+        if compute_full_log2fc:
+            if is_binomial:
+                data['full_delta_p_mean'] = full_log2fc_mean_list
+                data['full_delta_p_lower'] = full_log2fc_lower_list
+                data['full_delta_p_upper'] = full_log2fc_upper_list
+            else:
+                data['full_log2fc_mean'] = full_log2fc_mean_list
+                data['full_log2fc_lower'] = full_log2fc_lower_list
+                data['full_log2fc_upper'] = full_log2fc_upper_list
+
+        # Observed dynamic range over the observed x range (min to max x_eff_g)
+        if is_binomial:
+            data['observed_delta_p'] = observed_log2fc_list
+            data['observed_delta_p_lower'] = observed_log2fc_lower_list
+            data['observed_delta_p_upper'] = observed_log2fc_upper_list
+        else:
+            data['observed_log2fc'] = observed_log2fc_list
+            data['observed_log2fc_lower'] = observed_log2fc_lower_list
+            data['observed_log2fc_upper'] = observed_log2fc_upper_list
 
         # Compute log2FC versions of parameters relative to NTC
         if compute_log2fc_params and x_ntc is not None and y_ntc is not None:
@@ -2312,13 +2587,18 @@ class ModelSummarizer:
                 data['inflection_b_log2fc_lower'] = _log2fc_transform(inf_b_lo)
                 data['inflection_b_log2fc_upper'] = _log2fc_transform(inf_b_hi)
                             
-            # A (baseline) in log2FC y-space: log2(A) - log2(y_ntc)
-            # y_ntc is per-feature, A_mean is per-feature
-            A_log2fc = np.full(n_features, np.nan)
-            valid_A = (A_mean > epsilon) & (y_ntc > epsilon)
-            if np.any(valid_A):
-                A_log2fc[valid_A] = np.log2(A_mean[valid_A]) - np.log2(y_ntc[valid_A])
-            data['A_log2fc'] = A_log2fc
+            # A (baseline) in transformed y-space
+            # For negbinom: A_log2fc = log2(A) - log2(y_ntc)
+            # For binomial: A_delta_p = A - y_ntc
+            if is_binomial:
+                A_delta_p = A_mean - y_ntc
+                data['A_delta_p'] = A_delta_p
+            else:
+                A_log2fc = np.full(n_features, np.nan)
+                valid_A = (A_mean > epsilon) & (y_ntc > epsilon)
+                if np.any(valid_A):
+                    A_log2fc[valid_A] = np.log2(A_mean[valid_A]) - np.log2(y_ntc[valid_A])
+                data['A_log2fc'] = A_log2fc
 
         return data
 
@@ -3483,6 +3763,57 @@ class ModelSummarizer:
         y_min = float(y_clip[imin])
     
         out = float(np.log2(y_max / y_min))
+        if return_argextrema:
+            return out, (float(x_eval[imin]), float(x_eval[imax]))
+        return out
+
+    def _compute_observed_delta_p_fitted(
+        self, A, alpha, Vmax_a, beta, Vmax_b,
+        K_a, n_a, K_b, n_b,
+        x_obs_min: float, x_obs_max: float,
+        return_argextrema: bool = False
+    ):
+        """
+        Compute observed delta_p (y_max - y_min) over the observed x range.
+        For binomial distributions where delta_p = p - p_ntc.
+        """
+        eps = 1e-10
+
+        n_points = 1000
+        log2_min = np.log2(max(x_obs_min, eps))
+        log2_max = np.log2(max(x_obs_max, eps))
+        x_eval = 2.0 ** np.linspace(log2_min, log2_max, n_points)
+
+        K_a_safe = max(K_a, eps)
+        K_b_safe = max(K_b, eps)
+
+        # Hill A/B in log-space
+        x_n_a = self._exp_clip(n_a * np.log(x_eval))
+        K_n_a = self._exp_clip(n_a * np.log(K_a_safe))
+        H_a = Vmax_a * x_n_a / (K_n_a + x_n_a)
+
+        x_n_b = self._exp_clip(n_b * np.log(x_eval))
+        K_n_b = self._exp_clip(n_b * np.log(K_b_safe))
+        H_b = Vmax_b * x_n_b / (K_n_b + x_n_b)
+
+        y_vals = A + alpha * H_a + beta * H_b
+
+        # IMPORTANT: don't overwrite invalids with A (that can create fake extrema)
+        y_vals = np.asarray(y_vals, dtype=float)
+        y_vals[~np.isfinite(y_vals)] = np.nan
+
+        if np.all(np.isnan(y_vals)):
+            if return_argextrema:
+                return np.nan, (np.nan, np.nan)
+            return np.nan
+
+        # For delta_p, we use the raw values (no positivity constraint needed)
+        imax = int(np.nanargmax(y_vals))
+        imin = int(np.nanargmin(y_vals))
+        y_max = float(y_vals[imax])
+        y_min = float(y_vals[imin])
+
+        out = float(y_max - y_min)
         if return_argextrema:
             return out, (float(x_eval[imin]), float(x_eval[imax]))
         return out
