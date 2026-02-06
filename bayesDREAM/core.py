@@ -445,8 +445,8 @@ class _BayesDREAMCore(PlottingMixin):
 
             if require_ntc and "ntc" not in self.meta["target"].values:
                 raise ValueError(
-                    "The 'target' column in meta must contain 'ntc'. "
-                    "If you have already run fit_technical() and want to subset without NTC cells, "
+                    "No NTC detected in the 'target' column. "
+                    "If this is correct (e.g., you have already run fit_technical() or don't need NTC cells), "
                     "use require_ntc=False."
                 )
 
