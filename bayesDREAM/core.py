@@ -176,6 +176,7 @@ class _BayesDREAMCore(PlottingMixin):
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
         self.label = label
+        self.require_ntc = require_ntc
 
         # ==============================================================================
         # Detect high MOI mode and validate

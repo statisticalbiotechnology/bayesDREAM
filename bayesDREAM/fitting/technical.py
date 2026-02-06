@@ -564,7 +564,9 @@ class TechnicalFitter:
         print(f"[INFO] Set technical_group_code with {self.model.meta['technical_group_code'].nunique()} groups based on {covariates}")
     
         # ---- SAFEGUARD: ensure every technical group is represented among NTCs ----
-        if "target" in self.model.meta.columns:
+        # Skip this check if require_ntc=False (e.g., when NTC cells are not needed)
+        require_ntc = getattr(self.model, 'require_ntc', True)
+        if require_ntc and "target" in self.model.meta.columns:
             all_groups  = set(self.model.meta["technical_group_code"].unique().tolist())
             ntc_groups  = set(self.model.meta.loc[self.model.meta["target"] == "ntc", "technical_group_code"].unique().tolist())
             missing_ntc = sorted(all_groups - ntc_groups)
