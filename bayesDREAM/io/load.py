@@ -197,9 +197,13 @@ class ModelLoader:
         print(f"[LOAD] Technical fit loaded from {input_dir}")
         print(f"[LOAD] Modalities loaded: {modalities_to_load}")
 
-        # Warn if alpha_y_prefit was not loaded for any modality
+        # Warn if alpha_y_prefit was not loaded for modalities that need it
+        # Note: 'cis' modality doesn't need alpha_y_prefit (it uses alpha_x instead)
         modalities_missing_alpha_y = []
         for mod_name in modalities_to_load:
+            # Skip 'cis' modality - it's for cis gene fitting, not trans fitting
+            if mod_name == 'cis':
+                continue
             mod = self.model.modalities[mod_name]
             if mod.alpha_y_prefit is None:
                 modalities_missing_alpha_y.append(mod_name)
@@ -208,7 +212,8 @@ class ModelLoader:
             import warnings
             warnings.warn(
                 f"[WARNING] alpha_y_prefit was NOT loaded for modalities: {modalities_missing_alpha_y}. "
-                f"This will cause fit_trans() to fail. Check that the following files exist in {input_dir}:\n"
+                f"This will cause fit_trans() to fail for these modalities. "
+                f"Check that the following files exist in {input_dir}:\n"
                 f"  - alpha_y_prefit.pt (legacy format for primary modality)\n"
                 f"  - alpha_y_prefit_<modality>.pt (per-modality format)\n"
                 f"  - posterior_samples_technical_<modality>.pt (contains alpha_y in posterior samples)\n"
