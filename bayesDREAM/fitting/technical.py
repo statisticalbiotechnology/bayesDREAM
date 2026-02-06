@@ -294,9 +294,9 @@ class TechnicalFitter:
             if distribution in ("normal", "studentt"):
                 # For Normal we want additive shifts on the ORIGINAL scale,
                 # with a width that reflects the data:
-                #   alpha ~ StudentT(ν=3, loc=0, scale ~ SD_across_guides)
+                #   alpha ~ StudentT(ν=3, loc=0, scale ~ robust_SD / sqrt(N))
                 #
-                # mu_x_sd_tensor is [T] and already encodes between-guide SD.
+                # mu_x_sd_tensor is [T] and encodes robust SD (MAD-based) / sqrt(N).
                 alpha_scale = mu_x_sd_tensor.clamp_min(epsilon_tensor)
             
                 with f_plate:
@@ -1061,7 +1061,6 @@ class TechnicalFitter:
     
         C = meta_ntc['technical_group_code'].nunique()
         groups_ntc = meta_ntc['technical_group_code'].values
-        guides = meta_ntc['guide_code'].values
     
         # Detect K/D
         K = None
@@ -1116,20 +1115,59 @@ class TechnicalFitter:
         else:
             sigma_hat_tensor = None
 
+        # ---- Helper: compute robust SD using MAD with SD fallback ----
+        def _compute_robust_sd(y_data, epsilon, use_nan=False):
+            """
+            Compute robust SD using MAD (median absolute deviation) with SD fallback.
+
+            MAD is more robust to outliers and heavy tails common in count data.
+            Falls back to SD when MAD is 0 (e.g., >50% of values equal the median).
+
+            Parameters
+            ----------
+            y_data : np.ndarray
+                Data array of shape [N, T]
+            epsilon : float
+                Small constant to avoid division by zero
+            use_nan : bool
+                If True, use nanmedian/nanstd for NaN-aware computation
+
+            Returns
+            -------
+            robust_sd : np.ndarray
+                Robust SD estimate of shape [T]
+            """
+            if use_nan:
+                median_vals = np.nanmedian(y_data, axis=0)
+                mad = np.nanmedian(np.abs(y_data - median_vals), axis=0)
+                cell_sd = np.nanstd(y_data, axis=0)
+            else:
+                median_vals = np.median(y_data, axis=0)
+                mad = np.median(np.abs(y_data - median_vals), axis=0)
+                cell_sd = np.std(y_data, axis=0)
+
+            # Convert MAD to SD (scaling factor for normal distribution)
+            robust_sd = 1.4826 * mad
+
+            # Fallback to regular SD when MAD is 0 (e.g., >50% zeros)
+            robust_sd = np.where(robust_sd > epsilon, robust_sd, cell_sd)
+
+            return robust_sd
+
         # ---- mu_x priors per distribution ----
         if distribution == 'negbinom':
             baseline_mask = (groups_ntc == 0)
             y_baseline = _extract_rows_sparse_safe(y_obs_ntc_factored, baseline_mask)
             mu_x_mean = np.mean(y_baseline, axis=0)  # [T_fit]
 
-            # Compute guide means efficiently
-            guide_means_list = []
-            for g in np.unique(guides):
-                g_mask = (guides == g)
-                y_guide = _extract_rows_sparse_safe(y_obs_ntc_factored, g_mask)
-                guide_means_list.append(np.mean(y_guide, axis=0))
-            guide_means = np.array(guide_means_list)
-            mu_x_sd = np.std(guide_means, axis=0) + epsilon
+            # Compute robust SD using MAD with SD fallback
+            robust_sd = _compute_robust_sd(y_obs_ntc_factored, epsilon, use_nan=False)
+
+            # Convert to SE of mean, with floor at 10% of mean
+            N_cells = y_obs_ntc_factored.shape[0]
+            mu_x_sd = robust_sd / np.sqrt(N_cells) + epsilon
+            mu_x_sd = np.maximum(mu_x_sd, (mu_x_mean + epsilon) * 0.1)  # floor at 10% of mean
+
             mu_x_mean = mu_x_mean + epsilon  # strictly positive for Gamma
 
         elif distribution in ('normal', 'studentt'):
@@ -1139,24 +1177,14 @@ class TechnicalFitter:
             # NaN-aware baseline mean
             mu_x_mean = np.nanmean(y_baseline, axis=0)  # [T_fit]
 
-            # NaN-aware between-guide SD, skipping guides with no NTC cells
-            gids = np.unique(guides)
-            guide_means_list = []
-            for g in gids:
-                g_mask = (guides == g)
-                if not g_mask.any():
-                    # No NTC cells for this guide -> skip it
-                    continue
-                y_guide = _extract_rows_sparse_safe(y_obs_ntc_factored, g_mask)
-                gm = np.nanmean(y_guide, axis=0)
-                guide_means_list.append(gm)
+            # Compute robust SD using MAD with SD fallback (NaN-aware)
+            robust_sd = _compute_robust_sd(y_obs_ntc_factored, epsilon, use_nan=True)
 
-            if len(guide_means_list) > 0:
-                guide_means = np.stack(guide_means_list, axis=0)        # [G_eff, T_fit]
-                mu_x_sd = np.nanstd(guide_means, axis=0) + epsilon      # [T_fit]
-            else:
-                # Fallback if somehow no guides had NTC cells (very unlikely)
-                mu_x_sd = np.ones((T_fit,), dtype=float)
+            # Convert to SE of mean, with floor at 10% of |mean| (or 0.1 if mean is ~0)
+            N_cells = y_obs_ntc_factored.shape[0]
+            mu_x_sd = robust_sd / np.sqrt(N_cells) + epsilon
+            mean_floor = np.maximum(np.abs(mu_x_mean) * 0.1, 0.1)
+            mu_x_sd = np.maximum(mu_x_sd, mean_floor)
 
             # Safety: replace any remaining non-finite with defaults
             mu_x_mean = np.where(np.isfinite(mu_x_mean), mu_x_mean, 0.0)
