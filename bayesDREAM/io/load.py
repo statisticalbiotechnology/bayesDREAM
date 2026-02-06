@@ -196,6 +196,26 @@ class ModelLoader:
 
         print(f"[LOAD] Technical fit loaded from {input_dir}")
         print(f"[LOAD] Modalities loaded: {modalities_to_load}")
+
+        # Warn if alpha_y_prefit was not loaded for any modality
+        modalities_missing_alpha_y = []
+        for mod_name in modalities_to_load:
+            mod = self.model.modalities[mod_name]
+            if mod.alpha_y_prefit is None:
+                modalities_missing_alpha_y.append(mod_name)
+
+        if modalities_missing_alpha_y:
+            import warnings
+            warnings.warn(
+                f"[WARNING] alpha_y_prefit was NOT loaded for modalities: {modalities_missing_alpha_y}. "
+                f"This will cause fit_trans() to fail. Check that the following files exist in {input_dir}:\n"
+                f"  - alpha_y_prefit.pt (legacy format for primary modality)\n"
+                f"  - alpha_y_prefit_<modality>.pt (per-modality format)\n"
+                f"  - posterior_samples_technical_<modality>.pt (contains alpha_y in posterior samples)\n"
+                f"If files are in a different directory, use load_technical_fit(input_dir='path/to/saved/fit')",
+                UserWarning
+            )
+
         return loaded
 
     def load_cis_fit(self, input_dir: str = None, use_posterior: bool = True):
