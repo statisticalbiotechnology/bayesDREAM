@@ -27,13 +27,21 @@ jobs:
       - name: Install Apptainer
         run: |
           sudo apt-get update
-          sudo apt-get install -y apptainer
+          if apt-cache show apptainer >/dev/null 2>&1; then
+            sudo apt-get install -y apptainer
+          else
+            # Ubuntu 24.04 (noble) does not ship an `apptainer` package.
+            # Use singularity-container (compatible CLI) and provide an apptainer shim.
+            sudo apt-get install -y singularity-container
+            sudo ln -sf "$(command -v singularity)" /usr/local/bin/apptainer
+          fi
           apptainer --version
 
       - name: Build SIF from definition
         run: |
           test -f "$DEF_FILE"
-          apptainer build "$SIF_FILE" "$DEF_FILE"
+          sudo apptainer build "$SIF_FILE" "$DEF_FILE"
+          sudo chown "$USER":"$USER" "$SIF_FILE"
           ls -lh "$SIF_FILE"
 
       - name: Install ORAS
