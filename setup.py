@@ -45,6 +45,8 @@ setup(
         'matplotlib>=3.7',
         'seaborn>=0.12',
         'h5py>=3.8.0',
+        'typer>=0.12.0',
+        'pyyaml>=6.0.0',
     ],
     extras_require={
         'dev': [
@@ -68,4 +70,9 @@ setup(
         'Programming Language :: Python :: 3.11',
         'Programming Language :: Python :: 3.12',
     ],
+    entry_points={
+        'console_scripts': [
+            'bayesdream=bayesDREAM.cli:main',
+        ],
+    },
 )

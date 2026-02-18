@@ -1,0 +1,95 @@
+name: Build and Publish Apptainer
+
+on:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  DEF_FILE: apptainer/bayesdream_cpu.def
+  SIF_FILE: bayesdream_cpu.sif
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Apptainer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apptainer
+          apptainer --version
+
+      - name: Build SIF from definition
+        run: |
+          test -f "$DEF_FILE"
+          apptainer build "$SIF_FILE" "$DEF_FILE"
+          ls -lh "$SIF_FILE"
+
+      - name: Install ORAS
+        run: |
+          ORAS_VERSION="1.2.2"
+          curl -sSL "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz" -o oras.tar.gz
+          tar -xzf oras.tar.gz oras
+          sudo install oras /usr/local/bin/oras
+          oras version
+
+      - name: Compute image refs
+        id: refs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OWNER_LC="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          REPO_LC="$(basename "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+          REPO_BASE="ghcr.io/${OWNER_LC}/${REPO_LC}-apptainer"
+
+          SHA_SHORT="${GITHUB_SHA::12}"
+          BRANCH_SAFE="$(echo "${GITHUB_REF_NAME}" | tr '[:upper:]' '[:lower:]' | tr '/_' '-' | tr -cd 'a-z0-9.-')"
+
+          echo "repo_base=${REPO_BASE}" >> "$GITHUB_OUTPUT"
+          echo "sha_ref=${REPO_BASE}:cpu-sha-${SHA_SHORT}" >> "$GITHUB_OUTPUT"
+          echo "branch_ref=${REPO_BASE}:cpu-${BRANCH_SAFE}" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        env:
+          CR_PAT: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$CR_PAT" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Push SHA tag
+        run: |
+          oras push "${{ steps.refs.outputs.sha_ref }}" \
+            --artifact-type application/vnd.sylabs.sif.config.v1+json \
+            "${SIF_FILE}:application/vnd.sylabs.sif.layer.v1.sif"
+
+      - name: Push branch tag
+        if: startsWith(github.ref, 'refs/heads/')
+        run: |
+          oras push "${{ steps.refs.outputs.branch_ref }}" \
+            --artifact-type application/vnd.sylabs.sif.config.v1+json \
+            "${SIF_FILE}:application/vnd.sylabs.sif.layer.v1.sif"
+
+      - name: Push latest tag on default branch
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        run: |
+          oras push "${{ steps.refs.outputs.repo_base }}:cpu-latest" \
+            --artifact-type application/vnd.sylabs.sif.config.v1+json \
+            "${SIF_FILE}:application/vnd.sylabs.sif.layer.v1.sif"
+
+      - name: Upload SIF as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bayesdream-cpu-sif
+          path: ${{ env.SIF_FILE }}
+          if-no-files-found: error
