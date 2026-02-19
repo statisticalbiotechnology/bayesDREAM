@@ -63,6 +63,9 @@ A workflow is provided at `.github/workflows/apptainer-ghcr.yml` that builds and
 
 Published refs:
 
-- `ghcr.io/<owner>/<repo>-apptainer:cpu-sha-<12charsha>`
-- `ghcr.io/<owner>/<repo>-apptainer:cpu-<branch>`
-- `ghcr.io/<owner>/<repo>-apptainer:cpu-latest` (default branch only)
+- `ghcr.io/<owner>/<repo>-apptainer:cpu-amd64-sha-<12charsha>`
+- `ghcr.io/<owner>/<repo>-apptainer:cpu-arm64-sha-<12charsha>`
+- `ghcr.io/<owner>/<repo>-apptainer:cpu-amd64-<branch>`
+- `ghcr.io/<owner>/<repo>-apptainer:cpu-arm64-<branch>`
+- `ghcr.io/<owner>/<repo>-apptainer:cpu-amd64-latest` (default branch only)
+- `ghcr.io/<owner>/<repo>-apptainer:cpu-arm64-latest` (default branch only)
