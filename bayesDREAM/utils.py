@@ -92,6 +92,20 @@ def calculate_mu_x_guide(guide, x_obs_ntc_factored, guides_ntc):
 # Dose-Response Functions
 ########################################
 
+def default_sigmoid_clamp(dtype):
+    # log(max_float) is ~88.7 for float32, ~709.8 for float64
+    log_max = torch.log(torch.tensor(torch.finfo(dtype).max))
+    return float(0.75 * log_max)  # 0.75 is conservative
+
+def Hill_based_positive_logK(x, Vmax, A, logK, n):
+    tiny = torch.finfo(x.dtype).tiny
+    x_safe = x.clamp_min(tiny)
+    logit = n * (torch.log(x_safe) - logK)  # logK broadcasts across cells
+    clamp_logit = default_sigmoid_clamp(logit.dtype)
+    logit = torch.clamp(logit, -clamp_logit, clamp_logit)
+    return Vmax * torch.sigmoid(logit) + A
+
+
 def Hill_based_positive(x, Vmax, A, K, n, epsilon=1e-6):
     """
     Positive Hill equation: Vmax * (x^n / (K^n + x^n)) + A

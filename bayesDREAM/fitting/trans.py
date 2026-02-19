@@ -20,8 +20,10 @@ import pyro.distributions as dist
 from pyro.distributions.transforms import iterated, affine_autoregressive
 import pyro.optim as optim
 import pyro.infer as infer
+import pyro.poutine as poutine
+import pyro.distributions as dist
 
-from ..utils import find_beta, Hill_based_positive, Polynomial_function, check_tensor
+from ..utils import find_beta, Hill_based_positive, Hill_based_positive_logK, Polynomial_function, check_tensor
 
 
 
@@ -47,6 +49,305 @@ class TransFitter:
             return x.detach().cpu()
         return x
 
+    # ----------------------------
+    # Debug helpers (Option 1)
+    # ----------------------------
+    def _tensor_summary(self, x: torch.Tensor):
+        x_det = x.detach()
+        finite = torch.isfinite(x_det)
+        n = x_det.numel()
+        n_bad = (~finite).sum().item()
+        n_nan = torch.isnan(x_det).sum().item()
+        n_inf = torch.isinf(x_det).sum().item()
+        if finite.any():
+            x_f = x_det[finite]
+            mn = x_f.min().item()
+            mx = x_f.max().item()
+            mean = x_f.mean().item()
+            std = x_f.std().item()
+        else:
+            mn = mx = mean = std = float("nan")
+        return dict(n=n, n_bad=n_bad, n_nan=n_nan, n_inf=n_inf, min=mn, max=mx, mean=mean, std=std)
+
+    def _print_tensor(self, name: str, x: torch.Tensor, prefix=""):
+        s = self._tensor_summary(x)
+        print(
+            f"{prefix}{name}: shape={tuple(x.shape)} dtype={x.dtype} device={x.device} "
+            f"bad={s['n_bad']}/{s['n']} (nan={s['n_nan']}, inf={s['n_inf']}) "
+            f"min={s['min']:.3g} max={s['max']:.3g} mean={s['mean']:.3g} std={s['std']:.3g}"
+        )
+
+    def _check_param_store_all(self, step: int, svi=None, where="", prev_finite=None, verbose_on_change=True):
+        store = pyro.get_param_store()
+        if prev_finite is None:
+            prev_finite = {}
+
+        changed = []
+        bad_vals = []
+        bad_grads = []
+
+        for name, p in store.items():
+            if not isinstance(p, torch.Tensor):
+                continue
+
+            now_finite = torch.isfinite(p).all().item()
+            was_finite = prev_finite.get(name, True)
+            prev_finite[name] = now_finite
+
+            if was_finite and (not now_finite):
+                changed.append(name)
+
+            if not now_finite:
+                bad_vals.append(name)
+
+            if p.grad is not None and (not torch.isfinite(p.grad).all().item()):
+                bad_grads.append(name)
+
+        if changed and verbose_on_change:
+            print(f"\n[FATAL] Param(s) flipped finite→nonfinite at step {step} {where}: {changed}")
+            for n in changed:
+                self._print_tensor(n, store[n], prefix="  ")
+                if store[n].grad is not None:
+                    self._print_tensor(n + ".grad", store[n].grad, prefix="  ")
+
+        if bad_vals and verbose_on_change and not changed:
+            print(f"\n[FATAL] Non-finite param value(s) present at step {step} {where}: "
+                  f"{bad_vals[:10]}{'...' if len(bad_vals)>10 else ''}")
+            for n in bad_vals[:10]:
+                self._print_tensor(n, store[n], prefix="  ")
+
+        if bad_grads and verbose_on_change:
+            print(f"\n[FATAL] Non-finite gradient(s) present at step {step} {where}: "
+                  f"{bad_grads[:10]}{'...' if len(bad_grads)>10 else ''}")
+            for n in bad_grads[:10]:
+                if store[n].grad is not None:
+                    self._print_tensor(n + ".grad", store[n].grad, prefix="  ")
+
+        # Best-effort optimizer-state check (optional)
+        if svi is not None and hasattr(svi, "optim"):
+            opt = svi.optim
+            optim_objs = getattr(opt, "optim_objs", None)
+            if isinstance(optim_objs, dict):
+                bad_state = []
+                for pname, torch_opt in optim_objs.items():
+                    base_opt = getattr(torch_opt, "optimizer", torch_opt)
+                    if not hasattr(base_opt, "state"):
+                        continue
+                    for group in base_opt.param_groups:
+                        for param in group.get("params", []):
+                            st = base_opt.state.get(param, {})
+                            for key, val in st.items():
+                                if torch.is_tensor(val) and (not torch.isfinite(val).all().item()):
+                                    bad_state.append((pname, key))
+                if bad_state and verbose_on_change:
+                    print(f"\n[FATAL] Non-finite optimizer state at step {step} {where}: "
+                          f"{bad_state[:10]}{'...' if len(bad_state)>10 else ''}")
+
+        any_bad = bool(bad_vals or bad_grads)
+        return prev_finite, any_bad
+
+    def _collect_dist_tensors(self, fn):
+        tensors = []
+        if isinstance(fn, dist.TransformedDistribution):
+            tensors += self._collect_dist_tensors(fn.base_dist)
+            return tensors
+
+        for attr in [
+            "loc", "scale", "total_count", "logits", "probs", "rate",
+            "concentration", "concentration0", "concentration1", "df"
+        ]:
+            if hasattr(fn, attr):
+                v = getattr(fn, attr)
+                if torch.is_tensor(v):
+                    tensors.append((attr, v))
+        return tensors
+
+    def diagnose_nonfinite_sites(self, model, guide, *args, **kwargs):
+        print("\n[DIAG] Running traced guide+model to locate non-finite site...")
+
+        guide_trace = poutine.trace(guide).get_trace(*args, **kwargs)
+        replayed_model = poutine.replay(model, trace=guide_trace)
+        model_trace = poutine.trace(replayed_model).get_trace(*args, **kwargs)
+
+        def scan_trace(tr, label):
+            print(f"[DIAG] Scanning {label} trace...")
+            for name, node in tr.nodes.items():
+                if node.get("type") != "sample":
+                    continue
+
+                fn = node["fn"]
+                val = node["value"]
+
+                if torch.is_tensor(val) and (not torch.isfinite(val).all().item()):
+                    print(f"  [BAD VALUE] site={name}")
+                    self._print_tensor(f"{label}:{name}.value", val, prefix="    ")
+                    return name
+
+                for attr, ten in self._collect_dist_tensors(fn):
+                    if not torch.isfinite(ten).all().item():
+                        print(f"  [BAD DIST PARAM] site={name} param={attr}")
+                        self._print_tensor(f"{label}:{name}.fn.{attr}", ten, prefix="    ")
+                        return name
+
+                if "log_prob" in node:
+                    lp = node["log_prob"]
+                    if torch.is_tensor(lp) and (not torch.isfinite(lp).all().item()):
+                        print(f"  [BAD LOG_PROB] site={name}")
+                        self._print_tensor(f"{label}:{name}.log_prob", lp, prefix="    ")
+                        return name
+
+            print(f"[DIAG] No non-finite sample sites found in {label} trace.")
+            return None
+
+        bad_guide = scan_trace(guide_trace, "guide")
+        bad_model = scan_trace(model_trace, "model")
+        print(f"[DIAG] First bad site guide={bad_guide} model={bad_model}\n")
+
+    def _debug_svi_step(self, svi, step, prev_finite, *args, **kwargs):
+        """
+        A 'manual' SVI step that lets us check:
+          - pre-step params
+          - post-grads, pre-update params/grads
+          - post-update params
+        and run trace diagnosis on first failure.
+        """
+        # Pre-step check
+        prev_finite, any_bad = self._check_param_store_all(
+            step, svi=svi, where="(pre-step)", prev_finite=prev_finite
+        )
+        if any_bad:
+            store = pyro.get_param_store()
+            if "locs.log_K_a" in store and store["locs.log_K_a"].grad is not None:
+                g = store["locs.log_K_a"].grad
+                bad_idx = torch.nonzero(torch.isnan(g), as_tuple=False).squeeze(-1)
+                if bad_idx.numel() > 0:
+                    self._diagnose_log_Ka_nan_grad(svi, bad_idx, *args, **kwargs)
+        
+            self.diagnose_nonfinite_sites(svi.model, svi.guide, *args, **kwargs)
+            raise FloatingPointError("Non-finite grads/params after loss_and_grads (before update).")
+
+
+        # Compute loss + grads (no update yet)
+        with poutine.trace(param_only=True) as param_capture:
+            loss = svi.loss_and_grads(svi.model, svi.guide, *args, **kwargs)
+
+        # Post-grads check (this often catches the real cause)
+        prev_finite, any_bad = self._check_param_store_all(
+            step, svi=svi, where="(post-grads, pre-update)", prev_finite=prev_finite
+        )
+        if any_bad:
+            store = pyro.get_param_store()
+            if "locs.log_K_a" in store and store["locs.log_K_a"].grad is not None:
+                g = store["locs.log_K_a"].grad
+                bad_idx = torch.nonzero(torch.isnan(g), as_tuple=False).squeeze(-1)
+                if bad_idx.numel() > 0:
+                    self._diagnose_log_Ka_nan_grad(svi, bad_idx, *args, **kwargs)
+        
+            self.diagnose_nonfinite_sites(svi.model, svi.guide, *args, **kwargs)
+            raise FloatingPointError("Non-finite grads/params after loss_and_grads (before update).")
+        if any_bad:
+            self.diagnose_nonfinite_sites(svi.model, svi.guide, *args, **kwargs)
+            raise FloatingPointError("Non-finite grads/params after loss_and_grads (before update).")
+
+        # Apply optimizer update
+        params = set(site["value"].unconstrained() for site in param_capture.trace.nodes.values())
+        svi.optim(params)
+
+        # Post-update check
+        prev_finite, any_bad = self._check_param_store_all(
+            step, svi=svi, where="(post-update)", prev_finite=prev_finite
+        )
+        if any_bad:
+            store = pyro.get_param_store()
+            if "locs.log_K_a" in store and store["locs.log_K_a"].grad is not None:
+                g = store["locs.log_K_a"].grad
+                bad_idx = torch.nonzero(torch.isnan(g), as_tuple=False).squeeze(-1)
+                if bad_idx.numel() > 0:
+                    self._diagnose_log_Ka_nan_grad(svi, bad_idx, *args, **kwargs)
+        
+            self.diagnose_nonfinite_sites(svi.model, svi.guide, *args, **kwargs)
+            raise FloatingPointError("Non-finite grads/params after loss_and_grads (before update).")
+        if any_bad:
+            self.diagnose_nonfinite_sites(svi.model, svi.guide, *args, **kwargs)
+            raise FloatingPointError("Optimizer update produced non-finite params.")
+
+        return loss, prev_finite
+
+    def _diagnose_log_Ka_nan_grad(self, svi, bad_idx, *args, **kwargs):
+        """
+        bad_idx: 1D LongTensor of indices where locs.log_K_a.grad is NaN
+        Prints model/guide site values for those indices and derived quantities
+        (phi, Hill logit range, NB logits range).
+        """
+        import pyro.poutine as poutine
+        import torch
+    
+        print(f"\n[DIAG+] NaN grad indices for log_K_a: {bad_idx.tolist()}")
+    
+        guide_trace = poutine.trace(svi.guide).get_trace(*args, **kwargs)
+        replayed_model = poutine.replay(svi.model, trace=guide_trace)
+        model_trace = poutine.trace(replayed_model).get_trace(*args, **kwargs)
+    
+        def get_site(tr, name):
+            return tr.nodes[name]["value"] if name in tr.nodes else None
+    
+        # --- pull site values (all should be finite, but may be extreme) ---
+        log_K_a = get_site(model_trace, "log_K_a") or get_site(guide_trace, "log_K_a")
+        log_Vmax_a = get_site(model_trace, "log_Vmax_a") or get_site(guide_trace, "log_Vmax_a")
+        Vmax_a = get_site(model_trace, "Vmax_a")
+        K_a = get_site(model_trace, "K_a")
+        n_a = get_site(model_trace, "n_a")
+        A = get_site(model_trace, "A")
+        o_y = get_site(model_trace, "o_y")  # sampled per feature
+        alpha = get_site(model_trace, "alpha")  # relaxed bernoulli
+    
+        # Some of these might not exist depending on branch / naming
+        for name, tensor in [
+            ("log_K_a", log_K_a),
+            ("K_a", K_a),
+            ("log_Vmax_a", log_Vmax_a),
+            ("Vmax_a", Vmax_a),
+            ("n_a", n_a),
+            ("A", A),
+            ("o_y", o_y),
+            ("alpha", alpha),
+        ]:
+            if tensor is None:
+                continue
+            sel = tensor[bad_idx]
+            self._print_tensor(f"{name}[bad_idx]", sel, prefix="  ")
+    
+        # --- derived phi and ranges (very informative) ---
+        if o_y is not None:
+            phi = 1.0 / (o_y ** 2)
+            self._print_tensor("phi_y[bad_idx]", phi[bad_idx], prefix="  ")
+    
+        # --- derived Hill logit range (this catches x**n instabilities) ---
+        # kwargs must include x_true_sample, and we prefer to use log_K_a directly
+        x_true = kwargs.get("x_true_sample", None)
+        if x_true is not None and log_K_a is not None and n_a is not None:
+            tiny = torch.finfo(x_true.dtype).tiny
+            log_x = torch.log(x_true.clamp_min(tiny)).unsqueeze(-1)  # [N,1]
+            # logit for each bad feature: [N, |bad_idx|]
+            logit = (n_a[bad_idx].unsqueeze(0) * (log_x - log_K_a[bad_idx].unsqueeze(0)))
+            # print range across cells (per bad feature)
+            logit_min = logit.min(dim=0).values
+            logit_max = logit.max(dim=0).values
+            self._print_tensor("hill_logit_min[bad_idx]", logit_min, prefix="  ")
+            self._print_tensor("hill_logit_max[bad_idx]", logit_max, prefix="  ")
+    
+            # approximate Hill output range
+            if Vmax_a is not None:
+                H = Vmax_a[bad_idx].unsqueeze(0) * torch.sigmoid(logit)
+                self._print_tensor("Hilla_min[bad_idx]", H.min(dim=0).values, prefix="  ")
+                self._print_tensor("Hilla_max[bad_idx]", H.max(dim=0).values, prefix="  ")
+    
+        # --- derived NB logits range for bad features (if you pass mu_y pieces) ---
+        # We can’t see mu_final unless you expose it; but we can at least compute the part driven by Hill:
+        # If you want full mu_final, expose it via pyro.deterministic (recommended).
+        print("[DIAG+] If hill_logit range is extreme (e.g. > ~80 in magnitude), Hill math/backward is a prime suspect.\n")
+
+    
     #########################################
     ## Step 3: Fit trans effects (model_y) ##
     #########################################
@@ -567,15 +868,26 @@ class TransFitter:
                     else:
                         # For negbinom/normal/studentt: use standard formulation with learned Vmax_a/Vmax_b
                         if function_type == 'single_hill':
-                            Hilla = Hill_based_positive(x_true.unsqueeze(-1), Vmax=Vmax_a, A=0, K=K_a, n=n_a, epsilon=epsilon_tensor)
+                            if use_lognormal_priors:
+                                Hilla = Hill_based_positive_logK(x_true.unsqueeze(-1), Vmax=Vmax_a, A=0, logK=log_K_a, n=n_a)
+                            else:
+                                Hilla = Hill_based_positive(x_true.unsqueeze(-1), Vmax=Vmax_a, A=0, K=K_a, n=n_a, epsilon=epsilon_tensor)
                             y_dose_response = A + (alpha * Hilla)
                         elif function_type == 'additive_hill':
-                            Hilla = Hill_based_positive(x_true.unsqueeze(-1), Vmax=Vmax_a, A=0, K=K_a, n=n_a, epsilon=epsilon_tensor)
-                            Hillb = Hill_based_positive(x_true.unsqueeze(-1), Vmax=Vmax_b, A=0, K=K_b, n=n_b, epsilon=epsilon_tensor)
+                            if use_lognormal_priors:
+                                Hilla = Hill_based_positive_logK(x_true.unsqueeze(-1), Vmax=Vmax_a, A=0, logK=log_K_a, n=n_a)
+                                Hillb = Hill_based_positive_logK(x_true.unsqueeze(-1), Vmax=Vmax_b, A=0, logK=log_K_b, n=n_b)
+                            else:
+                                Hilla = Hill_based_positive(x_true.unsqueeze(-1), Vmax=Vmax_a, A=0, K=K_a, n=n_a, epsilon=epsilon_tensor)
+                                Hillb = Hill_based_positive(x_true.unsqueeze(-1), Vmax=Vmax_b, A=0, K=K_b, n=n_b, epsilon=epsilon_tensor)
                             y_dose_response = A + (alpha * Hilla) + (beta * Hillb)
                         elif function_type == 'nested_hill':
-                            Hilla = Hill_based_positive(x_true.unsqueeze(-1), Vmax=Vmax_a, A=0, K=K_a, n=n_a, epsilon=epsilon_tensor)
-                            Hillb = Hill_based_positive(Hilla, Vmax=Vmax_b, A=0, K=K_b, n=n_b, epsilon=epsilon_tensor)
+                            if use_lognormal_priors:
+                                Hilla = Hill_based_positive_logK(x_true.unsqueeze(-1), Vmax=Vmax_a, A=0, logK=log_K_a, n=n_a)
+                                Hillb = Hill_based_positive_logK(Hilla, Vmax=Vmax_b, A=0, logK=log_K_b, n=n_b)
+                            else:
+                                Hilla = Hill_based_positive(x_true.unsqueeze(-1), Vmax=Vmax_a, A=0, K=K_a, n=n_a, epsilon=epsilon_tensor)
+                                Hillb = Hill_based_positive(Hilla, Vmax=Vmax_b, A=0, K=K_b, n=n_b, epsilon=epsilon_tensor)
                             y_dose_response = A + (alpha * Hillb)
 
             elif function_type == 'polynomial':
@@ -1881,7 +2193,8 @@ class TransFitter:
 
             #use_straight_through = step >= int(0.7 * niters)
             use_straight_through = False
-            
+
+            '''
             loss = svi.step(
                 N,
                 T,
@@ -1920,6 +2233,42 @@ class TransFitter:
                 use_lognormal_priors=use_lognormal_priors,
                 use_epsilon=use_epsilon,
             )
+            '''
+
+            if step == 0:
+                prev_finite = None  # initialize tracker
+            try:
+                loss, prev_finite = self._debug_svi_step(
+                    svi, step, prev_finite,
+                    N, T, y_obs_tensor, sum_factor_tensor, beta_o_alpha_tensor, beta_o_beta_tensor,
+                    alpha_alpha_mu_tensor, K_max_tensor, K_alpha_tensor, Vmax_mean_tensor, Vmax_alpha_tensor,
+                    n_mu_tensor, Amean_tensor, p_n_logits_tensor, epsilon_tensor,
+                    x_true_sample=x_true_sample,
+                    log2_x_true_sample=log2_x_true_sample,
+                    nmin=nmin,
+                    nmax=nmax,
+                    alpha_y_sample=alpha_y_sample,
+                    C=C,
+                    groups_tensor=groups_tensor,
+                    temperature=torch.tensor(current_temp, dtype=torch.float32, device=self.model.device),
+                    use_straight_through=use_straight_through,
+                    function_type=function_type,
+                    polynomial_degree=polynomial_degree,
+                    use_alpha=True if function_type != 'polynomial' else True if fraction_done>=0.5 else False,
+                    distribution=distribution,
+                    denominator_tensor=denominator_tensor,
+                    K=K,
+                    D=D,
+                    mean_within_guide_var=mean_within_guide_var,
+                    x_true_CV=x_true_CV,
+                    use_data_driven_priors=use_data_driven_priors,
+                    use_lognormal_priors=use_lognormal_priors,
+                    use_epsilon=use_epsilon,
+                )
+            except FloatingPointError as e:
+                print(f"[STOP] {e} at step {step}")
+                break
+
 
             # NaN detection and early stopping
             if np.isnan(loss) or np.isinf(loss):

@@ -132,7 +132,10 @@ def _smooth_knn(
     is_ntc: Optional[np.ndarray] = None
 ) -> Union[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """
-    k-NN smoothing along x-axis.
+    Centered sliding-window smoothing along x-axis.
+
+    Uses a symmetric window of k cells (±k//2 around each point in sorted order).
+    Points near the edges where a full symmetric window is not available are trimmed.
 
     Parameters
     ----------
@@ -141,50 +144,61 @@ def _smooth_knn(
     y : np.ndarray
         Y values (1D)
     k : int
-        Number of nearest neighbors
+        Total window size (k//2 cells on each side)
     is_ntc : np.ndarray, optional
         Boolean array indicating NTC cells (1D, same length as x)
-        If provided, returns NTC proportions in k-NN windows
+        If provided, returns NTC proportions in windows
 
     Returns
     -------
-    x_sorted : np.ndarray
-        Sorted x values
+    x_trimmed : np.ndarray
+        Sorted x values (edges trimmed)
     y_hat : np.ndarray
         Smoothed y values
     ntc_prop : np.ndarray, optional
-        If is_ntc provided: proportion of NTC cells in each k-NN window
+        If is_ntc provided: proportion of NTC cells in each window
     """
     if len(x) == 0:
         if is_ntc is not None:
             return np.array([]), np.array([]), np.array([])
         return np.array([]), np.array([])
 
+    n = len(x)
     order = np.argsort(x)
-    x_sorted = np.asarray(x)[order].reshape(-1, 1)
+    x_sorted = np.asarray(x)[order]
     y_sorted = np.asarray(y)[order]
 
-    k = max(1, min(k, len(x_sorted)))
-    tree = cKDTree(x_sorted)
+    k = max(1, min(k, n))
+    half = k // 2
 
-    y_hat = np.empty_like(y_sorted, dtype=float)
+    # Trim edges where symmetric window is not possible
+    lo = half
+    hi = n - half  # exclusive
+    if lo >= hi:
+        # Not enough data for even one full window — fall back to full average
+        if is_ntc is not None:
+            return x_sorted, np.full(n, np.nanmean(y_sorted)), np.full(n, np.mean(np.asarray(is_ntc)[order]))
+        return x_sorted, np.full(n, np.nanmean(y_sorted))
+
+    n_out = hi - lo
+    y_hat = np.empty(n_out, dtype=float)
 
     if is_ntc is not None:
         is_ntc_sorted = np.asarray(is_ntc)[order]
-        ntc_prop = np.empty_like(y_sorted, dtype=float)
+        ntc_prop = np.empty(n_out, dtype=float)
 
-        for i in range(len(x_sorted)):
-            _, idx = tree.query(x_sorted[i], k=k)
-            y_hat[i] = np.nanmean(y_sorted[idx])
-            ntc_prop[i] = np.mean(is_ntc_sorted[idx])  # Proportion of NTC in window
+        for j, i in enumerate(range(lo, hi)):
+            win = slice(i - half, i + half + 1)
+            y_hat[j] = np.nanmean(y_sorted[win])
+            ntc_prop[j] = np.mean(is_ntc_sorted[win])
 
-        return x_sorted.ravel(), y_hat, ntc_prop
+        return x_sorted[lo:hi], y_hat, ntc_prop
     else:
-        for i in range(len(x_sorted)):
-            _, idx = tree.query(x_sorted[i], k=k)
-            y_hat[i] = np.nanmean(y_sorted[idx])
+        for j, i in enumerate(range(lo, hi)):
+            win = slice(i - half, i + half + 1)
+            y_hat[j] = np.nanmean(y_sorted[win])
 
-        return x_sorted.ravel(), y_hat
+        return x_sorted[lo:hi], y_hat
 
 
 def _smooth_knn_counts(
@@ -194,10 +208,10 @@ def _smooth_knn_counts(
     k: int
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    k-NN smoothing for count data by binning.
+    Centered sliding-window smoothing for count data by binning.
 
-    Aggregates numerators and denominators within k-NN windows,
-    allowing proportion calculation from aggregated counts.
+    Aggregates numerators and denominators within symmetric ±k//2 windows.
+    Points near the edges where a full symmetric window is not available are trimmed.
 
     Parameters
     ----------
@@ -208,50 +222,63 @@ def _smooth_knn_counts(
     denominators : np.ndarray
         Denominator totals (1D, length n)
     k : int
-        Number of nearest neighbors
+        Total window size (k//2 cells on each side)
 
     Returns
     -------
-    x_sorted : np.ndarray
-        Sorted x values (length n)
+    x_trimmed : np.ndarray
+        Sorted x values (edges trimmed)
     aggregated_num : np.ndarray
         Aggregated numerators (1D or 2D matching input shape)
     aggregated_denom : np.ndarray
-        Aggregated denominators (1D, length n)
+        Aggregated denominators (1D)
     """
     if len(x) == 0:
         return np.array([]), np.array([]), np.array([])
 
+    n = len(x)
     order = np.argsort(x)
-    x_sorted = np.asarray(x)[order].reshape(-1, 1)
+    x_sorted = np.asarray(x)[order]
 
-    k = max(1, min(k, len(x_sorted)))
-    tree = cKDTree(x_sorted)
+    k = max(1, min(k, n))
+    half = k // 2
+
+    # Trim edges where symmetric window is not possible
+    lo = half
+    hi = n - half  # exclusive
+    if lo >= hi:
+        # Not enough data — return full sums
+        is_2d = numerators.ndim == 2
+        if is_2d:
+            return x_sorted, np.sum(np.asarray(numerators)[order, :], axis=0, keepdims=True).repeat(n, axis=0), np.full(n, np.sum(denominators))
+        return x_sorted, np.full(n, np.sum(np.asarray(numerators)[order])), np.full(n, np.sum(denominators))
+
+    n_out = hi - lo
 
     # Handle 1D (binomial) vs 2D (multinomial) numerators
     is_2d = numerators.ndim == 2
     if is_2d:
         num_sorted = np.asarray(numerators)[order, :]  # (n, K)
-        K = num_sorted.shape[1]
-        aggregated_num = np.zeros((len(x_sorted), K), dtype=float)
+        K_dim = num_sorted.shape[1]
+        aggregated_num = np.zeros((n_out, K_dim), dtype=float)
     else:
         num_sorted = np.asarray(numerators)[order]  # (n,)
-        aggregated_num = np.zeros(len(x_sorted), dtype=float)
+        aggregated_num = np.zeros(n_out, dtype=float)
 
     denom_sorted = np.asarray(denominators)[order]
-    aggregated_denom = np.zeros(len(x_sorted), dtype=float)
+    aggregated_denom = np.zeros(n_out, dtype=float)
 
-    for i in range(len(x_sorted)):
-        _, idx = tree.query(x_sorted[i], k=k)
+    for j, i in enumerate(range(lo, hi)):
+        win = slice(i - half, i + half + 1)
 
         if is_2d:
-            aggregated_num[i, :] = np.sum(num_sorted[idx, :], axis=0)
+            aggregated_num[j, :] = np.sum(num_sorted[win, :], axis=0)
         else:
-            aggregated_num[i] = np.sum(num_sorted[idx])
+            aggregated_num[j] = np.sum(num_sorted[win])
 
-        aggregated_denom[i] = np.sum(denom_sorted[idx])
+        aggregated_denom[j] = np.sum(denom_sorted[win])
 
-    return x_sorted.ravel(), aggregated_num, aggregated_denom
+    return x_sorted[lo:hi], aggregated_num, aggregated_denom
 
 
 def _to_2d(a):

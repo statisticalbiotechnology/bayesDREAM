@@ -1024,12 +1024,12 @@ class ModelSummarizer:
         Parameters
         ----------
         output_dir : str, optional
-            Output directory (default: model.output_dir)
+            Output directory (default: model.output_dir/model.label)
         modality_name : str, optional
             Modality to export (default: primary modality)
         """
         if output_dir is None:
-            output_dir = self.model.output_dir
+            output_dir = os.path.join(self.model.output_dir, self.model.label)
 
         if modality_name is None:
             modality_name = self.model.primary_modality
@@ -1129,12 +1129,12 @@ class ModelSummarizer:
         Parameters
         ----------
         output_dir : str, optional
-            Output directory (default: model.output_dir)
+            Output directory (default: model.output_dir/model.label)
         include_cell_level : bool
             Whether to save cell-level summary (default: True)
         """
         if output_dir is None:
-            output_dir = self.model.output_dir
+            output_dir = os.path.join(self.model.output_dir, self.model.label)
 
         # Check if cis fit has been run
         if not hasattr(self.model, 'x_true') or self.model.x_true is None:
@@ -1343,7 +1343,7 @@ class ModelSummarizer:
         Parameters
         ----------
         output_dir : str, optional
-            Output directory (default: model.output_dir)
+            Output directory (default: model.output_dir/model.label)
         modality_name : str, optional
             Modality to export (default: primary modality)
         compute_inflection : bool
@@ -1360,7 +1360,7 @@ class ModelSummarizer:
             Requires posterior_samples_technical to be available.
         """
         if output_dir is None:
-            output_dir = self.model.output_dir
+            output_dir = os.path.join(self.model.output_dir, self.model.label)
 
         if modality_name is None:
             modality_name = self.model.primary_modality
