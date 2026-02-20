@@ -71,7 +71,7 @@ if __name__ == "__main__":
         label=args.label,
         random_seed=seed,
         cores=args.cores,
-        primary_modality='gene'
+        modality_name='gene'
     )
 
     # Load technical and cis fits
