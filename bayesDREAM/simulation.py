@@ -5,6 +5,10 @@ Given a trans summary CSV (from save_trans_summary), cell metadata, and per-cell
 x_true values, this module reconstructs the additive Hill dose-response and
 samples NegBin observations to produce a synthetic count matrix suitable for
 re-fitting with bayesDREAM.
+
+IMPORTANT: Sum factors used for simulation are NOT the same as sum factors for
+downstream fitting. After simulation, recalculate sum factors from the simulated
+counts (e.g., via scran::calculateSumFactors) before fitting bayesDREAM.
 """
 
 import numpy as np
@@ -27,8 +31,8 @@ def simulate_from_trans_summary(
     x_true: Union[np.ndarray, pd.Series],
     x_counts: Union[np.ndarray, pd.Series],
     cis_gene: str,
+    sim_sum_factor: Union[np.ndarray, pd.Series, float] = 1.0,
     genes: Optional[list] = None,
-    sum_factor_col: str = 'sum_factor',
     group_col: str = 'technical_group_code',
     seed: Optional[int] = None,
 ) -> pd.DataFrame:
@@ -40,8 +44,12 @@ def simulate_from_trans_summary(
 
     The generative model is:
         y_pred = A + alpha * Hill(x; Vmax_a, K_a, n_a) + beta * Hill(x; Vmax_b, K_b, n_b)
-        mu_final = y_pred * alpha_y[group] * sum_factor
+        mu_final = y_pred * alpha_y[group] * sim_sum_factor
         y_obs ~ NegBin(total_count=phi_y, logits=log(mu_final) - log(phi_y))
+
+    IMPORTANT: sim_sum_factor controls the count scale during simulation. After
+    simulation, you must recalculate sum factors from the simulated counts before
+    fitting bayesDREAM (e.g., via scran::calculateSumFactors or similar).
 
     Parameters
     ----------
@@ -51,7 +59,7 @@ def simulate_from_trans_summary(
         Vmax_b_mean, K_b_mean, n_b_mean, beta_mean) and phi_y_mean.
         If technical groups are used, must contain group_{g}_alpha_y_mean columns.
     meta : pd.DataFrame
-        Cell metadata with columns: cell, guide, target, and sum_factor_col.
+        Cell metadata with columns: cell, guide, target.
         If technical groups are used, must contain group_col.
     x_true : array-like, shape (n_cells,)
         Per-cell x_true values (cis gene expression), aligned to meta rows.
@@ -59,10 +67,15 @@ def simulate_from_trans_summary(
         Per-cell raw counts for the cis gene, used as-is in the output matrix.
     cis_gene : str
         Name of the cis gene (added as a row in the output count matrix).
+    sim_sum_factor : array-like or float
+        Per-cell sum factors for simulation. Controls the count scale of
+        simulated data. Can be:
+        - float: same value for all cells (default: 1.0)
+        - array of shape (n_cells,): per-cell values
+        This is NOT the sum factor for downstream fitting. Recalculate sum
+        factors from the simulated counts before fitting bayesDREAM.
     genes : list of str, optional
         Subset of genes to simulate. Default: all genes in trans_summary_df.
-    sum_factor_col : str
-        Column in meta for sum factors (default: 'sum_factor').
     group_col : str
         Column in meta for technical group codes (default: 'technical_group_code').
     seed : int, optional
@@ -89,7 +102,15 @@ def simulate_from_trans_summary(
             f"meta has {len(meta)} rows but x_true has {n_cells} elements"
         )
 
-    sum_factors = meta[sum_factor_col].values.astype(float)
+    # Handle sim_sum_factor
+    if np.isscalar(sim_sum_factor):
+        sum_factors = np.full(n_cells, float(sim_sum_factor))
+    else:
+        sum_factors = np.asarray(sim_sum_factor, dtype=float)
+        if len(sum_factors) != n_cells:
+            raise ValueError(
+                f"sim_sum_factor has {len(sum_factors)} elements but expected {n_cells}"
+            )
 
     # Determine which genes to simulate
     df = trans_summary_df.copy()
@@ -184,7 +205,6 @@ def simulate_from_trans_summary(
     )
 
     if alpha_y_cols and group_col in meta.columns:
-        n_groups = len(alpha_y_cols)
         groups = meta[group_col].values.astype(int)
 
         # Build alpha_y matrix: (n_genes, n_groups)
