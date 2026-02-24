@@ -1140,22 +1140,17 @@ class ModelSummarizer:
         if not hasattr(self.model, 'x_true') or self.model.x_true is None:
             raise ValueError("Cis fit not found. Run fit_cis() first.")
 
-        # Get x_true samples
+        # Get x_true samples — shape is [n_samples, n_cells] (cell-level)
         if hasattr(self.model, 'posterior_samples_cis') and 'x_true' in self.model.posterior_samples_cis:
-            x_true_samples = self.model.posterior_samples_cis['x_true']  # [n_samples, n_guides]
-            if isinstance(x_true_samples, torch.Tensor):
-                x_true_samples = x_true_samples.cpu().numpy()
+            x_true_cell_samples = self.model.posterior_samples_cis['x_true']
+            if isinstance(x_true_cell_samples, torch.Tensor):
+                x_true_cell_samples = x_true_cell_samples.cpu().numpy()
         else:
             # Use point estimate
-            x_true = self.model.x_true
-            if isinstance(x_true, torch.Tensor):
-                x_true = x_true.cpu().numpy()
-            x_true_samples = x_true[np.newaxis, :]  # [1, n_guides]
-
-        # Compute mean and CI per guide
-        x_true_mean = x_true_samples.mean(axis=0)
-        x_true_lower = np.quantile(x_true_samples, 0.025, axis=0)
-        x_true_upper = np.quantile(x_true_samples, 0.975, axis=0)
+            x_true_pt = self.model.x_true
+            if isinstance(x_true_pt, torch.Tensor):
+                x_true_pt = x_true_pt.cpu().numpy()
+            x_true_cell_samples = x_true_pt[np.newaxis, :]  # [1, n_cells]
 
         # Get guide-level metadata
         guide_meta = self.model.meta.groupby('guide').agg({
@@ -1164,6 +1159,25 @@ class ModelSummarizer:
         }).rename(columns={'cell': 'n_cells'})
 
         guides = guide_meta.index.tolist()
+
+        # Aggregate x_true from cell-level to guide-level (mean over cells per guide)
+        guide_to_cell_indices = {
+            g: self.model.meta.index[self.model.meta['guide'] == g].tolist()
+            for g in guides
+        }
+
+        # Build [n_samples, n_guides] by averaging cells within each guide
+        n_samples = x_true_cell_samples.shape[0]
+        n_guides = len(guides)
+        x_true_guide_samples = np.zeros((n_samples, n_guides))
+        for gi, g in enumerate(guides):
+            cell_idx = guide_to_cell_indices[g]
+            x_true_guide_samples[:, gi] = x_true_cell_samples[:, cell_idx].mean(axis=1)
+
+        # Compute mean and CI per guide
+        x_true_mean = x_true_guide_samples.mean(axis=0)
+        x_true_lower = np.quantile(x_true_guide_samples, 0.025, axis=0)
+        x_true_upper = np.quantile(x_true_guide_samples, 0.975, axis=0)
 
         # Get raw counts from cis modality
         cis_mod = self.model.get_modality('cis')
@@ -1204,9 +1218,6 @@ class ModelSummarizer:
 
         # Build cell-level DataFrame if requested
         if include_cell_level:
-            # Map guide-level x_true to cells
-            guide_to_idx = {g: i for i, g in enumerate(guides)}
-
             cell_data = {
                 'cell': self.model.meta['cell'].values,
                 'guide': self.model.meta['guide'].values,
@@ -1217,14 +1228,10 @@ class ModelSummarizer:
             if 'cell_line' in self.model.meta.columns:
                 cell_data['cell_line'] = self.model.meta['cell_line'].values
 
-            # Add x_true (same for all cells in a guide)
-            cell_x_true_mean = np.array([x_true_mean[guide_to_idx[g]] for g in self.model.meta['guide']])
-            cell_x_true_lower = np.array([x_true_lower[guide_to_idx[g]] for g in self.model.meta['guide']])
-            cell_x_true_upper = np.array([x_true_upper[guide_to_idx[g]] for g in self.model.meta['guide']])
-
-            cell_data['x_true_mean'] = cell_x_true_mean
-            cell_data['x_true_lower'] = cell_x_true_lower
-            cell_data['x_true_upper'] = cell_x_true_upper
+            # Use cell-level x_true directly from posterior samples
+            cell_data['x_true_mean'] = x_true_cell_samples.mean(axis=0)
+            cell_data['x_true_lower'] = np.quantile(x_true_cell_samples, 0.025, axis=0)
+            cell_data['x_true_upper'] = np.quantile(x_true_cell_samples, 0.975, axis=0)
             cell_data['raw_counts'] = cis_counts
 
             cell_df = pd.DataFrame(cell_data)
@@ -1339,6 +1346,10 @@ class ModelSummarizer:
         For polynomial:
         - coef_{i}_mean, coef_{i}_lower, coef_{i}_upper: Coefficient i
         - full_log2fc_mean, full_log2fc_lower, full_log2fc_upper: Full dynamic range
+
+        Overdispersion and technical group effects (for simulation):
+        - phi_y_mean, phi_y_lower, phi_y_upper: NB overdispersion (phi_y = 1/o_y^2)
+        - group_{g}_alpha_y_mean: Technical group effect for group g (from fit_technical)
 
         Parameters
         ----------
@@ -1524,6 +1535,41 @@ class ModelSummarizer:
                 x_obs_min=x_obs_min,
                 x_obs_max=x_obs_max
             )
+
+        # Add phi_y (overdispersion) from posterior o_y: phi_y = 1 / o_y^2
+        if 'o_y' in posterior:
+            o_y = posterior['o_y']
+            if isinstance(o_y, torch.Tensor):
+                o_y = o_y.cpu().numpy()
+            # Handle [n_samples, n_features] or [n_samples, 1, n_features]
+            if o_y.ndim == 3 and o_y.shape[1] == 1:
+                o_y = o_y.squeeze(1)
+            phi_y = 1.0 / (o_y ** 2)
+            if phi_y.ndim >= 2:
+                data['phi_y_mean'] = phi_y.mean(axis=0)
+                data['phi_y_lower'] = np.quantile(phi_y, 0.025, axis=0)
+                data['phi_y_upper'] = np.quantile(phi_y, 0.975, axis=0)
+            else:
+                data['phi_y_mean'] = phi_y
+                data['phi_y_lower'] = phi_y
+                data['phi_y_upper'] = phi_y
+
+        # Add alpha_y (technical group effects) from modality.alpha_y_prefit
+        if hasattr(modality, 'alpha_y_prefit') and modality.alpha_y_prefit is not None:
+            # Get alpha_y (prefer distribution-specific versions)
+            if hasattr(modality, 'alpha_y_prefit_mult') and modality.alpha_y_prefit_mult is not None:
+                alpha_y_tech = modality.alpha_y_prefit_mult
+            elif hasattr(modality, 'alpha_y_prefit_add') and modality.alpha_y_prefit_add is not None:
+                alpha_y_tech = modality.alpha_y_prefit_add
+            else:
+                alpha_y_tech = modality.alpha_y_prefit
+            if isinstance(alpha_y_tech, torch.Tensor):
+                alpha_y_tech = alpha_y_tech.cpu().numpy()
+            # Shape: [n_samples, n_groups, n_features]
+            alpha_y_mean = alpha_y_tech.mean(axis=0)  # [n_groups, n_features]
+            n_groups = alpha_y_mean.shape[0]
+            for g in range(n_groups):
+                data[f'group_{g}_alpha_y_mean'] = alpha_y_mean[g, :]
 
         df = pd.DataFrame(data)
 

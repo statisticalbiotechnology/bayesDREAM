@@ -404,6 +404,22 @@ class CisFitter:
             G = self.model.meta['guide_code'].nunique()
             guides_tensor = torch.tensor(self.model.meta['guide_code'].values, dtype=torch.long, device=self.model.device)
 
+        # Validate minimum data requirements for stable initialization
+        min_guides = 3
+        min_cells_per_guide = 5
+        if self.model.is_high_moi:
+            cells_per_guide = self.model.guide_assignment.sum(dim=0)  # [G]
+            n_adequate = int((cells_per_guide >= min_cells_per_guide).sum())
+        else:
+            guide_counts = self.model.meta['guide_code'].value_counts()
+            n_adequate = int((guide_counts >= min_cells_per_guide).sum())
+        if n_adequate < min_guides:
+            raise ValueError(
+                f"fit_cis requires at least {min_guides} guides with >= {min_cells_per_guide} cells each, "
+                f"but only {n_adequate} guides meet this criterion. "
+                f"Subsetting to too few cells/guides will produce unreliable initializations."
+            )
+
         # Use cis_counts from modality-specific lookup (or traditional self.model.counts)
         x_obs_tensor = torch.tensor(cis_counts, dtype=torch.float32, device=self.model.device)
 
