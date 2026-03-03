@@ -236,6 +236,7 @@ class CisFitter:
         epsilon: float = 1e-6,
         alpha_dirichlet: float = 0.1,
         minibatch_size: int = None,
+        predictive_on_cpu: bool = True,
         independent_mu_sigma: bool = False,
         **kwargs
     ):
@@ -276,6 +277,9 @@ class CisFitter:
             Number of SVI iterations
         nsamples : int
             Number of posterior samples
+        predictive_on_cpu : bool
+            If True (default), run posterior Predictive sampling on CPU after SVI
+            to reduce GPU memory pressure. Set False to keep Predictive on GPU.
         alpha_ewma : float
             Exponential weight for smoothing the ELBO
         tolerance : float
@@ -615,6 +619,7 @@ class CisFitter:
         svi = pyro.infer.SVI(self._model_x, guide_x, optimizer,
                              loss=pyro.infer.Trace_ELBO())
 
+        original_device = self.model.device
         losses = []
         smoothed_loss = None
         for step in range(niters):
@@ -665,10 +670,10 @@ class CisFitter:
             
 
         # Move to CPU if using too much GPU memory for Predictive
-        run_on_cpu = self.model.device.type != "cpu"
+        run_on_cpu = predictive_on_cpu and self.model.device.type != "cpu"
 
         if run_on_cpu:
-            print("[INFO] Running Predictive on CPU to reduce GPU memory pressure...")
+            print(f"[INFO] SVI completed on {original_device}. Running Predictive on CPU to reduce GPU memory pressure...")
             guide_x.to("cpu")
             self.model.device = torch.device("cpu")
 
@@ -762,7 +767,7 @@ class CisFitter:
                 gc.collect()
 
         if run_on_cpu:
-            self.model.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            self.model.device = original_device
             print("[INFO] Reset self.model.device to:", self.model.device)
 
         for k, v in posterior_samples_x.items():
