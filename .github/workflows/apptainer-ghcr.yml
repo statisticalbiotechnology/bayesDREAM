@@ -12,21 +12,27 @@ permissions:
   contents: read
   packages: write
 
-env:
-  DEF_FILE: apptainer/bayesdream_cpu.def
-  SIF_FILE: bayesdream_cpu.sif
-
 jobs:
   build-and-push:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - arch: amd64
+          - flavor: cpu
+            arch: amd64
             runner: ubuntu-latest
-          - arch: arm64
-            # GitHub-hosted ARM64 Linux runner
+            def_file: apptainer/bayesdream_cpu.def
+            sif_file: bayesdream_cpu.sif
+          - flavor: cpu
+            arch: arm64
             runner: ubuntu-24.04-arm
+            def_file: apptainer/bayesdream_cpu.def
+            sif_file: bayesdream_cpu.sif
+          - flavor: cuda
+            arch: amd64
+            runner: ubuntu-latest
+            def_file: apptainer/bayesdream_cuda.def
+            sif_file: bayesdream_cuda.sif
     runs-on: ${{ matrix.runner }}
 
     steps:
@@ -48,10 +54,10 @@ jobs:
 
       - name: Build SIF from definition
         run: |
-          test -f "$DEF_FILE"
-          sudo apptainer build "$SIF_FILE" "$DEF_FILE"
-          sudo chown "$USER":"$USER" "$SIF_FILE"
-          ls -lh "$SIF_FILE"
+          test -f "${{ matrix.def_file }}"
+          sudo apptainer build "${{ matrix.sif_file }}" "${{ matrix.def_file }}"
+          sudo chown "$USER":"$USER" "${{ matrix.sif_file }}"
+          ls -lh "${{ matrix.sif_file }}"
 
       - name: Install ORAS
         run: |
@@ -72,14 +78,15 @@ jobs:
           REPO_LC="$(basename "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
           REPO_BASE="ghcr.io/${OWNER_LC}/${REPO_LC}-apptainer"
           ARCH="${{ matrix.arch }}"
+          FLAVOR="${{ matrix.flavor }}"
 
           SHA_SHORT="${GITHUB_SHA::12}"
           BRANCH_SAFE="$(echo "${GITHUB_REF_NAME}" | tr '[:upper:]' '[:lower:]' | tr '/_' '-' | tr -cd 'a-z0-9.-')"
 
           echo "repo_base=${REPO_BASE}" >> "$GITHUB_OUTPUT"
-          echo "sha_ref=${REPO_BASE}:cpu-${ARCH}-sha-${SHA_SHORT}" >> "$GITHUB_OUTPUT"
-          echo "branch_ref=${REPO_BASE}:cpu-${ARCH}-${BRANCH_SAFE}" >> "$GITHUB_OUTPUT"
-          echo "latest_ref=${REPO_BASE}:cpu-${ARCH}-latest" >> "$GITHUB_OUTPUT"
+          echo "sha_ref=${REPO_BASE}:${FLAVOR}-${ARCH}-sha-${SHA_SHORT}" >> "$GITHUB_OUTPUT"
+          echo "branch_ref=${REPO_BASE}:${FLAVOR}-${ARCH}-${BRANCH_SAFE}" >> "$GITHUB_OUTPUT"
+          echo "latest_ref=${REPO_BASE}:${FLAVOR}-${ARCH}-latest" >> "$GITHUB_OUTPUT"
 
       - name: Login to GHCR
         env:
@@ -91,25 +98,25 @@ jobs:
         run: |
           oras push "${{ steps.refs.outputs.sha_ref }}" \
             --artifact-type application/vnd.sylabs.sif.config.v1+json \
-            "${SIF_FILE}:application/vnd.sylabs.sif.layer.v1.sif"
+            "${{ matrix.sif_file }}:application/vnd.sylabs.sif.layer.v1.sif"
 
       - name: Push branch tag
         if: startsWith(github.ref, 'refs/heads/')
         run: |
           oras push "${{ steps.refs.outputs.branch_ref }}" \
             --artifact-type application/vnd.sylabs.sif.config.v1+json \
-            "${SIF_FILE}:application/vnd.sylabs.sif.layer.v1.sif"
+            "${{ matrix.sif_file }}:application/vnd.sylabs.sif.layer.v1.sif"
 
       - name: Push latest tag on default branch
         if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         run: |
           oras push "${{ steps.refs.outputs.latest_ref }}" \
             --artifact-type application/vnd.sylabs.sif.config.v1+json \
-            "${SIF_FILE}:application/vnd.sylabs.sif.layer.v1.sif"
+            "${{ matrix.sif_file }}:application/vnd.sylabs.sif.layer.v1.sif"
 
       - name: Upload SIF as workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bayesdream-cpu-sif-${{ matrix.arch }}
-          path: ${{ env.SIF_FILE }}
+          name: bayesdream-${{ matrix.flavor }}-sif-${{ matrix.arch }}
+          path: ${{ matrix.sif_file }}
           if-no-files-found: error
