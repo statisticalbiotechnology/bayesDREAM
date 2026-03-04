@@ -159,6 +159,10 @@ def _run_fit_cis(model: bayesDREAM, cfg: Dict[str, Any]) -> None:
         load_args = _normalize_stage_args(cis_cfg.get("load_technical"))
         model.load_technical_fit(**load_args)
 
+    if _is_enabled(cis_cfg.get("adjust_ntc_sum_factor"), default=False):
+        adjust_args = _normalize_stage_args(cis_cfg.get("adjust_ntc_sum_factor"))
+        model.adjust_ntc_sum_factor(**adjust_args)
+
     fit_args = _normalize_stage_args(cis_cfg.get("fit"))
     model.fit_cis(**fit_args)
 
