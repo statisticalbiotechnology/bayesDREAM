@@ -33,6 +33,11 @@ jobs:
             runner: ubuntu-latest
             def_file: apptainer/bayesdream_cuda.def
             sif_file: bayesdream_cuda.sif
+          - flavor: rocm
+            arch: amd64
+            runner: ubuntu-latest
+            def_file: apptainer/bayesdream_rocm.def
+            sif_file: bayesdream_rocm.sif
     runs-on: ${{ matrix.runner }}
 
     steps:

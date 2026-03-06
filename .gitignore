@@ -81,6 +81,8 @@ toydata/cell_meta.csv
 toydata/gene_counts.csv
 toydata/toydata/
 
+.snakemake/
+
 # R
 .Rhistory
 .RData

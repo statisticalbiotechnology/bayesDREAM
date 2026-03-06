@@ -8,7 +8,7 @@ This workflow runs the Typer CLI stages in order:
 It supports:
 - container execution via Apptainer (including ORAS refs)
 - local execution via your installed Python environment
-- default GPU container usage when NVIDIA is detected
+- default GPU container usage when NVIDIA (`nvidia-smi`) or AMD (`rocm-smi`) is detected
 
 ## Files
 
@@ -49,9 +49,12 @@ Set in `examples/snakemake/config.yaml`:
 
 With `execution.mode` resolving to container and `execution.prefer_gpu: true`:
 
-- if `nvidia-smi` is available and detects GPUs, the workflow uses:
+- if `nvidia-smi` detects a GPU:
   - `execution.image_gpu`
   - `apptainer exec --nv ...`
+- else if `rocm-smi` detects a GPU:
+  - `execution.image_rocm`
+  - `apptainer exec --rocm ...`
 - otherwise it uses `execution.image_cpu`
 
 ## Expected outputs
