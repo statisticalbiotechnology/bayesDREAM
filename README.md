@@ -72,9 +72,34 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
+## Apptainer Container
+
+CPU-first Apptainer recipe is provided for reproducible CLI and Snakemake runs:
+
+```bash
+apptainer build bayesdream_cpu.sif apptainer/bayesdream_cpu.def
+apptainer exec --bind $PWD:/work bayesdream_cpu.sif bayesdream run --config /work/config.yaml
+```
+
+See `apptainer/README.md` for Snakemake integration details.
+
 **Note:** `psutil` is recommended for automatic memory management during `fit_technical()`. Without it, the code will use conservative default batching strategies.
 
 ## Quick Start
+
+### CLI Workflow (Typer)
+
+After installing (`pip install -e .`), you can run the staged workflow from YAML config:
+
+```bash
+bayesdream run --config config.yaml
+bayesdream fit-technical --config config.yaml
+bayesdream fit-cis --config config.yaml
+bayesdream fit-trans --config config.yaml
+bayesdream report --config config.yaml
+```
+
+See `examples/cli_config.yaml` for a full template.
 
 ### Basic Usage (Gene Expression)
 

@@ -1,0 +1,72 @@
+Bootstrap: docker
+From: python:3.11-slim
+
+%labels
+    Author bayesDREAM Development Team
+    Description bayesDREAM ROCm container for CLI and Snakemake workflows
+
+%help
+    Build:
+      apptainer build bayesdream_rocm.sif apptainer/bayesdream_rocm.def
+
+    Run CLI (AMD GPUs):
+      apptainer exec --rocm bayesdream_rocm.sif bayesdream --help
+      apptainer exec --rocm bayesdream_rocm.sif bayesdream run --config /work/config.yaml
+
+    Snakemake usage example:
+      snakemake --use-singularity --singularity-args "--rocm --bind $PWD:/work"
+
+%environment
+    export LC_ALL=C.UTF-8
+    export LANG=C.UTF-8
+    export PYTHONUNBUFFERED=1
+    export OMP_NUM_THREADS=1
+    export OPENBLAS_NUM_THREADS=1
+    export MKL_NUM_THREADS=1
+    export NUMEXPR_NUM_THREADS=1
+
+%files
+    . /opt/bayesDREAM
+
+%post
+    set -eux
+
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        git \
+        ca-certificates \
+        tini
+    rm -rf /var/lib/apt/lists/*
+
+    python -m pip install --upgrade pip setuptools wheel
+
+    # ROCm-enabled PyTorch wheels (ROCm 6.2 runtime)
+    python -m pip install --no-cache-dir \
+        --index-url https://download.pytorch.org/whl/rocm6.2 \
+        torch torchvision torchaudio
+
+    # Install bayesDREAM dependencies and Typer CLI deps
+    python -m pip install --no-cache-dir \
+        numpy \
+        scipy \
+        pandas \
+        scikit-learn \
+        pyro-ppl \
+        matplotlib \
+        seaborn \
+        h5py \
+        psutil \
+        pyyaml \
+        typer
+
+    cd /opt/bayesDREAM
+    python -m pip install --no-cache-dir -e .
+
+%runscript
+    cd /opt/bayesDREAM
+    exec bayesdream "$@"
+
+%test
+    python -c "from bayesDREAM import bayesDREAM; print('bayesDREAM import ok')"
+    bayesdream --help >/dev/null
+    python -c "import torch; print('cuda_available=', torch.cuda.is_available(), 'hip_version=', torch.version.hip)"

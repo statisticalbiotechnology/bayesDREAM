@@ -80,6 +80,8 @@ toydata/Josie_gene_counts.csv
 toydata/cell_meta.csv
 toydata/toydata/
 
+.snakemake/
+
 # R
 .Rhistory
 .RData
