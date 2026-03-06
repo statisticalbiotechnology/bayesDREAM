@@ -31,7 +31,6 @@ cis:
     args:
       covariates: [lane, cell_line]
   fit:
-    technical_covariates: [cell_line]
     sum_factor_col: sum_factor_adj
     tolerance: 0
     niters: 100000

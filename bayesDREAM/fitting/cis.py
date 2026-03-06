@@ -369,13 +369,20 @@ class CisFitter:
             self.model.alpha_x_prefit = self.model.alpha_x_prefit.to(self.model.device)
 
         if technical_covariates:
+            new_technical_group_code = self.model.meta.groupby(technical_covariates).ngroup()
             if "technical_group_code" in self.model.meta.columns:
-                warnings.warn("technical_group already set. Overwriting.")
-                if self.model.alpha_x_prefit is not None:
-                    warnings.warn("Overwriting alpha_x prefit, and refitting.")
-                    self.model.alpha_x_prefit = None
+                old_technical_group_code = self.model.meta["technical_group_code"].values
+                groups_changed = not np.array_equal(old_technical_group_code, new_technical_group_code.values)
+                if groups_changed:
+                    warnings.warn("technical_group already set. Overwriting with new covariate grouping.")
+                    if self.model.alpha_x_prefit is not None:
+                        warnings.warn("Technical groups changed; discarding alpha_x_prefit and refitting.")
+                        self.model.alpha_x_prefit = None
+                else:
+                    # Keep loaded alpha_x_prefit when grouping is unchanged (common in stepwise workflows)
+                    pass
 
-            self.model.meta["technical_group_code"] = self.model.meta.groupby(technical_covariates).ngroup()
+            self.model.meta["technical_group_code"] = new_technical_group_code
             C = self.model.meta['technical_group_code'].nunique()
             groups_tensor = torch.tensor(self.model.meta['technical_group_code'].values, dtype=torch.long, device=self.model.device)
 
@@ -615,6 +622,7 @@ class CisFitter:
             return pyro.infer.autoguide.initialization.init_to_median(site)
 
         guide_x = pyro.infer.autoguide.AutoNormalMessenger(self._model_x, init_loc_fn=init_loc_fn)
+        guide_x.to(self.model.device)
         optimizer = pyro.optim.Adam({"lr": lr})
         svi = pyro.infer.SVI(self._model_x, guide_x, optimizer,
                              loss=pyro.infer.Trace_ELBO())

@@ -162,8 +162,8 @@ rule fit_technical:
     shell:
         r"""
         set -euo pipefail
-        mkdir -p {params.run_dir}
-        {params.cmd} 2>&1 | tee {log}
+        mkdir -p {params.run_dir:q}
+        {params.cmd} 2>&1 | tee {log:q}
         """
 
 
@@ -183,6 +183,6 @@ rule fit_cis:
     shell:
         r"""
         set -euo pipefail
-        mkdir -p {params.run_dir}
-        {params.cmd} 2>&1 | tee {log}
+        mkdir -p {params.run_dir:q}
+        {params.cmd} 2>&1 | tee {log:q}
         """
