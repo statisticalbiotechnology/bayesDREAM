@@ -154,16 +154,27 @@ def _run_fit_technical(model: bayesDREAM, cfg: Dict[str, Any]) -> None:
 
 def _run_fit_cis(model: bayesDREAM, cfg: Dict[str, Any]) -> None:
     cis_cfg = cfg.get("cis") or {}
+    tech_cfg = cfg.get("technical") or {}
 
     if _is_enabled(cis_cfg.get("load_technical"), default=True):
         load_args = _normalize_stage_args(cis_cfg.get("load_technical"))
         model.load_technical_fit(**load_args)
 
+    # Stepwise mode may start from a fresh model object where technical_group_code
+    # was not persisted in metadata. Recreate it before fit_cis when possible.
+    fit_args = _normalize_stage_args(cis_cfg.get("fit"))
+    if (
+        model.alpha_x_prefit is not None
+        and "technical_group_code" not in model.meta.columns
+    ):
+        covariates = fit_args.get("technical_covariates") or tech_cfg.get("set_technical_groups")
+        if covariates:
+            model.set_technical_groups(covariates)
+
     if _is_enabled(cis_cfg.get("adjust_ntc_sum_factor"), default=False):
         adjust_args = _normalize_stage_args(cis_cfg.get("adjust_ntc_sum_factor"))
         model.adjust_ntc_sum_factor(**adjust_args)
 
-    fit_args = _normalize_stage_args(cis_cfg.get("fit"))
     model.fit_cis(**fit_args)
 
     if _is_enabled(cis_cfg.get("save"), default=True):

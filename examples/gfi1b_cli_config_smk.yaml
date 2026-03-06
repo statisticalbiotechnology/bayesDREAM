@@ -1,17 +1,16 @@
-# GFI1B pipeline config mirroring run_gfi1b_notebook_cells.py workflow
+# GFI1B pipeline config for Snakemake orchestration (relative paths).
 
 data:
-  meta: /work/GFI1B_run/meta_cis_GFI1B.csv
-  counts: /work/GFI1B_run/gene_counts.csv
+  meta: GFI1B_run/meta_cis_GFI1B.csv
+  counts: GFI1B_run/gene_counts.csv
   counts_read_csv_kwargs: {index_col: 0}
 
 model:
   modality_name: gene
   cis_gene: GFI1B
-  output_dir: /work/output
+  output_dir: output
   label: testing_20260224
   guide_covariates: [cell_line]
-  device: cpu
 
 run:
   steps: [technical, cis]
