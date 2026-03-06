@@ -57,13 +57,20 @@ MODE = str(EXEC_CFG.get("mode", "auto")).lower()
 if MODE not in {"auto", "container", "local"}:
     raise ValueError(f"execution.mode must be one of auto/container/local, got: {MODE}")
 
-APPTAINER_AVAILABLE = shutil.which("apptainer") is not None
+LOCAL_PYTHON = str(EXEC_CFG.get("local_python", "python"))
+CONTAINER_RUNTIME = shutil.which("apptainer") or shutil.which("singularity")
+CONTAINER_AVAILABLE = CONTAINER_RUNTIME is not None
+
 if MODE == "local":
     USE_CONTAINER = False
 elif MODE == "container":
+    if not CONTAINER_AVAILABLE:
+        raise RuntimeError(
+            "execution.mode=container but neither 'apptainer' nor 'singularity' is available in PATH."
+        )
     USE_CONTAINER = True
 else:
-    USE_CONTAINER = APPTAINER_AVAILABLE
+    USE_CONTAINER = CONTAINER_AVAILABLE
 
 PREFER_GPU = bool(EXEC_CFG.get("prefer_gpu", True))
 HAS_NVIDIA_GPU = _has_nvidia_gpu()
@@ -88,7 +95,20 @@ IMAGE_ROCM = EXEC_CFG.get(
     "image_rocm",
     "oras://ghcr.io/statisticalbiotechnology/bayesdream-apptainer:rocm-amd64-latest",
 )
-LOCAL_PYTHON = str(EXEC_CFG.get("local_python", "python"))
+
+if not USE_CONTAINER:
+    try:
+        subprocess.check_output(
+            [LOCAL_PYTHON, "-c", "import torch"],
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+    except Exception as e:
+        raise RuntimeError(
+            "Snakemake resolved to local execution, but local_python cannot import torch. "
+            "Either load apptainer/singularity (or set execution.mode=container) or set "
+            "execution.local_python to an environment with torch+pyro installed."
+        ) from e
 
 if USE_CONTAINER:
     if USE_GPU and GPU_FLAVOR == "cuda":
@@ -122,15 +142,17 @@ print(
 )
 if USE_CONTAINER:
     print(f"[snakemake] container_image={CONTAINER_IMAGE}")
+    print(f"[snakemake] container_runtime={CONTAINER_RUNTIME}")
 
 
 def cli_cmd(subcommand: str) -> str:
     if USE_CONTAINER:
+        runtime_arg = shlex.quote(CONTAINER_RUNTIME)
         bind_arg = shlex.quote(f"{PROJECT_DIR}:/work")
         image_arg = shlex.quote(CONTAINER_IMAGE)
         cfg_arg = shlex.quote(f"/work/{BD_CFG_REL}")
         return (
-            f"apptainer exec --cleanenv {CONTAINER_GPU_ARG}--bind {bind_arg} {image_arg} "
+            f"{runtime_arg} exec --cleanenv {CONTAINER_GPU_ARG}--bind {bind_arg} {image_arg} "
             f"bash -lc \"cd /work && python -m bayesDREAM {subcommand} --config {cfg_arg}\""
         )
 
