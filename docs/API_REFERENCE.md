@@ -518,7 +518,8 @@ model.fit_cis(
     independent_mu_sigma=False,
     cis_model='hierarchical',
     n_quadrature=16,
-    refit_phi=True
+    refit_phi=True,
+    pool_scale='learn'
 )
 ```
 
@@ -556,6 +557,7 @@ Fit cis model to estimate direct effects on the targeted feature.
   - Only with `cis_model='hierarchical'`
 - `cis_model` (str): `'hierarchical'` (default, original model) or `'marginal'` (per-cell latent integrated out, full-rank guide, early stopping; better calibrated and faster). See `docs/CIS_MARGINAL_MODEL.md`
 - `n_quadrature` (int): `'marginal'` only: Gauss-Hermite nodes. Default: 16
+- `pool_scale` (`'learn'`, float or None): `'marginal'` only: partial pooling of guide levels within each target. `'learn'` estimates the within-target SD, a number fixes it (log2 units), None disables pooling. Default: `'learn'`
 - `refit_phi` (bool): `'marginal'` only: re-estimate the cis NB dispersion with a prior centred on the `fit_ntc` value. Default: True
 
 **Side Effects:**
