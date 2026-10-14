@@ -58,11 +58,12 @@ def _high_moi_data(seed=0, n_cells=1500):
     return meta, counts, assign, guide_meta
 
 
-def _fit(model):
+def _fit(model, pool_scale='learn'):
     pyro.set_rng_seed(0)
     model.set_technical_groups(['cell_line'])
     model.fit_ntc(sum_factor_col='sum_factor', niters=NTC_ITERS, nsamples=50)
-    model.fit_cis(sum_factor_col='sum_factor', cis_model='marginal', niters=5000, nsamples=200)
+    model.fit_cis(sum_factor_col='sum_factor', cis_model='marginal', niters=5000, nsamples=200,
+                  pool_scale=pool_scale)
     return model
 
 
@@ -87,12 +88,14 @@ def test_posterior_keys_and_shapes(single_guide_fit):
     model, truth = single_guide_fit
     ps = model.posterior_samples_cis
     N, G = len(model.meta), len(truth)
-    for k in ('x_true', 'log_x_true', 'x_eff_g', 'log2_x_eff_g', 'sigma_eff', 'phi_x'):
+    for k in ('x_true', 'log_x_true', 'x_eff_g', 'log2_x_eff_g', 'sigma_eff', 'phi_x',
+              'log2_x_target', 'tau_guide'):
         assert k in ps
     assert ps['x_true'].shape == (200, N)
     assert ps['x_eff_g'].shape == (200, G)
     assert model.x_true.shape == (N,)
     assert torch.isfinite(ps['log_x_true']).all()
+    assert ps['log2_x_target'].shape == (200, 2)   # targets: ntc and CIS
 
 
 def test_single_guide_recovery(single_guide_fit):
@@ -113,3 +116,22 @@ def test_invalid_cis_model(single_guide_fit):
     model, _ = single_guide_fit
     with pytest.raises(ValueError):
         model.fit_cis(sum_factor_col='sum_factor', cis_model='nope')
+
+
+def test_no_pooling_and_fixed_pooling(single_guide_fit):
+    model, truth = single_guide_fit
+    names = model.meta.groupby('guide_code')['guide'].first().sort_index().values
+    for pool in (None, 1.0):
+        model.fit_cis(sum_factor_col='sum_factor', cis_model='marginal', niters=5000, nsamples=100,
+                      pool_scale=pool)
+        ps = model.posterior_samples_cis
+        assert ('log2_x_target' in ps) == (pool is not None)
+        assert 'tau_guide' not in ps
+        est = ps['log2_x_eff_g'].median(0).values.numpy()
+        assert np.sqrt(np.mean((est - truth.loc[names].values) ** 2)) < 0.3
+
+
+def test_invalid_pool_scale(single_guide_fit):
+    model, _ = single_guide_fit
+    with pytest.raises(ValueError):
+        model.fit_cis(sum_factor_col='sum_factor', cis_model='marginal', pool_scale=-1.0)

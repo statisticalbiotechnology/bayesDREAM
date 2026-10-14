@@ -200,33 +200,51 @@ class CisFitter:
             )
 
     def _model_x_marginal(self, x_obs, log_offset, guides, assign, ntc_mask, G, phi_ntc,
-                          m0, z, log_w, refit_phi):
+                          m0, z, log_w, refit_phi, group=None, n_groups=0, pool_scale=None):
         """
         Cis model with the per-cell latent integrated out.
 
-        Single guide:  l_g ~ N(m0, 3)                               (guide log2 level)
-        High MOI:      b ~ N(m0, 3), d_g ~ N(0, 3) for targeting guides, d_g = 0 for NTC,
-                       l_i = b + sum_g A_ig d_g
-        Cells:         log2 x_i ~ N(l, s),  s ~ HalfNormal(1)       (shared cell-level SD)
-                       y_i ~ NB(phi, alpha_i sf_i x_i)
-                       phi = phi_ntc, or phi ~ LogNormal(log phi_ntc, 1) if refit_phi
+        Guide levels, single guide (l_g = guide log2 level):
+            no pooling:   l_g ~ N(m0, 3)
+            pooling:      m_k ~ N(m0, 3) per target k,  l_g ~ N(m_k(g), tau)
+        High MOI (l_i = b + sum_g A_ig d_g, d_g = 0 for NTC guides):
+            b ~ N(m0, 3);  targeting guides d_g ~ N(0, 3), or with pooling
+            m_k ~ N(0, 3),  d_g ~ N(m_k(g), tau)
+        tau ~ HalfNormal(1) if pool_scale == 'learn', else tau = pool_scale (fixed).
+        Cells:  log2 x_i ~ N(l, s),  s ~ HalfNormal(1)  (shared cell-level SD)
+                y_i ~ NB(phi, alpha_i sf_i x_i)
+                phi = phi_ntc, or phi ~ LogNormal(log phi_ntc, 1) if refit_phi
         log2 x_i is integrated out with Gauss-Hermite nodes z (weights exp(log_w)).
         """
+        dev = x_obs.device
         if refit_phi:
             phi = pyro.sample("phi_x", dist.LogNormal(torch.log(phi_ntc), 1.0))
         else:
             phi = phi_ntc
-        s = pyro.sample("sigma_x_cell", dist.HalfNormal(torch.ones((), device=x_obs.device)))
+        s = pyro.sample("sigma_x_cell", dist.HalfNormal(torch.ones((), device=dev)))
+
+        centre = m0 if assign is None else torch.zeros((), device=dev)
+        if pool_scale is None:
+            loc, scale = centre, 3.0
+        else:
+            with pyro.plate("targets_plate", n_groups):
+                m_k = pyro.sample("log2_x_target", dist.Normal(centre, 3.0))
+            if pool_scale == 'learn':
+                scale = pyro.sample("tau_guide", dist.HalfNormal(torch.ones((), device=dev)))
+            else:
+                scale = float(pool_scale)
+            loc = m_k[group]
+
         if assign is None:
             with pyro.plate("guides_plate", G):
-                l_g = pyro.sample("log2_x_eff_g", dist.Normal(m0, 3.0))
+                l_g = pyro.sample("log2_x_eff_g", dist.Normal(loc, scale))
             l_cell = l_g[guides]
         else:
             b = pyro.sample("log2_x_ntc", dist.Normal(m0, 3.0))
             n_t = int((~ntc_mask).sum())
             with pyro.plate("targeting_guides_plate", n_t):
-                d_t = pyro.sample("delta_g", dist.Normal(torch.zeros((), device=x_obs.device), 3.0))
-            d = torch.zeros(G, device=x_obs.device).index_put((~ntc_mask).nonzero(as_tuple=True), d_t)
+                d_t = pyro.sample("delta_g", dist.Normal(loc, scale))
+            d = torch.zeros(G, device=dev).index_put((~ntc_mask).nonzero(as_tuple=True), d_t)
             l_cell = b + assign @ d
         log_mu = (l_cell.unsqueeze(-1) + s * z) * np.log(2.0) + log_offset.unsqueeze(-1)  # [N, K]
         lp = dist.NegativeBinomial(total_count=phi, logits=log_mu - torch.log(phi),
@@ -234,9 +252,30 @@ class CisFitter:
         with pyro.plate("data_plate", x_obs.shape[0]):
             pyro.factor("x_obs", torch.logsumexp(lp + log_w, dim=-1))
 
+    def _guide_target_labels(self, G):
+        """One target label per guide (in guide_code / guide_assignment column order), or None."""
+        _ntc_variants = {'ntc', 'NTC', 'non-targeting', 'non-targeting-control', 'Non-Targeting'}
+        if self.model.is_high_moi:
+            if 'target' in self.model.guide_meta.columns:
+                labels = self.model.guide_meta['target'].tolist()
+            elif getattr(self.model, 'guide_targets_dict', None):
+                labels = []
+                for guide in self.model.guide_meta['guide']:
+                    targets = self.model.guide_targets_dict.get(guide, [])
+                    labels.append(self.model.cis_gene if self.model.cis_gene in targets
+                                  else ('ntc' if any(t in _ntc_variants for t in targets)
+                                        else (targets[0] if targets else 'ntc')))
+            else:
+                return None
+        else:
+            if 'target' not in self.model.meta.columns:
+                return None
+            labels = self.model.meta.groupby('guide_code')['target'].first().reindex(range(G)).tolist()
+        return ['ntc' if t in _ntc_variants else t for t in labels]
+
     def _fit_cis_marginal(self, N, G, guides_tensor, x_obs_tensor, log_offset, guide_means,
                           phi_ntc, lr, niters, nsamples, n_quadrature, refit_phi, tolerance,
-                          n_mean_field=2000, window=500, n_grid=64):
+                          pool_scale='learn', n_mean_field=2000, window=500, n_grid=64):
         dev = self.model.device
         guide_means = guide_means.to(dtype=torch.float32)  # float64 in high-MOI mode
         z_np, w_np = np.polynomial.hermite_e.hermegauss(n_quadrature)
@@ -249,14 +288,32 @@ class CisFitter:
             if not ntc_mask.any():
                 raise ValueError("cis_model='marginal' in high MOI mode needs at least one NTC guide.")
             b0 = guide_means[ntc_mask].mean()
-            init = {"log2_x_ntc": b0, "delta_g": guide_means[~ntc_mask] - b0}
+            lev0 = guide_means[~ntc_mask] - b0                     # levels of modelled guides
+            init = {"log2_x_ntc": b0, "delta_g": lev0}
         else:
             assign, ntc_mask = None, None
             b0 = guide_means.median()
-            init = {"log2_x_eff_g": guide_means.clone()}
-        init.update(sigma_x_cell=self._t(0.3), phi_x=phi_ntc)
+            lev0 = guide_means.clone()
+            init = {"log2_x_eff_g": lev0}
+        init.update(sigma_x_cell=self._t(0.3), phi_x=phi_ntc, tau_guide=self._t(0.5))
+
+        # Group the modelled guides by target for partial pooling
+        group, n_groups = None, 0
+        if pool_scale is not None:
+            labels = self._guide_target_labels(G)
+            if labels is None:
+                warnings.warn("No guide targets found; fitting cis_model='marginal' without pooling.")
+                pool_scale = None
+            else:
+                if ntc_mask is not None:
+                    labels = [t for t, is_ntc in zip(labels, ntc_mask.tolist()) if not is_ntc]
+                codes, uniq = pd.factorize(pd.Series(labels, dtype=object))
+                group = torch.tensor(codes, dtype=torch.long, device=dev)
+                n_groups = len(uniq)
+                init["log2_x_target"] = torch.stack(
+                    [lev0[group == k].mean() for k in range(n_groups)])
         args = (x_obs_tensor, log_offset, guides_tensor, assign, ntc_mask, G, phi_ntc,
-                b0, z, log_w, refit_phi)
+                b0, z, log_w, refit_phi, group, n_groups, pool_scale)
 
         # Mean-field warm start, then a full-rank Gaussian over all (2G or so) parameters.
         pyro.clear_param_store()
@@ -331,6 +388,9 @@ class CisFitter:
         }
         if assign is not None:
             samples["log2_x_ntc"] = b_s.cpu()
+        for k in ("log2_x_target", "tau_guide"):
+            if k in draws[0]:
+                samples[k] = torch.stack([d[k] for d in draws]).cpu()
         self.model.loss_x = losses
         self.model.posterior_samples_cis = samples
         self.model.x_true = samples["x_true"].median(dim=0).values
@@ -356,6 +416,7 @@ class CisFitter:
         n_quadrature: int = 16,
         refit_phi: bool = True,
         tolerance: float = 1e-4,
+        pool_scale='learn',
         **kwargs
     ):
         """
@@ -404,6 +465,10 @@ class CisFitter:
         refit_phi : bool
             'marginal' only: re-estimate the cis NB dispersion with a prior centred on the
             fit_ntc estimate. Needed because the NTC fit folds cell-level variation into phi.
+        pool_scale : 'learn', float or None
+            'marginal' only: partial pooling of guide levels within each target.
+            'learn' (default): guides of a target ~ N(target mean, tau), tau ~ HalfNormal(1).
+            A float fixes tau (log2 units). None: no pooling, each guide ~ N(m0, 3).
         tolerance : float
             'marginal' only: stop when the mean loss over the last 500 steps improves on the
             previous 500 by less than this (relative).
@@ -416,6 +481,9 @@ class CisFitter:
             raise ValueError("self.model.cis_gene must be set.")
         if cis_model not in ('hierarchical', 'marginal'):
             raise ValueError("cis_model must be 'hierarchical' or 'marginal'")
+        if not (pool_scale is None or pool_scale == 'learn'
+                or (isinstance(pool_scale, (int, float)) and pool_scale > 0)):
+            raise ValueError("pool_scale must be 'learn', a positive number or None")
         if cis_model == 'marginal' and independent_mu_sigma:
             raise ValueError("independent_mu_sigma is only supported with cis_model='hierarchical'")
 
@@ -748,6 +816,7 @@ class CisFitter:
                 N, G, guides_tensor, x_obs_tensor, log_offset, guide_means, phi_x_precomputed,
                 lr=1e-2 if lr is None else lr, niters=niters, nsamples=nsamples,
                 n_quadrature=n_quadrature, refit_phi=refit_phi, tolerance=tolerance,
+                pool_scale=pool_scale,
             )
             print("Finished fit_cis.")
             return
