@@ -199,6 +199,144 @@ class CisFitter:
                 obs=x_obs_tensor
             )
 
+    def _model_x_marginal(self, x_obs, log_offset, guides, assign, ntc_mask, G, phi_ntc,
+                          m0, z, log_w, refit_phi):
+        """
+        Cis model with the per-cell latent integrated out.
+
+        Single guide:  l_g ~ N(m0, 3)                               (guide log2 level)
+        High MOI:      b ~ N(m0, 3), d_g ~ N(0, 3) for targeting guides, d_g = 0 for NTC,
+                       l_i = b + sum_g A_ig d_g
+        Cells:         log2 x_i ~ N(l, s),  s ~ HalfNormal(1)       (shared cell-level SD)
+                       y_i ~ NB(phi, alpha_i sf_i x_i)
+                       phi = phi_ntc, or phi ~ LogNormal(log phi_ntc, 1) if refit_phi
+        log2 x_i is integrated out with Gauss-Hermite nodes z (weights exp(log_w)).
+        """
+        if refit_phi:
+            phi = pyro.sample("phi_x", dist.LogNormal(torch.log(phi_ntc), 1.0))
+        else:
+            phi = phi_ntc
+        s = pyro.sample("sigma_x_cell", dist.HalfNormal(torch.ones((), device=x_obs.device)))
+        if assign is None:
+            with pyro.plate("guides_plate", G):
+                l_g = pyro.sample("log2_x_eff_g", dist.Normal(m0, 3.0))
+            l_cell = l_g[guides]
+        else:
+            b = pyro.sample("log2_x_ntc", dist.Normal(m0, 3.0))
+            n_t = int((~ntc_mask).sum())
+            with pyro.plate("targeting_guides_plate", n_t):
+                d_t = pyro.sample("delta_g", dist.Normal(torch.zeros((), device=x_obs.device), 3.0))
+            d = torch.zeros(G, device=x_obs.device).index_put((~ntc_mask).nonzero(as_tuple=True), d_t)
+            l_cell = b + assign @ d
+        log_mu = (l_cell.unsqueeze(-1) + s * z) * np.log(2.0) + log_offset.unsqueeze(-1)  # [N, K]
+        lp = dist.NegativeBinomial(total_count=phi, logits=log_mu - torch.log(phi),
+                                   validate_args=False).log_prob(x_obs.unsqueeze(-1))
+        with pyro.plate("data_plate", x_obs.shape[0]):
+            pyro.factor("x_obs", torch.logsumexp(lp + log_w, dim=-1))
+
+    def _fit_cis_marginal(self, N, G, guides_tensor, x_obs_tensor, log_offset, guide_means,
+                          phi_ntc, lr, niters, nsamples, n_quadrature, refit_phi, tolerance,
+                          n_mean_field=2000, window=500, n_grid=64):
+        dev = self.model.device
+        guide_means = guide_means.to(dtype=torch.float32)  # float64 in high-MOI mode
+        z_np, w_np = np.polynomial.hermite_e.hermegauss(n_quadrature)
+        z = self._t(z_np)
+        log_w = self._t(np.log(w_np / np.sqrt(2 * np.pi)))
+
+        if self.model.is_high_moi:
+            assign = self.model.guide_assignment_tensor.to(device=dev, dtype=torch.float32)
+            ntc_mask = self.model._ntc_guide_mask
+            if not ntc_mask.any():
+                raise ValueError("cis_model='marginal' in high MOI mode needs at least one NTC guide.")
+            b0 = guide_means[ntc_mask].mean()
+            init = {"log2_x_ntc": b0, "delta_g": guide_means[~ntc_mask] - b0}
+        else:
+            assign, ntc_mask = None, None
+            b0 = guide_means.median()
+            init = {"log2_x_eff_g": guide_means.clone()}
+        init.update(sigma_x_cell=self._t(0.3), phi_x=phi_ntc)
+        args = (x_obs_tensor, log_offset, guides_tensor, assign, ntc_mask, G, phi_ntc,
+                b0, z, log_w, refit_phi)
+
+        # Mean-field warm start, then a full-rank Gaussian over all (2G or so) parameters.
+        pyro.clear_param_store()
+        init_fn = pyro.infer.autoguide.initialization.init_to_value(values=init)
+        guide = pyro.infer.autoguide.AutoNormal(self._model_x_marginal, init_loc_fn=init_fn, init_scale=0.05)
+        losses = []
+        phases = [(guide, min(n_mean_field, niters), lr), (None, niters, lr / 2)]
+        for guide_p, max_it, lr_p in phases:
+            if guide_p is None:
+                med = {k: v.detach() for k, v in guide.median(*args).items()}
+                pyro.clear_param_store()
+                guide = pyro.infer.autoguide.AutoMultivariateNormal(
+                    self._model_x_marginal,
+                    init_loc_fn=pyro.infer.autoguide.initialization.init_to_value(values=med),
+                    init_scale=0.02)
+            svi = pyro.infer.SVI(self._model_x_marginal, guide, pyro.optim.Adam({"lr": lr_p}),
+                                 loss=pyro.infer.Trace_ELBO())
+            phase_losses = []
+            w = window if guide_p is None else window // 2
+            for step in range(max_it):
+                phase_losses.append(svi.step(*args))
+                if (step + 1) % w == 0 and step + 1 >= 2 * w:
+                    prev = np.mean(phase_losses[-2 * w:-w])
+                    cur = np.mean(phase_losses[-w:])
+                    if (prev - cur) / abs(prev) < tolerance:
+                        break
+            losses += phase_losses
+            print(f"[INFO] fit_cis (marginal): {'full-rank' if guide_p is None else 'mean-field'} "
+                  f"phase stopped after {len(phase_losses)} steps, loss {np.mean(phase_losses[-w:]):.5e}")
+
+        # Posterior draws of guide-level parameters
+        with torch.no_grad():
+            draws = [guide(*args) for _ in range(nsamples)]
+        s_s = torch.stack([d["sigma_x_cell"] for d in draws])                       # [S]
+        phi_s = (torch.stack([d["phi_x"] for d in draws]) if refit_phi
+                 else phi_ntc.expand(nsamples))                                       # [S]
+        if assign is None:
+            l_g = torch.stack([d["log2_x_eff_g"] for d in draws])                    # [S, G]
+            l_cell_s = l_g[:, guides_tensor]                                         # [S, N]
+        else:
+            b_s = torch.stack([d["log2_x_ntc"] for d in draws])                      # [S]
+            d_full = torch.zeros(nsamples, G, device=dev)
+            d_full[:, ~ntc_mask] = torch.stack([d["delta_g"] for d in draws])
+            l_g = b_s.unsqueeze(-1) + d_full
+            l_cell_s = b_s.unsqueeze(-1) + d_full @ assign.T
+
+        # Per-cell log2 x: exact conditional posterior given each draw, on a z grid.
+        zg = torch.linspace(-5.0, 5.0, n_grid, device=dev)
+        dz = float(zg[1] - zg[0])
+        log_x = torch.empty(nsamples, N)
+        chunk = max(1, int(2e7 // (N * n_grid)))
+        with torch.no_grad():
+            for i in range(0, nsamples, chunk):
+                lc, sc, ph = l_cell_s[i:i + chunk], s_s[i:i + chunk], phi_s[i:i + chunk]
+                v = lc.unsqueeze(-1) + sc[:, None, None] * zg                         # [c, N, n_grid]
+                ph3 = ph[:, None, None]
+                lp = dist.NegativeBinomial(
+                    total_count=ph3, logits=v * np.log(2.0) + log_offset[:, None] - torch.log(ph3),
+                    validate_args=False).log_prob(x_obs_tensor[:, None]) - 0.5 * zg ** 2
+                k = torch.distributions.Categorical(logits=lp).sample()               # [c, N]
+                zk = zg[k] + (torch.rand_like(lc) - 0.5) * dz
+                log_x[i:i + chunk] = (lc + sc[:, None] * zk).cpu()
+
+        samples = {
+            "log2_x_eff_g": l_g.cpu(),
+            "x_eff_g": (2.0 ** l_g).cpu(),
+            "sigma_x_cell": s_s.cpu(),
+            "sigma_eff": s_s.unsqueeze(-1).expand(-1, G).cpu(),
+            "phi_x": phi_s.cpu(),
+            "log_x_true": log_x,
+            "x_true": 2.0 ** log_x,
+        }
+        if assign is not None:
+            samples["log2_x_ntc"] = b_s.cpu()
+        self.model.loss_x = losses
+        self.model.posterior_samples_cis = samples
+        self.model.x_true = samples["x_true"].median(dim=0).values
+        self.model.log2_x_true = samples["log_x_true"].median(dim=0).values
+        pyro.clear_param_store()
+
     def fit_cis(
         self,
         technical_covariates: list[str] = None,
@@ -206,7 +344,7 @@ class CisFitter:
         cis_feature: str = None,
         manual_guide_effects: pd.DataFrame = None,
         prior_strength: float = 1.0,
-        lr: float = 1e-3,
+        lr: float = None,
         niters: int = 100_000,
         nsamples: int = 1000,
         alpha_ewma: float = 0.05,
@@ -214,6 +352,10 @@ class CisFitter:
         minibatch_size: int = None,
         predictive_on_cpu: bool = True,
         independent_mu_sigma: bool = False,
+        cis_model: str = 'hierarchical',
+        n_quadrature: int = 16,
+        refit_phi: bool = True,
+        tolerance: float = 1e-4,
         **kwargs
     ):
         """
@@ -239,10 +381,10 @@ class CisFitter:
         prior_strength : float
             Weight for manual guide effects (default: 1.0)
             0 = ignore manual effects, higher = trust more
-        lr : float
-            Learning rate for Adam
+        lr : float, optional
+            Learning rate for Adam. Default 1e-3 for 'hierarchical', 1e-2 for 'marginal'.
         niters : int
-            Number of SVI iterations
+            Number of SVI iterations ('marginal': upper limit, see `tolerance`)
         nsamples : int
             Number of posterior samples
         predictive_on_cpu : bool
@@ -251,7 +393,20 @@ class CisFitter:
         alpha_ewma : float
             Exponential weight for smoothing the ELBO
         independent_mu_sigma : bool
-            Whether to use independent mu/sigma per target type
+            Whether to use independent mu/sigma per target type ('hierarchical' only)
+        cis_model : str
+            'hierarchical' (default): the original _model_x with per-cell latents and a
+            mean-field guide. 'marginal': _model_x_marginal, which integrates the per-cell
+            latent out by Gauss-Hermite quadrature, uses a full-rank Gaussian guide and
+            stops on a windowed relative-improvement rule. See docs/CIS_MARGINAL_MODEL.md.
+        n_quadrature : int
+            'marginal' only: number of Gauss-Hermite nodes.
+        refit_phi : bool
+            'marginal' only: re-estimate the cis NB dispersion with a prior centred on the
+            fit_ntc estimate. Needed because the NTC fit folds cell-level variation into phi.
+        tolerance : float
+            'marginal' only: stop when the mean loss over the last 500 steps improves on the
+            previous 500 by less than this (relative).
         kwargs :
             Additional arguments controlling priors, etc.
         """
@@ -259,6 +414,10 @@ class CisFitter:
 
         if self.model.cis_gene is None:
             raise ValueError("self.model.cis_gene must be set.")
+        if cis_model not in ('hierarchical', 'marginal'):
+            raise ValueError("cis_model must be 'hierarchical' or 'marginal'")
+        if cis_model == 'marginal' and independent_mu_sigma:
+            raise ValueError("independent_mu_sigma is only supported with cis_model='hierarchical'")
 
         # fit_cis ALWAYS uses the 'cis' modality
         # This modality is created automatically when bayesDREAM is initialized
@@ -580,6 +739,20 @@ class CisFitter:
 
         # Precompute model invariants once to avoid repeated computation in every SVI step
         phi_x_precomputed = torch.tensor(1.0 / (o_x_ntc ** 2), dtype=torch.float32, device=self.model.device)
+
+        if cis_model == 'marginal':
+            log_offset = torch.log(sum_factor_tensor)
+            if self.model.alpha_x_prefit is not None:
+                log_offset = log_offset + torch.log(alpha_x_used)
+            self._fit_cis_marginal(
+                N, G, guides_tensor, x_obs_tensor, log_offset, guide_means, phi_x_precomputed,
+                lr=1e-2 if lr is None else lr, niters=niters, nsamples=nsamples,
+                n_quadrature=n_quadrature, refit_phi=refit_phi, tolerance=tolerance,
+            )
+            print("Finished fit_cis.")
+            return
+        if lr is None:
+            lr = 1e-3
         scale_2_tensor = self._t(2.0)
         _seff_mean = sigma_eff_mean_tensor.clamp(min=1e-2)
         _seff_sd = sigma_eff_sd_tensor.clamp(min=1e-2)

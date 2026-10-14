@@ -201,6 +201,15 @@ def main(seed=0, n_cells=3000, current_niters=20000):
     results.append(summarise('current', truth_g, q(l2g), truth_c, q(l2c), secs, current_niters))
     sig = ps['sigma_eff'].reshape(-1, G).median(0).values.numpy()
 
+    # --- fit_cis(cis_model='marginal'), the package version of proposed_phi_shared_s ---
+    pyro.set_rng_seed(seed)
+    t0 = time.time()
+    model.fit_cis(sum_factor_col='sum_factor', cis_model='marginal', nsamples=1000)
+    secs = time.time() - t0
+    ps = model.posterior_samples_cis
+    results.append(summarise('fit_cis_marginal', truth_g, q(ps['log2_x_eff_g'].numpy()), truth_c,
+                             q(ps['log_x_true'].numpy()), secs, len(model.loss_x)))
+
     # --- proposed (phi fixed from fit_ntc, and phi re-estimated) ---
     y = counts.loc['CIS', model.meta['cell'].values].values
     extra = []

@@ -445,7 +445,7 @@ Fit technical model to estimate baseline overdispersion and cell-line effects fr
   - Multivariate distributions (multinomial): 100,000
 - `nsamples` (int): Number of posterior samples. Default: 1,000
 - `alpha_ewma` (float): EWMA smoothing parameter for convergence. Default: 0.05
-- `tolerance` (float): Convergence tolerance. Default: 1e-4
+- `tolerance` (float): `'marginal'` only: stop when the mean loss over 500 steps improves by less than this (relative). Default: 1e-4
 - `beta_o_beta` (float): Beta prior for overdispersion. Default: 3
 - `beta_o_alpha` (float): Alpha prior for overdispersion. Default: 9
 - `epsilon` (float): Small constant for numerical stability. Default: 1e-6
@@ -504,7 +504,7 @@ model.fit_cis(
     cis_feature=None,
     manual_guide_effects=None,
     prior_strength=1.0,
-    lr=1e-3,
+    lr=None,
     niters=100000,
     nsamples=1000,
     alpha_ewma=0.05,
@@ -515,7 +515,10 @@ model.fit_cis(
     epsilon=1e-6,
     alpha_dirichlet=0.1,
     minibatch_size=None,
-    independent_mu_sigma=False
+    independent_mu_sigma=False,
+    cis_model='hierarchical',
+    n_quadrature=16,
+    refit_phi=True
 )
 ```
 
@@ -537,8 +540,8 @@ Fit cis model to estimate direct effects on the targeted feature.
   - Used for prior-informed fitting (infrastructure in place, integration in progress)
 - `prior_strength` (float): Weight for manual guide effects. Default: 1.0
   - 0 = ignore manual effects, higher = trust more
-- `lr` (float): Learning rate. Default: 1e-3
-- `niters` (int): Number of optimization steps. Default: 100,000
+- `lr` (float, optional): Learning rate. Default: 1e-3 for `'hierarchical'`, 1e-2 for `'marginal'`
+- `niters` (int): Number of optimization steps. Default: 100,000 (upper limit for `'marginal'`)
 - `nsamples` (int): Number of posterior samples. Default: 1,000
 - `alpha_ewma` (float): EWMA smoothing parameter. Default: 0.05
 - `tolerance` (float): Convergence tolerance. Default: 1e-4
@@ -550,6 +553,10 @@ Fit cis model to estimate direct effects on the targeted feature.
 - `minibatch_size` (int, optional): Minibatch size for predictive sampling
 - `independent_mu_sigma` (bool): Whether to use independent mu/sigma per target type. Default: False
   - Requires `target` column in meta with >1 unique values
+  - Only with `cis_model='hierarchical'`
+- `cis_model` (str): `'hierarchical'` (default, original model) or `'marginal'` (per-cell latent integrated out, full-rank guide, early stopping; better calibrated and faster). See `docs/CIS_MARGINAL_MODEL.md`
+- `n_quadrature` (int): `'marginal'` only: Gauss-Hermite nodes. Default: 16
+- `refit_phi` (bool): `'marginal'` only: re-estimate the cis NB dispersion with a prior centred on the `fit_ntc` value. Default: True
 
 **Side Effects:**
 - Sets `self.x_true` (posterior cis expression per cell)
@@ -574,6 +581,9 @@ model.fit_cis(
     sum_factor_col='sum_factor',
     independent_mu_sigma=True
 )
+
+# Marginalised model (recommended for calibrated intervals)
+model.fit_cis(sum_factor_col='sum_factor', cis_model='marginal')
 ```
 
 ---

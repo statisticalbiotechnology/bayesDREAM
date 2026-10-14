@@ -533,6 +533,7 @@ All documentation is in the `docs/` directory:
 - `HIGH_MOI_GUIDE.md`: High-MOI mode guide
 - `SPLICING_LOADER_GUIDE.md`: Splicing data loading guide
 - `CIS_MODEL_PARAMETERS.md`: Cis model parameter documentation
+- `CIS_MARGINAL_MODEL.md`: `fit_cis(cis_model='marginal')`, the reparameterised cis model, with benchmark
 - `HILL_FUNCTION_PRIORS.md`: Hill function prior specification
 - `BAYESIAN_FDR.md`: Bayesian FDR approach
 - `CELL_NAMES_GUIDE.md`: Cell name handling
